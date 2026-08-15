@@ -16,6 +16,7 @@ public partial class MainWindow : Window
     private readonly SingletonService _singletonService = new();
     private readonly UpdateService _updateService = new();
     private readonly ObservableCollection<AccountProfile> _accounts = [];
+    private readonly ObservableCollection<LaunchQueueItem> _launchQueue = [];
     private readonly ObservableCollection<GamePreset> _games =
     [
         new("Dungeon Quest Reborn", "https://www.roblox.com/games/77649408247578/Dungeon-Quest-Reborn", true),
@@ -26,12 +27,16 @@ public partial class MainWindow : Window
     private WebView2? _browser;
     private AccountProfile? _activeAccount;
     private TaskCompletionSource<bool>? _externalLaunchRequest;
+    private CancellationTokenSource? _launchCancellation;
+    private string? _lastLaunchUrl;
+    private bool _isLaunching;
 
     public MainWindow()
     {
         InitializeComponent();
         WindowAppearance.ApplyModernChrome(this);
         AccountsList.ItemsSource = _accounts;
+        LaunchQueueList.ItemsSource = _launchQueue;
         GamePicker.ItemsSource = _games;
         GamePicker.SelectedIndex = 0;
         Loaded += MainWindow_Loaded;
@@ -248,67 +253,180 @@ public partial class MainWindow : Window
             return;
         }
 
+        _launchQueue.Clear();
+        foreach (var account in selectedAccounts)
+        {
+            _launchQueue.Add(new LaunchQueueItem(account));
+        }
+
+        _lastLaunchUrl = gameUrl;
+        await RunLaunchQueueAsync(_launchQueue.ToArray(), gameUrl);
+    }
+
+    private void CancelLaunch_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isLaunching)
+        {
+            Log("Cancel requested. The current Windows operation will finish before the queue stops.");
+            _launchCancellation?.Cancel();
+        }
+    }
+
+    private async void RetryFailed_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isLaunching || string.IsNullOrWhiteSpace(_lastLaunchUrl))
+        {
+            return;
+        }
+
+        var failedItems = _launchQueue.Where(item => item.State == LaunchQueueState.Failed).ToArray();
+        if (failedItems.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var item in failedItems)
+        {
+            item.State = LaunchQueueState.Waiting;
+            item.Detail = "Queued again";
+        }
+
+        await RunLaunchQueueAsync(failedItems, _lastLaunchUrl);
+    }
+
+    private async Task RunLaunchQueueAsync(IReadOnlyCollection<LaunchQueueItem> items, string gameUrl)
+    {
+        _launchCancellation?.Dispose();
+        _launchCancellation = new CancellationTokenSource();
+        var cancellationToken = _launchCancellation.Token;
+        var timeout = GetLaunchTimeout();
+        var continueOnFailure = ContinueOnFailureCheckBox.IsChecked == true;
+
+        _isLaunching = true;
         PrepareLaunch_ClickButtonState(false);
+        CancelLaunchButton.IsEnabled = true;
+        RetryFailedButton.IsEnabled = false;
+
         try
         {
-            Log($"Starting multi-launch for {selectedAccounts.Length} selected account(s).");
-            var launchedCount = 0;
-
-            foreach (var account in selectedAccounts)
+            Log($"Starting launch queue for {items.Count} account(s); timeout {timeout.TotalSeconds:0} seconds.");
+            foreach (var item in items)
             {
-                await OpenAccountAsync(account);
-                if (_browser?.CoreWebView2 is null || _activeAccount?.Id != account.Id)
+                cancellationToken.ThrowIfCancellationRequested();
+                var (success, detail) = await LaunchAccountAsync(item, gameUrl, timeout, cancellationToken);
+                item.Detail = detail;
+
+                if (success)
                 {
-                    Log($"Skipped {account.Label}: its browser profile could not be opened.");
-                    continue;
+                    item.State = LaunchQueueState.Running;
                 }
-
-                var previousProcessCount = Process.GetProcessesByName("RobloxPlayerBeta").Length;
-                if (previousProcessCount > 0)
+                else
                 {
-                    Log($"Preparing {account.Label}: requesting administrator approval to release Roblox singleton handles...");
-                    var result = await _singletonService.ReleaseAsync();
-                    foreach (var message in result.Messages)
+                    item.State = LaunchQueueState.Failed;
+                    if (!continueOnFailure)
                     {
-                        Log(message);
-                    }
+                        foreach (var remainingItem in items.Where(remaining => remaining.State == LaunchQueueState.Waiting))
+                        {
+                            remainingItem.State = LaunchQueueState.Canceled;
+                            remainingItem.Detail = "Stopped after failure";
+                        }
 
-                    if (!result.Success)
-                    {
-                        Log($"Stopped before {account.Label} because the singleton release failed.");
+                        Log("Launch queue stopped after a failure.");
                         break;
                     }
                 }
-                else
-                {
-                    Log($"Launching {account.Label} as the first Roblox client.");
-                }
-
-                var requestSent = await NavigateAndAutoLaunchAsync(gameUrl);
-                if (!requestSent)
-                {
-                    Log($"Stopped because {account.Label} did not produce a Roblox launch request.");
-                    break;
-                }
-
-                if (await WaitForAdditionalRobloxProcessAsync(previousProcessCount, TimeSpan.FromSeconds(45)))
-                {
-                    launchedCount++;
-                    Log($"{account.Label} is running ({launchedCount}/{selectedAccounts.Length} launched)." );
-                }
-                else
-                {
-                    Log($"Stopped: no new Roblox process appeared for {account.Label} within 45 seconds.");
-                    break;
-                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            foreach (var waitingItem in items.Where(item => item.State is LaunchQueueState.Waiting or LaunchQueueState.Preparing or LaunchQueueState.Launching))
+            {
+                waitingItem.State = LaunchQueueState.Canceled;
+                waitingItem.Detail = "Canceled";
             }
 
-            Log($"Multi-launch finished: {launchedCount} of {selectedAccounts.Length} selected account(s) started.");
+            Log("Launch queue canceled.");
         }
         finally
         {
+            var running = _launchQueue.Count(item => item.State == LaunchQueueState.Running);
+            var failed = _launchQueue.Count(item => item.State == LaunchQueueState.Failed);
+            Log($"Launch queue finished: {running} running, {failed} failed.");
+            _isLaunching = false;
             PrepareLaunch_ClickButtonState(true);
+            CancelLaunchButton.IsEnabled = false;
+            RetryFailedButton.IsEnabled = failed > 0;
         }
+    }
+
+    private async Task<(bool Success, string Detail)> LaunchAccountAsync(
+        LaunchQueueItem item,
+        string gameUrl,
+        TimeSpan processTimeout,
+        CancellationToken cancellationToken)
+    {
+        item.State = LaunchQueueState.Preparing;
+        item.Detail = "Opening session";
+        await OpenAccountAsync(item.Account);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (_browser?.CoreWebView2 is null || _activeAccount?.Id != item.Account.Id)
+        {
+            Log($"Skipped {item.Label}: its browser profile could not be opened.");
+            return (false, "Session unavailable");
+        }
+
+        var previousProcessCount = Process.GetProcessesByName("RobloxPlayerBeta").Length;
+        if (previousProcessCount > 0)
+        {
+            item.Detail = "Releasing singleton";
+            Log($"Preparing {item.Label}: requesting administrator approval to release Roblox singleton handles...");
+            var result = await _singletonService.ReleaseAsync();
+            foreach (var message in result.Messages)
+            {
+                Log(message);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!result.Success)
+            {
+                Log($"Could not prepare {item.Label}: singleton release failed.");
+                return (false, "Singleton release failed");
+            }
+        }
+        else
+        {
+            Log($"Launching {item.Label} as the first Roblox client.");
+        }
+
+        item.State = LaunchQueueState.Launching;
+        item.Detail = "Requesting Roblox";
+        if (!await NavigateAndAutoLaunchAsync(gameUrl, cancellationToken))
+        {
+            Log($"{item.Label} did not produce a Roblox launch request.");
+            return (false, "No launch request");
+        }
+
+        item.Detail = "Waiting for process";
+        if (!await WaitForAdditionalRobloxProcessAsync(previousProcessCount, processTimeout, cancellationToken))
+        {
+            Log($"No new Roblox process appeared for {item.Label} within {processTimeout.TotalSeconds:0} seconds.");
+            return (false, "Process timed out");
+        }
+
+        Log($"{item.Label} is running.");
+        return (true, "Roblox started");
+    }
+
+    private TimeSpan GetLaunchTimeout()
+    {
+        if (LaunchTimeoutPicker.SelectedItem is ComboBoxItem item &&
+            int.TryParse(item.Tag?.ToString(), out var seconds))
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        return TimeSpan.FromSeconds(45);
     }
 
     private void GamePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -382,7 +500,7 @@ public partial class MainWindow : Window
         ? game.Url
         : CustomUrlBox.Text.Trim();
 
-    private async Task<bool> NavigateAndAutoLaunchAsync(string gameUrl)
+    private async Task<bool> NavigateAndAutoLaunchAsync(string gameUrl, CancellationToken cancellationToken)
     {
         var browser = _browser!;
         var navigationFinished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -399,7 +517,8 @@ public partial class MainWindow : Window
         try
         {
             browser.CoreWebView2.Navigate(gameUrl);
-            var completed = await Task.WhenAny(navigationFinished.Task, Task.Delay(TimeSpan.FromSeconds(20)));
+            var completed = await Task.WhenAny(navigationFinished.Task, Task.Delay(TimeSpan.FromSeconds(20), cancellationToken));
+            cancellationToken.ThrowIfCancellationRequested();
             if (completed != navigationFinished.Task || !await navigationFinished.Task)
             {
                 Log("The Roblox game page did not finish loading. You can still use its Play button manually.");
@@ -433,7 +552,7 @@ public partial class MainWindow : Window
                 break;
             }
 
-            await Task.Delay(500);
+            await Task.Delay(500, cancellationToken);
         }
 
         if (!clicked)
@@ -442,7 +561,8 @@ public partial class MainWindow : Window
             return false;
         }
 
-        var launchResult = await Task.WhenAny(_externalLaunchRequest.Task, Task.Delay(TimeSpan.FromSeconds(12)));
+        var launchResult = await Task.WhenAny(_externalLaunchRequest.Task, Task.Delay(TimeSpan.FromSeconds(12), cancellationToken));
+        cancellationToken.ThrowIfCancellationRequested();
         if (launchResult == _externalLaunchRequest.Task && await _externalLaunchRequest.Task)
         {
             Log($"Launch request sent for {_activeAccount!.Label}.");
@@ -460,12 +580,15 @@ public partial class MainWindow : Window
         }
     }
 
-    private static async Task<bool> WaitForAdditionalRobloxProcessAsync(int previousCount, TimeSpan timeout)
+    private static async Task<bool> WaitForAdditionalRobloxProcessAsync(
+        int previousCount,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         var deadline = DateTime.UtcNow.Add(timeout);
         while (DateTime.UtcNow < deadline)
         {
-            await Task.Delay(500);
+            await Task.Delay(500, cancellationToken);
             if (Process.GetProcessesByName("RobloxPlayerBeta").Length > previousCount)
             {
                 return true;
@@ -541,6 +664,8 @@ public partial class MainWindow : Window
         RemoveAccountButton.IsEnabled = enabled;
         OpenLoginButton.IsEnabled = enabled;
         LaunchProgress.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
+        LaunchTimeoutPicker.IsEnabled = enabled;
+        ContinueOnFailureCheckBox.IsEnabled = enabled;
     }
 
     private void DisposeBrowser()
@@ -572,6 +697,8 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _launchCancellation?.Cancel();
+        _launchCancellation?.Dispose();
         DisposeBrowser();
         base.OnClosed(e);
     }

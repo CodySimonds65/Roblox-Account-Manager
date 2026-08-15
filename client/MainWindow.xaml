@@ -68,7 +68,7 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
-                <RowDefinition Height="176" />
+                <RowDefinition Height="250" />
             </Grid.RowDefinitions>
 
             <Grid Margin="2,3,2,18">
@@ -166,6 +166,7 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="76" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <Grid Margin="2,0,2,9">
@@ -173,10 +174,49 @@
                             <TextBlock Text="Activity" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
                             <TextBlock Text="  Live diagnostics" FontSize="11" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
                         </StackPanel>
-                        <Button Content="Copy log" HorizontalAlignment="Right" Style="{StaticResource CompactButton}"
-                                Click="CopyActivity_Click" />
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <TextBlock Text="Timeout" Foreground="{StaticResource MutedTextBrush}" FontSize="11"
+                                       VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <ComboBox x:Name="LaunchTimeoutPicker" Width="68" Height="29" SelectedIndex="1" Margin="0,0,7,0">
+                                <ComboBoxItem Content="30s" Tag="30" />
+                                <ComboBoxItem Content="45s" Tag="45" />
+                                <ComboBoxItem Content="60s" Tag="60" />
+                                <ComboBoxItem Content="90s" Tag="90" />
+                            </ComboBox>
+                            <CheckBox x:Name="ContinueOnFailureCheckBox" Content="Continue on failure" IsChecked="True"
+                                      VerticalAlignment="Center" Margin="0,0,8,0" />
+                            <Button x:Name="CancelLaunchButton" Content="Cancel" Style="{StaticResource CompactButton}"
+                                    Click="CancelLaunch_Click" IsEnabled="False" Margin="0,0,6,0" />
+                            <Button x:Name="RetryFailedButton" Content="Retry failed" Style="{StaticResource CompactButton}"
+                                    Click="RetryFailed_Click" IsEnabled="False" Margin="0,0,6,0" />
+                            <Button Content="Copy log" Style="{StaticResource CompactButton}" Click="CopyActivity_Click" />
+                        </StackPanel>
                     </Grid>
-                    <TextBox x:Name="ActivityLog" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True"
+                    <ListBox x:Name="LaunchQueueList" Grid.Row="1" Margin="0,0,0,8"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="#0D1016" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                        CornerRadius="8" Padding="10,7" Width="160" Margin="0,0,7,0">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
+                                            <TextBlock Text="{Binding Status}" FontSize="9" FontWeight="Bold" Foreground="#B5A7FF" />
+                                            <TextBlock Text="  •  " FontSize="9" Foreground="{StaticResource MutedTextBrush}" />
+                                            <TextBlock Text="{Binding Detail}" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
+                                                       TextTrimming="CharacterEllipsis" Width="84" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBox x:Name="ActivityLog" Grid.Row="2" IsReadOnly="True" AcceptsReturn="True"
                              TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
                              FontFamily="Cascadia Mono" FontSize="12" Background="#0B0D12" Foreground="#CBD1DE"
                              BorderBrush="#202531" Padding="10,8" />
