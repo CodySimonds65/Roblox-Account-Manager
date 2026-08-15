@@ -15,6 +15,7 @@ public partial class MainWindow : Window
     private readonly GamePresetStore _gamePresetStore = new();
     private readonly SingletonService _singletonService = new();
     private readonly UpdateService _updateService = new();
+    private readonly CompatibilityService _compatibilityService = new();
     private readonly ObservableCollection<AccountProfile> _accounts = [];
     private readonly ObservableCollection<LaunchQueueItem> _launchQueue = [];
     private readonly ObservableCollection<GamePreset> _games =
@@ -261,6 +262,22 @@ public partial class MainWindow : Window
 
         _lastLaunchUrl = gameUrl;
         await RunLaunchQueueAsync(_launchQueue.ToArray(), gameUrl);
+    }
+
+    private async void Diagnostics_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Log("Running privacy-safe compatibility diagnostics...");
+            var checks = await _compatibilityService.RunAsync();
+            new CompatibilityDialog(checks) { Owner = this }.ShowDialog();
+            Log("Compatibility diagnostics completed.");
+        }
+        catch (Exception exception)
+        {
+            Log($"Compatibility diagnostics failed: {exception.Message}");
+            MessageBox.Show(this, exception.Message, "Diagnostics failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void CancelLaunch_Click(object sender, RoutedEventArgs e)
