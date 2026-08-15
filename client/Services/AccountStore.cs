@@ -23,8 +23,16 @@ public sealed class AccountStore
     public async Task<List<AccountProfile>> LoadAsync()
     {
         Directory.CreateDirectory(AppDataDirectory);
-        return await JsonFileStore.LoadAsync(AccountFile, new List<AccountProfile>(), JsonOptions);
+        var accounts = await JsonFileStore.LoadAsync(AccountFile, new List<AccountProfile>(), JsonOptions);
+        return OrderForDisplay(accounts);
     }
+
+    public static List<AccountProfile> OrderForDisplay(IEnumerable<AccountProfile> accounts) =>
+        accounts
+            .OrderByDescending(account => account.IsFavorite)
+            .ThenBy(account => account.SortOrder)
+            .ThenBy(account => account.CreatedUtc)
+            .ToList();
 
     public async Task SaveAsync(IEnumerable<AccountProfile> accounts)
     {

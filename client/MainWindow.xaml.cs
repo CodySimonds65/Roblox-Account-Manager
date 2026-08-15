@@ -175,7 +175,6 @@ public partial class MainWindow : Window
         {
             Label = dialog.AccountLabel,
             Group = dialog.AccountGroup,
-            IsFavorite = dialog.IsFavorite,
             SortOrder = _accounts.Count
         };
         _accounts.Add(account);
@@ -192,7 +191,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var dialog = new InputDialog(account.Label, account.Group, account.IsFavorite) { Owner = this };
+        var dialog = new InputDialog(account.Label, account.Group) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -200,7 +199,6 @@ public partial class MainWindow : Window
 
         account.Label = dialog.AccountLabel;
         account.Group = dialog.AccountGroup;
-        account.IsFavorite = dialog.IsFavorite;
         await _accountStore.SaveAsync(_accounts);
         AccountsList.Items.Refresh();
         if (_activeAccount?.Id == account.Id)
@@ -214,6 +212,35 @@ public partial class MainWindow : Window
     private void SelectAllAccounts_Click(object sender, RoutedEventArgs e) => AccountsList.SelectAll();
 
     private void SelectNoAccounts_Click(object sender, RoutedEventArgs e) => AccountsList.UnselectAll();
+
+    private async void ToggleFavorite_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: AccountProfile account })
+        {
+            return;
+        }
+
+        e.Handled = true;
+        account.IsFavorite = !account.IsFavorite;
+        ReorderAccountsForDisplay();
+        await SaveAccountOrderAsync();
+        AccountsList.Items.Refresh();
+        AccountsList.ScrollIntoView(account);
+        Log($"{(account.IsFavorite ? "Favorited" : "Unfavorited")} profile: {account.Label}.");
+    }
+
+    private void ReorderAccountsForDisplay()
+    {
+        var orderedAccounts = AccountStore.OrderForDisplay(_accounts);
+        for (var targetIndex = 0; targetIndex < orderedAccounts.Count; targetIndex++)
+        {
+            var currentIndex = _accounts.IndexOf(orderedAccounts[targetIndex]);
+            if (currentIndex != targetIndex)
+            {
+                _accounts.Move(currentIndex, targetIndex);
+            }
+        }
+    }
 
     private async void MoveAccountUp_Click(object sender, RoutedEventArgs e) => await MoveSelectedAccountAsync(-1);
 
@@ -229,6 +256,11 @@ public partial class MainWindow : Window
         var oldIndex = _accounts.IndexOf(account);
         var newIndex = Math.Clamp(oldIndex + offset, 0, _accounts.Count - 1);
         if (newIndex == oldIndex)
+        {
+            return;
+        }
+
+        if (_accounts[newIndex].IsFavorite != account.IsFavorite)
         {
             return;
         }
@@ -262,6 +294,11 @@ public partial class MainWindow : Window
 
         var target = FindAncestor<ListBoxItem>((DependencyObject)e.OriginalSource)?.DataContext as AccountProfile;
         if (target is null || ReferenceEquals(source, target))
+        {
+            return;
+        }
+
+        if (source.IsFavorite != target.IsFavorite)
         {
             return;
         }

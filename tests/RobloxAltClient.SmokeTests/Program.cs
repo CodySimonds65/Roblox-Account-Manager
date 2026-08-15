@@ -91,11 +91,13 @@ try
     var accountStore = new AccountStore(testDirectory);
     var expectedAccounts = new List<AccountProfile>
     {
-        new() { Label = "Favorite", Group = "Farm", IsFavorite = true, SortOrder = 0 }
+        new() { Label = "Standard", SortOrder = 0 },
+        new() { Label = "Favorite", Group = "Farm", IsFavorite = true, SortOrder = 1 }
     };
     await accountStore.SaveAsync(expectedAccounts);
     var loadedAccounts = await accountStore.LoadAsync();
-    Require(loadedAccounts.Count == 1 && loadedAccounts[0].IsFavorite, "Account profile metadata did not reload.");
+    Require(loadedAccounts.Count == 2 && loadedAccounts[0].IsFavorite, "Favorite profiles were not sorted first.");
+    Require(loadedAccounts[0].Group == "Farm", "Account profile metadata did not reload.");
 
     var transferPath = Path.Combine(testDirectory, "preset-transfer.json");
     await PresetTransferService.ExportAsync(transferPath,
