@@ -35,6 +35,12 @@ Require(
     UpdateService.ParseSha256($"{new string('a', 63)}  RobloxAltClient.exe", "RobloxAltClient.exe") is null,
     "An invalid release checksum was accepted.");
 
+var queueItem = new LaunchQueueItem(new AccountProfile { Label = "Queue test" });
+Require(queueItem.Status == "WAITING", "A new launch queue item was not waiting.");
+queueItem.State = LaunchQueueState.Running;
+queueItem.Detail = "Roblox started";
+Require(queueItem.Status == "RUNNING" && queueItem.Detail == "Roblox started", "Launch queue status did not update.");
+
 var testDirectory = Path.Combine(Path.GetTempPath(), $"RobloxAltClient-SmokeTests-{Guid.NewGuid():N}");
 try
 {
