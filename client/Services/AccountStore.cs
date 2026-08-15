@@ -8,29 +8,26 @@ public sealed class AccountStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public string AppDataDirectory { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "RobloxAltClient");
+    public string AppDataDirectory { get; }
 
     public string WebViewDataDirectory => Path.Combine(AppDataDirectory, "WebView2");
     private string AccountFile => Path.Combine(AppDataDirectory, "accounts.json");
 
+    public AccountStore(string? appDataDirectory = null)
+    {
+        AppDataDirectory = appDataDirectory ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "RobloxAltClient");
+    }
+
     public async Task<List<AccountProfile>> LoadAsync()
     {
         Directory.CreateDirectory(AppDataDirectory);
-        if (!File.Exists(AccountFile))
-        {
-            return [];
-        }
-
-        await using var stream = File.OpenRead(AccountFile);
-        return await JsonSerializer.DeserializeAsync<List<AccountProfile>>(stream, JsonOptions) ?? [];
+        return await JsonFileStore.LoadAsync(AccountFile, new List<AccountProfile>(), JsonOptions);
     }
 
     public async Task SaveAsync(IEnumerable<AccountProfile> accounts)
     {
-        Directory.CreateDirectory(AppDataDirectory);
-        await using var stream = File.Create(AccountFile);
-        await JsonSerializer.SerializeAsync(stream, accounts, JsonOptions);
+        await JsonFileStore.SaveAsync(AccountFile, accounts.ToList(), JsonOptions);
     }
 }

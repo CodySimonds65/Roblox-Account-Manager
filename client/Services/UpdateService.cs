@@ -40,11 +40,12 @@ public sealed class UpdateService
         var expectedHash = ParseSha256(checksumText, ExecutableAssetName)
                            ?? throw new InvalidOperationException("The release checksum file is invalid.");
 
-        var updateDirectory = Path.Combine(
+        var updatesRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "RobloxAltClient",
-            "Updates",
-            release.TagName);
+            "Updates");
+        CleanupOldDownloads(updatesRoot, release.TagName);
+        var updateDirectory = Path.Combine(updatesRoot, release.TagName);
         Directory.CreateDirectory(updateDirectory);
 
         var executablePath = Path.Combine(updateDirectory, ExecutableAssetName);
@@ -120,6 +121,8 @@ public sealed class UpdateService
 
         var sourcePath = Environment.ProcessPath
                          ?? throw new InvalidOperationException("The downloaded executable path could not be determined.");
+        var backupPath = targetPath + ".previous";
+        File.Copy(targetPath, backupPath, overwrite: true);
 
         Exception? lastError = null;
         for (var attempt = 0; attempt < 10; attempt++)
@@ -127,8 +130,8 @@ public sealed class UpdateService
             try
             {
                 File.Copy(sourcePath, targetPath, overwrite: true);
-                Process.Start(new ProcessStartInfo { FileName = targetPath, UseShellExecute = true });
-                return;
+                lastError = null;
+                break;
             }
             catch (IOException exception)
             {
@@ -142,9 +145,88 @@ public sealed class UpdateService
             }
         }
 
-        throw new InvalidOperationException(
-            "Windows could not replace the existing Roblox Alt Client executable. Move it to a writable folder and try again.",
-            lastError);
+        if (lastError is not null)
+        {
+            File.Delete(backupPath);
+            throw new InvalidOperationException(
+                "Windows could not replace the existing Roblox Alt Client executable. Move it to a writable folder and try again.",
+                lastError);
+        }
+
+        var confirmationPath = Path.Combine(
+            Path.GetTempPath(),
+            $"RobloxAltClient-update-{Guid.NewGuid():N}.ok");
+        Process? updatedClient = null;
+        Exception? updateError = null;
+        try
+        {
+            var startInfo = new ProcessStartInfo { FileName = targetPath, UseShellExecute = false };
+            startInfo.ArgumentList.Add("--confirm-update");
+            startInfo.ArgumentList.Add(confirmationPath);
+            updatedClient = Process.Start(startInfo)
+                            ?? throw new InvalidOperationException("The updated client could not be started.");
+
+            for (var attempt = 0; attempt < 60; attempt++)
+            {
+                if (File.Exists(confirmationPath))
+                {
+                    File.Delete(confirmationPath);
+                    File.Delete(backupPath);
+                    return;
+                }
+
+                if (updatedClient.HasExited)
+                {
+                    break;
+                }
+
+                Thread.Sleep(500);
+            }
+
+            updateError = new InvalidOperationException("The updated client did not confirm a successful start.");
+        }
+        catch (Exception exception)
+        {
+            updateError = exception;
+        }
+        finally
+        {
+            if (File.Exists(confirmationPath))
+            {
+                File.Delete(confirmationPath);
+            }
+        }
+
+        if (updatedClient is not null && !updatedClient.HasExited)
+        {
+            updatedClient.Kill(entireProcessTree: true);
+            updatedClient.WaitForExit(10_000);
+        }
+
+        File.Copy(backupPath, targetPath, overwrite: true);
+        File.Delete(backupPath);
+        Process.Start(new ProcessStartInfo { FileName = targetPath, UseShellExecute = true });
+        throw new InvalidOperationException("The update did not start successfully, so the previous version was restored.", updateError);
+    }
+
+    public static void ConfirmUpdatedLaunch(string[] args)
+    {
+        if (args.Length != 2 || !string.Equals(args[0], "--confirm-update", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var confirmationPath = Path.GetFullPath(args[1]);
+        var temporaryRoot = Path.GetFullPath(Path.GetTempPath());
+        var fileName = Path.GetFileName(confirmationPath);
+        if (!confirmationPath.StartsWith(temporaryRoot, StringComparison.OrdinalIgnoreCase) ||
+            !fileName.StartsWith("RobloxAltClient-update-", StringComparison.Ordinal) ||
+            !fileName.EndsWith(".ok", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        File.WriteAllText(confirmationPath, "ready");
     }
 
     public static bool TryParseReleaseVersion(string tag, out Version version)
@@ -204,6 +286,35 @@ public sealed class UpdateService
         client.DefaultRequestHeaders.UserAgent.ParseAdd("RobloxAltClient-Updater");
         client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         return client;
+    }
+
+    private static void CleanupOldDownloads(string updatesRoot, string currentTag)
+    {
+        if (!Directory.Exists(updatesRoot))
+        {
+            return;
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(updatesRoot))
+        {
+            if (string.Equals(Path.GetFileName(directory), currentTag, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            try
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+            catch (IOException)
+            {
+                // A prior updater may still be exiting. Cleanup can wait until the next check.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Update checks should not fail because an old staging directory is locked.
+            }
+        }
     }
 
     private sealed record GitHubRelease(

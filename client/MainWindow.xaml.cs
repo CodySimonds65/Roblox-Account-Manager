@@ -53,6 +53,8 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        UpdateService.ConfirmUpdatedLaunch(Environment.GetCommandLineArgs().Skip(1).ToArray());
+
         try
         {
             _settings = await _settingsStore.LoadAsync();
