@@ -1,6 +1,6 @@
 # .NET build output
-client/bin/
-client/obj/
+**/bin/
+**/obj/
 
 # Packaged output
 dist/

@@ -12,12 +12,13 @@ namespace RobloxAltClient;
 public partial class MainWindow : Window
 {
     private readonly AccountStore _accountStore = new();
+    private readonly GamePresetStore _gamePresetStore = new();
     private readonly SingletonService _singletonService = new();
     private readonly ObservableCollection<AccountProfile> _accounts = [];
-    private readonly GamePreset[] _games =
+    private readonly ObservableCollection<GamePreset> _games =
     [
-        new("Dungeon Quest Reborn", "https://www.roblox.com/games/77649408247578/Dungeon-Quest-Reborn"),
-        new("Custom URL", "")
+        new("Dungeon Quest Reborn", "https://www.roblox.com/games/77649408247578/Dungeon-Quest-Reborn", true),
+        new("Custom URL", "", true)
     ];
 
     private CoreWebView2Environment? _webEnvironment;
@@ -42,6 +43,16 @@ public partial class MainWindow : Window
             foreach (var account in await _accountStore.LoadAsync())
             {
                 _accounts.Add(account);
+            }
+
+            foreach (var preset in await _gamePresetStore.LoadAsync())
+            {
+                if (!string.IsNullOrWhiteSpace(preset.Name) &&
+                    GamePreset.TryNormalizeRobloxGameUrl(preset.Url, out var normalizedUrl) &&
+                    !_games.Any(game => string.Equals(game.Name, preset.Name, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _games.Insert(_games.Count - 1, new GamePreset(preset.Name, normalizedUrl));
+                }
             }
 
             _webEnvironment = await CoreWebView2Environment.CreateAsync(
@@ -194,10 +205,9 @@ public partial class MainWindow : Window
         }
 
         var gameUrl = GetSelectedGameUrl();
-        if (!Uri.TryCreate(gameUrl, UriKind.Absolute, out var uri) ||
-            !string.Equals(uri.Host, "www.roblox.com", StringComparison.OrdinalIgnoreCase))
+        if (!GamePreset.TryNormalizeRobloxGameUrl(gameUrl, out gameUrl))
         {
-            MessageBox.Show(this, "Enter a valid https://www.roblox.com game URL.", "Invalid game URL");
+            MessageBox.Show(this, "Enter a valid Roblox game-page URL.", "Invalid game URL");
             return;
         }
 
@@ -269,7 +279,67 @@ public partial class MainWindow : Window
         var isCustom = GamePicker.SelectedItem is GamePreset game && string.IsNullOrEmpty(game.Url);
         CustomUrlBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
         PresetHint.Visibility = isCustom ? Visibility.Collapsed : Visibility.Visible;
+        RemoveGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        if (!isCustom && GamePicker.SelectedItem is GamePreset selectedGame)
+        {
+            PresetHintText.Text = $"Ready to launch {selectedGame.Name}";
+        }
     }
+
+    private async void AddGamePreset_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new GamePresetDialog { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        if (_games.Any(game => string.Equals(game.Name, dialog.GameName, StringComparison.OrdinalIgnoreCase)))
+        {
+            MessageBox.Show(this, "A preset with that game name already exists.", "Duplicate preset");
+            return;
+        }
+
+        if (_games.Any(game => !string.IsNullOrEmpty(game.Url) &&
+                               string.Equals(game.Url, dialog.GameUrl, StringComparison.OrdinalIgnoreCase)))
+        {
+            MessageBox.Show(this, "That Roblox game URL is already saved as a preset.", "Duplicate preset");
+            return;
+        }
+
+        var preset = new GamePreset(dialog.GameName, dialog.GameUrl);
+        _games.Insert(_games.Count - 1, preset);
+        await SaveCustomGamePresetsAsync();
+        GamePicker.SelectedItem = preset;
+        Log($"Added game preset: {preset.Name}.");
+    }
+
+    private async void RemoveGamePreset_Click(object sender, RoutedEventArgs e)
+    {
+        if (GamePicker.SelectedItem is not GamePreset { IsBuiltIn: false } preset)
+        {
+            return;
+        }
+
+        var answer = MessageBox.Show(
+            this,
+            $"Remove the '{preset.Name}' game preset?",
+            "Remove game preset",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _games.Remove(preset);
+        await SaveCustomGamePresetsAsync();
+        GamePicker.SelectedIndex = 0;
+        Log($"Removed game preset: {preset.Name}.");
+    }
+
+    private Task SaveCustomGamePresetsAsync() =>
+        _gamePresetStore.SaveAsync(_games.Where(game => !game.IsBuiltIn));
 
     private string GetSelectedGameUrl() => GamePicker.SelectedItem is GamePreset game && !string.IsNullOrEmpty(game.Url)
         ? game.Url
@@ -428,6 +498,8 @@ public partial class MainWindow : Window
         AccountsList.IsEnabled = enabled;
         GamePicker.IsEnabled = enabled;
         CustomUrlBox.IsEnabled = enabled;
+        AddGamePresetButton.IsEnabled = enabled;
+        RemoveGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         AddAccountButton.IsEnabled = enabled;
         RemoveAccountButton.IsEnabled = enabled;
         OpenLoginButton.IsEnabled = enabled;

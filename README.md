@@ -1,6 +1,6 @@
 # Roblox Alt Client
 
-An open-source Windows client for launching multiple Roblox accounts with isolated local login sessions. It includes a desktop interface, Dungeon Quest Reborn preset, custom game URLs, and automatic Roblox singleton-handle release.
+An open-source Windows client for launching multiple Roblox accounts with isolated local login sessions. It includes a desktop interface, built-in and user-created game presets, custom game URLs, and automatic Roblox singleton-handle release.
 
 ```mermaid
 flowchart LR
@@ -16,7 +16,7 @@ flowchart LR
 - No passwords, `.ROBLOSECURITY` tokens, or credentials are collected by the app.
 - Nothing is uploaded or sent to the developer.
 - Login sessions remain locally inside separate Microsoft WebView2 profiles.
-- Only profile labels, IDs, and browser-session data are saved on the user's computer.
+- Only profile labels, IDs, custom game presets, and browser-session data are saved on the user's computer.
 - Removing an account through the client clears its active local browser session.
 
 ## Run the client
@@ -26,7 +26,7 @@ Use either:
 - [Download the latest `RobloxAltClient.exe`](https://github.com/CodySimonds65/roblox-alt-launcher/releases/latest/download/RobloxAltClient.exe)
 - Run `run-client.cmd` from a source checkout
 
-Then add account profiles and sign in directly on Roblox's official page. Check one or more profiles, select a game, and click **Auto-launch selected**. The client launches each account in sequence, waiting for its Roblox process before preparing the next one. If Roblox changes its page, the visible Play button remains available as a fallback.
+Then add account profiles and sign in directly on Roblox's official page. Check one or more profiles, select a game, and click **Auto-launch selected**. Use the **+** button beside the game dropdown to save your own named Roblox game presets; they remain local to your PC. The client launches each account in sequence, waiting for its Roblox process before preparing the next one. If Roblox changes its page, the visible Play button remains available as a fallback.
 
 The Activity panel is selectable and copy-pasteable. Use **Copy all** to copy the complete diagnostic log.
 
