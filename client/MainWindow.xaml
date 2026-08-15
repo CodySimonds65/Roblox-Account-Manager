@@ -177,7 +177,8 @@
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                             <TextBlock Text="Timeout" Foreground="{StaticResource MutedTextBrush}" FontSize="11"
                                        VerticalAlignment="Center" Margin="0,0,6,0" />
-                            <ComboBox x:Name="LaunchTimeoutPicker" Width="68" Height="29" SelectedIndex="1" Margin="0,0,7,0">
+                            <ComboBox x:Name="LaunchTimeoutPicker" Width="82" Height="36" Padding="10,6"
+                                      SelectedIndex="1" Margin="0,0,7,0">
                                 <ComboBoxItem Content="30s" Tag="30" />
                                 <ComboBoxItem Content="45s" Tag="45" />
                                 <ComboBoxItem Content="60s" Tag="60" />
