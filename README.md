@@ -15,6 +15,7 @@ flowchart LR
 
 - No passwords, `.ROBLOSECURITY` tokens, or credentials are collected by the app.
 - Nothing is uploaded or sent to the developer.
+- The client contacts GitHub at startup only to check for published updates.
 - Login sessions remain locally inside separate Microsoft WebView2 profiles.
 - Only profile labels, IDs, custom game presets, and browser-session data are saved on the user's computer.
 - Removing an account through the client clears its active local browser session.
@@ -32,7 +33,7 @@ The Activity panel is selectable and copy-pasteable. Use **Copy all** to copy th
 
 ## Prebuilt release
 
-The release is a single self-contained Windows x64 executable. Users only need `RobloxAltClient.exe`; .NET is included. Each release also includes `SHA256SUMS.txt` so the download can be verified. Microsoft WebView2 Runtime is the only system requirement. It is included with Windows 11, and the client links to Microsoft's installer if it is missing.
+The release is a single self-contained Windows x64 executable. Users only need `RobloxAltClient.exe`; .NET is included. The client checks GitHub releases at startup, downloads newer versions in the background, verifies them against `SHA256SUMS.txt`, and asks before restarting to install. Microsoft WebView2 Runtime is the only system requirement. It is included with Windows 11, and the client links to Microsoft's installer if it is missing.
 
 On the first multi-launch, the client downloads Sysinternals Handle directly from Microsoft and caches it under `%LOCALAPPDATA%\RobloxAltClient\Tools`. The Microsoft utility is not redistributed with this project.
 

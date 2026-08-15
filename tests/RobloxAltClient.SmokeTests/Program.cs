@@ -25,6 +25,16 @@ Require(
     !GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/home", out _),
     "A non-game Roblox URL was accepted.");
 
+Require(
+    UpdateService.TryParseReleaseVersion("v1.2.3", out var releaseVersion) && releaseVersion == new Version(1, 2, 3),
+    "A valid release version was rejected.");
+Require(
+    UpdateService.ParseSha256($"{new string('a', 64)}  RobloxAltClient.exe", "RobloxAltClient.exe") == new string('a', 64),
+    "A valid release checksum was rejected.");
+Require(
+    UpdateService.ParseSha256($"{new string('a', 63)}  RobloxAltClient.exe", "RobloxAltClient.exe") is null,
+    "An invalid release checksum was accepted.");
+
 var testDirectory = Path.Combine(Path.GetTempPath(), $"RobloxAltClient-SmokeTests-{Guid.NewGuid():N}");
 try
 {

@@ -14,6 +14,7 @@ public partial class MainWindow : Window
     private readonly AccountStore _accountStore = new();
     private readonly GamePresetStore _gamePresetStore = new();
     private readonly SingletonService _singletonService = new();
+    private readonly UpdateService _updateService = new();
     private readonly ObservableCollection<AccountProfile> _accounts = [];
     private readonly ObservableCollection<GamePreset> _games =
     [
@@ -38,6 +39,8 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        _ = CheckForUpdatesAsync();
+
         try
         {
             foreach (var account in await _accountStore.LoadAsync())
@@ -87,6 +90,40 @@ public partial class MainWindow : Window
         {
             Log($"Startup error: {exception.Message}");
             MessageBox.Show(this, exception.Message, "Roblox Alt Client startup error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            Log($"Checking for updates (current version {_updateService.CurrentVersion.ToString(3)})...");
+            var package = await _updateService.CheckAndDownloadAsync();
+            if (package is null)
+            {
+                Log("Roblox Alt Client is up to date.");
+                return;
+            }
+
+            Log($"Update {package.Tag} downloaded and verified.");
+            var answer = MessageBox.Show(
+                this,
+                $"Roblox Alt Client {package.Tag} is ready. Restart now to install it?",
+                "Update ready",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Information);
+            if (answer != MessageBoxResult.Yes)
+            {
+                Log("Update postponed until the next launch.");
+                return;
+            }
+
+            UpdateService.StartInstaller(package);
+            Application.Current.Shutdown();
+        }
+        catch (Exception exception)
+        {
+            Log($"Update check skipped: {exception.Message}");
         }
     }
 

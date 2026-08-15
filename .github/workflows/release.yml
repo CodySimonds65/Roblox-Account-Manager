@@ -79,7 +79,9 @@ jobs:
       - name: Build client
         if: steps.version.outputs.release == 'true'
         shell: pwsh
-        run: dotnet build .\client\RobloxAltClient.csproj -c Release
+        run: |
+          $version = '${{ steps.version.outputs.tag }}'.TrimStart('v')
+          dotnet build .\client\RobloxAltClient.csproj -c Release -p:Version=$version
 
       - name: Run smoke tests
         if: steps.version.outputs.release == 'true'
@@ -95,7 +97,9 @@ jobs:
       - name: Publish standalone client
         if: steps.version.outputs.release == 'true'
         shell: pwsh
-        run: dotnet publish .\client\RobloxAltClient.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\release
+        run: |
+          $version = '${{ steps.version.outputs.tag }}'.TrimStart('v')
+          dotnet publish .\client\RobloxAltClient.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=$version -o .\release
 
       - name: Create checksum
         if: steps.version.outputs.release == 'true'
