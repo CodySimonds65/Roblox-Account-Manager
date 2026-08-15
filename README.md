@@ -1,6 +1,6 @@
 # Roblox Alt Client
 
-An open-source Windows client for launching multiple Roblox accounts with isolated local login sessions. It includes a desktop interface, built-in and user-created game presets, custom game URLs, and automatic Roblox singleton-handle release.
+An open-source Windows launcher for running multiple Roblox accounts with separate local login sessions.
 
 ```mermaid
 flowchart LR
@@ -11,46 +11,38 @@ flowchart LR
     E --> F["Additional Roblox client"]
 ```
 
+## Download and use
+
+[Download the latest `RobloxAltClient.exe`](https://github.com/CodySimonds65/roblox-alt-launcher/releases/latest/download/RobloxAltClient.exe)
+
+1. Add a profile and sign in on Roblox.
+2. Select one or more profiles.
+3. Choose a game preset or paste a Roblox game URL.
+4. Click **Auto-launch selected**.
+
+The Windows x64 EXE includes .NET. Microsoft WebView2 Runtime is required. Updates are downloaded from GitHub, checksum-verified, and installed after you approve a restart.
+
 ## Privacy
 
-- No passwords, `.ROBLOSECURITY` tokens, or credentials are collected by the app.
-- Nothing is uploaded or sent to the developer.
-- The client contacts GitHub at startup only to check for published updates.
-- Login sessions remain locally inside separate Microsoft WebView2 profiles.
-- Only profile labels, IDs, custom game presets, and browser-session data are saved on the user's computer.
-- Removing an account through the client clears its active local browser session.
-
-## Run the client
-
-Use either:
-
-- [Download the latest `RobloxAltClient.exe`](https://github.com/CodySimonds65/roblox-alt-launcher/releases/latest/download/RobloxAltClient.exe)
-- Run `run-client.cmd` from a source checkout
-
-Then add account profiles and sign in directly on Roblox's official page. Check one or more profiles, select a game, and click **Auto-launch selected**. Use the **+** button beside the game dropdown to save your own named Roblox game presets; they remain local to your PC. The client launches each account in sequence, waiting for its Roblox process before preparing the next one. If Roblox changes its page, the visible Play button remains available as a fallback.
-
-The Activity panel is selectable and copy-pasteable. Use **Copy all** to copy the complete diagnostic log.
-
-## Prebuilt release
-
-The release is a single self-contained Windows x64 executable. Users only need `RobloxAltClient.exe`; .NET is included. The client checks GitHub releases at startup, downloads newer versions in the background, verifies them against `SHA256SUMS.txt`, and asks before restarting to install. Microsoft WebView2 Runtime is the only system requirement. It is included with Windows 11, and the client links to Microsoft's installer if it is missing.
-
-On the first multi-launch, the client downloads Sysinternals Handle directly from Microsoft and caches it under `%LOCALAPPDATA%\RobloxAltClient\Tools`. The Microsoft utility is not redistributed with this project.
+- Credentials and `.ROBLOSECURITY` tokens are never collected or sent to the developer.
+- Profiles, login sessions, and game presets stay on your computer.
+- The client contacts Roblox, GitHub for updates, and Microsoft for Sysinternals Handle.
+- Removing a profile clears its active local browser session.
 
 ## Build it yourself
 
-Requirements for compiling: Windows, .NET 8 SDK or newer, and the Microsoft WebView2 Runtime.
-
-Run:
+Requires Windows, the .NET 8 SDK or newer, and Microsoft WebView2 Runtime.
 
 ```text
 build-client.cmd
 ```
 
-The compiled client is written to `release\RobloxAltClient.exe`. Source code is under `client\` and released under the MIT License so users can audit and compile it themselves instead of trusting a prebuilt executable.
+Output: `release\RobloxAltClient.exe`. The source is under `client\` and licensed under MIT.
 
-## PowerShell version
+## Notes
 
-The earlier guided launcher remains available through `launch.cmd`. It uses `Launch-RobloxAlts.ps1` and downloads Sysinternals Handle directly from Microsoft when needed.
+- The first multi-launch downloads Sysinternals Handle to `%LOCALAPPDATA%\RobloxAltClient\Tools`.
+- The original PowerShell launcher remains available through `launch.cmd`.
+- The Activity log can be selected or copied with **Copy all**.
 
 Roblox updates may change or disable multi-instance behavior. Use the project only where permitted by Roblox and the applicable game rules.
