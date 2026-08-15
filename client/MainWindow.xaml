@@ -43,18 +43,61 @@
                     </Border>
                 </Grid>
 
-                <ListBox x:Name="AccountsList" Grid.Row="2" SelectionMode="Multiple"
-                         SelectionChanged="AccountsList_SelectionChanged">
+                <ListBox x:Name="AccountsList" Grid.Row="2" SelectionMode="Multiple" AllowDrop="True"
+                         SelectionChanged="AccountsList_SelectionChanged"
+                         PreviewMouseLeftButtonDown="AccountsList_PreviewMouseLeftButtonDown"
+                         PreviewMouseMove="AccountsList_PreviewMouseMove" Drop="AccountsList_Drop">
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <CheckBox Content="{Binding Label}"
-                                      IsChecked="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=IsSelected, Mode=TwoWay}" />
+                            <CheckBox IsChecked="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=IsSelected, Mode=TwoWay}">
+                                <Grid Margin="0,0,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding Group}" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" Text="★" Foreground="#F5C451" Margin="7,0,0,0" VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+                            </CheckBox>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
 
                 <StackPanel Grid.Row="3" Margin="0,14,0,0">
                     <Button x:Name="AddAccountButton" Content="＋  Add account profile" Click="AddAccount_Click" />
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button Content="Select all" Click="SelectAllAccounts_Click" Style="{StaticResource CompactButton}" Margin="0,0,4,0" />
+                        <Button Grid.Column="1" Content="Select none" Click="SelectNoAccounts_Click" Style="{StaticResource CompactButton}" Margin="4,0,0,0" />
+                    </Grid>
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="EditAccountButton" Content="Edit profile" Click="EditAccount_Click" Style="{StaticResource SecondaryButton}" Margin="0,0,6,0" />
+                        <Button Grid.Column="1" Content="↑" ToolTip="Move profile up" Click="MoveAccountUp_Click" Style="{StaticResource CompactButton}" Width="34" Margin="0,0,5,0" />
+                        <Button Grid.Column="2" Content="↓" ToolTip="Move profile down" Click="MoveAccountDown_Click" Style="{StaticResource CompactButton}" Width="34" />
+                    </Grid>
                     <Button x:Name="RemoveAccountButton" Content="Remove selected session" Click="RemoveAccount_Click"
                             Style="{StaticResource DangerButton}" Margin="0,8,0,0" />
                     <TextBlock Text="Sessions stay isolated and local to this PC." TextWrapping="Wrap"
@@ -78,6 +121,8 @@
                                Foreground="{StaticResource MutedTextBrush}" FontSize="13" Margin="0,3,0,0" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button Content="Settings" Click="Settings_Click" Style="{StaticResource SecondaryButton}"
+                            Padding="12,6" Margin="0,0,8,0" />
                     <Button Content="Diagnostics" Click="Diagnostics_Click" Style="{StaticResource SecondaryButton}"
                             Padding="12,6" Margin="0,0,8,0" />
                     <Border Background="#10261F" BorderBrush="#1C4B3C" BorderThickness="1" CornerRadius="12" Padding="10,5">

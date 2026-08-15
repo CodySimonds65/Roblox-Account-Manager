@@ -1,7 +1,10 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using RobloxAltClient.Models;
@@ -16,6 +19,8 @@ public partial class MainWindow : Window
     private readonly SingletonService _singletonService = new();
     private readonly UpdateService _updateService = new();
     private readonly CompatibilityService _compatibilityService = new();
+    private readonly SettingsStore _settingsStore = new();
+    private readonly RobloxLauncherService _robloxLauncherService = new();
     private readonly ObservableCollection<AccountProfile> _accounts = [];
     private readonly ObservableCollection<LaunchQueueItem> _launchQueue = [];
     private readonly ObservableCollection<GamePreset> _games =
@@ -31,6 +36,9 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _launchCancellation;
     private string? _lastLaunchUrl;
     private bool _isLaunching;
+    private LauncherSettings _settings = new();
+    private Point _accountDragStart;
+    private bool _startupComplete;
 
     public MainWindow()
     {
@@ -45,12 +53,25 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        _ = CheckForUpdatesAsync();
-
         try
         {
-            foreach (var account in await _accountStore.LoadAsync())
+            _settings = await _settingsStore.LoadAsync();
+            await ApplyPendingDataCleanupAsync();
+            ApplySettingsToControls();
+            if (_settings.UpdateChecksEnabled)
             {
+                _ = CheckForUpdatesAsync();
+            }
+            else
+            {
+                Log("Automatic update checks are disabled in Settings.");
+            }
+
+            var loadedAccounts = await _accountStore.LoadAsync();
+            for (var index = 0; index < loadedAccounts.Count; index++)
+            {
+                var account = loadedAccounts[index];
+                account.SortOrder = index;
                 _accounts.Add(account);
             }
 
@@ -71,8 +92,11 @@ public partial class MainWindow : Window
             Log("Ready. Add an account profile or select an existing one.");
             if (_accounts.Count > 0)
             {
-                AccountsList.SelectedIndex = 0;
+                RestoreRememberedSelections();
             }
+
+            RestoreRememberedGame();
+            _startupComplete = true;
         }
         catch (WebView2RuntimeNotFoundException)
         {
@@ -141,11 +165,132 @@ public partial class MainWindow : Window
             return;
         }
 
-        var account = new AccountProfile { Label = dialog.AccountLabel };
+        var account = new AccountProfile
+        {
+            Label = dialog.AccountLabel,
+            Group = dialog.AccountGroup,
+            IsFavorite = dialog.IsFavorite,
+            SortOrder = _accounts.Count
+        };
         _accounts.Add(account);
         await _accountStore.SaveAsync(_accounts);
         AccountsList.SelectedItem = account;
         Log($"Created isolated browser profile for {account.Label}. Sign in directly on Roblox's page.");
+    }
+
+    private async void EditAccount_Click(object sender, RoutedEventArgs e)
+    {
+        if (AccountsList.SelectedItem is not AccountProfile account)
+        {
+            MessageBox.Show(this, "Select one account profile to edit.", "No profile selected");
+            return;
+        }
+
+        var dialog = new InputDialog(account.Label, account.Group, account.IsFavorite) { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        account.Label = dialog.AccountLabel;
+        account.Group = dialog.AccountGroup;
+        account.IsFavorite = dialog.IsFavorite;
+        await _accountStore.SaveAsync(_accounts);
+        AccountsList.Items.Refresh();
+        if (_activeAccount?.Id == account.Id)
+        {
+            ActiveProfileText.Text = account.Label;
+        }
+
+        Log($"Updated account profile: {account.Label}.");
+    }
+
+    private void SelectAllAccounts_Click(object sender, RoutedEventArgs e) => AccountsList.SelectAll();
+
+    private void SelectNoAccounts_Click(object sender, RoutedEventArgs e) => AccountsList.UnselectAll();
+
+    private async void MoveAccountUp_Click(object sender, RoutedEventArgs e) => await MoveSelectedAccountAsync(-1);
+
+    private async void MoveAccountDown_Click(object sender, RoutedEventArgs e) => await MoveSelectedAccountAsync(1);
+
+    private async Task MoveSelectedAccountAsync(int offset)
+    {
+        if (AccountsList.SelectedItem is not AccountProfile account)
+        {
+            return;
+        }
+
+        var oldIndex = _accounts.IndexOf(account);
+        var newIndex = Math.Clamp(oldIndex + offset, 0, _accounts.Count - 1);
+        if (newIndex == oldIndex)
+        {
+            return;
+        }
+
+        _accounts.Move(oldIndex, newIndex);
+        AccountsList.SelectedItem = account;
+        await SaveAccountOrderAsync();
+    }
+
+    private void AccountsList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e) =>
+        _accountDragStart = e.GetPosition(AccountsList);
+
+    private void AccountsList_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed ||
+            Math.Abs(e.GetPosition(AccountsList).Y - _accountDragStart.Y) < SystemParameters.MinimumVerticalDragDistance ||
+            AccountsList.SelectedItem is not AccountProfile account)
+        {
+            return;
+        }
+
+        DragDrop.DoDragDrop(AccountsList, account, DragDropEffects.Move);
+    }
+
+    private async void AccountsList_Drop(object sender, DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(typeof(AccountProfile)) || e.Data.GetData(typeof(AccountProfile)) is not AccountProfile source)
+        {
+            return;
+        }
+
+        var target = FindAncestor<ListBoxItem>((DependencyObject)e.OriginalSource)?.DataContext as AccountProfile;
+        if (target is null || ReferenceEquals(source, target))
+        {
+            return;
+        }
+
+        var oldIndex = _accounts.IndexOf(source);
+        var newIndex = _accounts.IndexOf(target);
+        _accounts.Move(oldIndex, newIndex);
+        AccountsList.SelectedItem = source;
+        await SaveAccountOrderAsync();
+        Log($"Moved {source.Label} in the profile list.");
+    }
+
+    private async Task SaveAccountOrderAsync()
+    {
+        for (var index = 0; index < _accounts.Count; index++)
+        {
+            _accounts[index].SortOrder = index;
+        }
+
+        await _accountStore.SaveAsync(_accounts);
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T match)
+            {
+                return match;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
     }
 
     private async void RemoveAccount_Click(object sender, RoutedEventArgs e)
@@ -173,7 +318,7 @@ public partial class MainWindow : Window
         }
 
         _accounts.Remove(account);
-        await _accountStore.SaveAsync(_accounts);
+        await SaveAccountOrderAsync();
         _activeAccount = null;
         ActiveProfileText.Text = "No profile selected";
         BrowserPlaceholder.Visibility = Visibility.Visible;
@@ -185,6 +330,11 @@ public partial class MainWindow : Window
         if (AccountsList.SelectedItem is AccountProfile account)
         {
             await OpenAccountAsync(account);
+        }
+
+        if (_startupComplete)
+        {
+            await SaveRememberedStateAsync();
         }
     }
 
@@ -280,6 +430,109 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new SettingsDialog(_settings) { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        if (dialog.ClearToolsRequested)
+        {
+            var toolsDirectory = Path.Combine(_accountStore.AppDataDirectory, "Tools");
+            if (Directory.Exists(toolsDirectory))
+            {
+                Directory.Delete(toolsDirectory, recursive: true);
+                Log("Cleared the downloaded Sysinternals tool cache.");
+            }
+        }
+
+        if (dialog.ClearSessionsRequested)
+        {
+            _settings.ClearBrowserDataOnNextStart = true;
+            Log("All browser sessions will be cleared on the next restart.");
+        }
+
+        ApplySettingsToControls();
+        await SaveRememberedStateAsync();
+        Log("Launcher settings saved.");
+    }
+
+    private async Task ApplyPendingDataCleanupAsync()
+    {
+        if (!_settings.ClearBrowserDataOnNextStart)
+        {
+            return;
+        }
+
+        if (Directory.Exists(_accountStore.WebViewDataDirectory))
+        {
+            Directory.Delete(_accountStore.WebViewDataDirectory, recursive: true);
+        }
+
+        _settings.ClearBrowserDataOnNextStart = false;
+        await _settingsStore.SaveAsync(_settings);
+        Log("Cleared all saved Roblox browser sessions.");
+    }
+
+    private void ApplySettingsToControls()
+    {
+        ContinueOnFailureCheckBox.IsChecked = _settings.ContinueOnFailure;
+        LaunchTimeoutPicker.SelectedItem = LaunchTimeoutPicker.Items.Cast<ComboBoxItem>()
+            .FirstOrDefault(item => string.Equals(item.Tag?.ToString(), _settings.LaunchTimeoutSeconds.ToString(), StringComparison.Ordinal))
+            ?? LaunchTimeoutPicker.Items[1];
+    }
+
+    private void RestoreRememberedSelections()
+    {
+        if (!_settings.RememberSelections || _settings.LastSelectedProfileIds.Count == 0)
+        {
+            AccountsList.SelectedIndex = 0;
+            return;
+        }
+
+        foreach (var account in _accounts.Where(account => _settings.LastSelectedProfileIds.Contains(account.Id, StringComparer.Ordinal)))
+        {
+            AccountsList.SelectedItems.Add(account);
+        }
+
+        if (AccountsList.SelectedItems.Count == 0)
+        {
+            AccountsList.SelectedIndex = 0;
+        }
+    }
+
+    private void RestoreRememberedGame()
+    {
+        if (!_settings.RememberSelections || string.IsNullOrWhiteSpace(_settings.LastGameName))
+        {
+            return;
+        }
+
+        var rememberedGame = _games.FirstOrDefault(game => string.Equals(game.Name, _settings.LastGameName, StringComparison.Ordinal));
+        if (rememberedGame is not null)
+        {
+            GamePicker.SelectedItem = rememberedGame;
+        }
+    }
+
+    private async Task SaveRememberedStateAsync()
+    {
+        if (_settings.RememberSelections)
+        {
+            _settings.LastSelectedProfileIds = AccountsList.SelectedItems.Cast<AccountProfile>().Select(account => account.Id).ToList();
+            _settings.LastGameName = (GamePicker.SelectedItem as GamePreset)?.Name ?? string.Empty;
+        }
+        else
+        {
+            _settings.LastSelectedProfileIds.Clear();
+            _settings.LastGameName = string.Empty;
+        }
+
+        await _settingsStore.SaveAsync(_settings);
+    }
+
     private void CancelLaunch_Click(object sender, RoutedEventArgs e)
     {
         if (_isLaunching)
@@ -318,6 +571,9 @@ public partial class MainWindow : Window
         var cancellationToken = _launchCancellation.Token;
         var timeout = GetLaunchTimeout();
         var continueOnFailure = ContinueOnFailureCheckBox.IsChecked == true;
+        _settings.LaunchTimeoutSeconds = (int)timeout.TotalSeconds;
+        _settings.ContinueOnFailure = continueOnFailure;
+        await _settingsStore.SaveAsync(_settings);
 
         _isLaunching = true;
         PrepareLaunch_ClickButtonState(false);
@@ -327,9 +583,17 @@ public partial class MainWindow : Window
         try
         {
             Log($"Starting launch queue for {items.Count} account(s); timeout {timeout.TotalSeconds:0} seconds.");
+            var firstItem = true;
             foreach (var item in items)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!firstItem && _settings.LaunchDelaySeconds > 0)
+                {
+                    Log($"Waiting {_settings.LaunchDelaySeconds} seconds before the next account...");
+                    await Task.Delay(TimeSpan.FromSeconds(_settings.LaunchDelaySeconds), cancellationToken);
+                }
+
+                firstItem = false;
                 var (success, detail) = await LaunchAccountAsync(item, gameUrl, timeout, cancellationToken);
                 item.Detail = detail;
 
@@ -446,7 +710,7 @@ public partial class MainWindow : Window
         return TimeSpan.FromSeconds(45);
     }
 
-    private void GamePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void GamePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         var isCustom = GamePicker.SelectedItem is GamePreset game && string.IsNullOrEmpty(game.Url);
         CustomUrlBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
@@ -455,6 +719,11 @@ public partial class MainWindow : Window
         if (!isCustom && GamePicker.SelectedItem is GamePreset selectedGame)
         {
             PresetHintText.Text = $"Ready to launch {selectedGame.Name}";
+        }
+
+        if (_startupComplete)
+        {
+            await SaveRememberedStateAsync();
         }
     }
 
@@ -629,11 +898,7 @@ public partial class MainWindow : Window
 
         try
         {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = args.Uri,
-                UseShellExecute = true
-            });
+            _robloxLauncherService.Start(args.Uri, _settings.PreferredLauncher);
             _externalLaunchRequest?.TrySetResult(true);
         }
         catch (Exception exception)
