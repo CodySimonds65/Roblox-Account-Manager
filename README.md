@@ -48,18 +48,6 @@ build-client.cmd
 
 The compiled client is written to `release\RobloxAltClient.exe`. Source code is under `client\` and released under the MIT License so users can audit and compile it themselves instead of trusting a prebuilt executable.
 
-## Automatic releases
-
-Merging a pull request into `main` creates a release when its title or labels include a release keyword:
-
-| Keyword | Version bump |
-| --- | --- |
-| `chore` or `fix` | Patch (`1.0.0` → `1.0.1`) |
-| `minor` | Minor (`1.0.0` → `1.1.0`) |
-| `major` or `BREAKING` | Major (`1.0.0` → `2.0.0`) |
-
-The workflow builds and tests the merged commit, publishes `RobloxAltClient.exe`, generates a SHA-256 checksum, and creates GitHub release notes automatically. Keywords are case-insensitive; the highest matching bump wins.
-
 ## PowerShell version
 
 The earlier guided launcher remains available through `launch.cmd`. It uses `Launch-RobloxAlts.ps1` and downloads Sysinternals Handle directly from Microsoft when needed.
