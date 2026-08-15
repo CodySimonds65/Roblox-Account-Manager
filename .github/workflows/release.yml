@@ -1,0 +1,124 @@
+name: Release merged PR
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [closed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: windows-latest
+    env:
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+
+    steps:
+      - name: Check out the merged commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Determine release version
+        id: version
+        shell: pwsh
+        run: |
+          $signals = "$env:PR_TITLE $env:PR_LABELS"
+          $bump = if ($signals -match '(?i)\b(BREAKING|major)\b') {
+              'major'
+          } elseif ($signals -match '(?i)\bminor\b') {
+              'minor'
+          } elseif ($signals -match '(?i)\b(fix|chore)\b') {
+              'patch'
+          } else {
+              ''
+          }
+
+          if (-not $bump) {
+              'release=false' >> $env:GITHUB_OUTPUT
+              'No release keyword or label was found.' >> $env:GITHUB_STEP_SUMMARY
+              exit 0
+          }
+
+          $versions = @(git tag --list 'v*' | ForEach-Object {
+              if ($_ -match '^v(\d+)\.(\d+)\.(\d+)$') {
+                  [pscustomobject]@{ Tag = $_; Version = [version]$_.Substring(1) }
+              }
+          })
+          $latest = $versions | Sort-Object Version -Descending | Select-Object -First 1
+          $current = if ($latest) { $latest.Version } else { [version]'0.0.0' }
+
+          $major = $current.Major
+          $minor = $current.Minor
+          $patch = $current.Build
+          switch ($bump) {
+              'major' { $major++; $minor = 0; $patch = 0 }
+              'minor' { $minor++; $patch = 0 }
+              'patch' { $patch++ }
+          }
+
+          $tag = "v$major.$minor.$patch"
+          "release=true" >> $env:GITHUB_OUTPUT
+          "bump=$bump" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Set up .NET
+        if: steps.version.outputs.release == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build client
+        if: steps.version.outputs.release == 'true'
+        shell: pwsh
+        run: dotnet build .\client\RobloxAltClient.csproj -c Release
+
+      - name: Run smoke tests
+        if: steps.version.outputs.release == 'true'
+        shell: pwsh
+        run: |
+          $testProject = '.\tests\RobloxAltClient.SmokeTests\RobloxAltClient.SmokeTests.csproj'
+          if (Test-Path -LiteralPath $testProject) {
+              dotnet run --project $testProject -c Release
+          } else {
+              Write-Host 'No smoke-test project is present in this revision.'
+          }
+
+      - name: Publish standalone client
+        if: steps.version.outputs.release == 'true'
+        shell: pwsh
+        run: dotnet publish .\client\RobloxAltClient.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\release
+
+      - name: Create checksum
+        if: steps.version.outputs.release == 'true'
+        id: checksum
+        shell: pwsh
+        run: |
+          $executable = '.\release\RobloxAltClient.exe'
+          if (-not (Test-Path -LiteralPath $executable)) {
+              throw 'The published executable was not found.'
+          }
+
+          $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  RobloxAltClient.exe" | Set-Content -LiteralPath '.\release\SHA256SUMS.txt' -Encoding ascii
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        if: steps.version.outputs.release == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_TARGET: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          gh release create $env:RELEASE_TAG '.\release\RobloxAltClient.exe#RobloxAltClient.exe' '.\release\SHA256SUMS.txt#SHA256SUMS.txt' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "Roblox Alt Client $env:RELEASE_TAG" --generate-notes --fail-on-no-commits
+          "### Published $env:RELEASE_TAG" >> $env:GITHUB_STEP_SUMMARY
+          "SHA-256: ``${{ steps.checksum.outputs.sha256 }}``" >> $env:GITHUB_STEP_SUMMARY
