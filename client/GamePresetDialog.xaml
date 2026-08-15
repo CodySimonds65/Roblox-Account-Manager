@@ -1,7 +1,7 @@
 <Window x:Class="RobloxAltClient.GamePresetDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Add game preset" Height="360" Width="500"
+        Title="Game preset" Height="360" Width="500"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Background="{StaticResource SurfaceBrush}" Foreground="{StaticResource TextBrush}">
     <Grid Margin="22">
@@ -13,7 +13,7 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <TextBlock Text="Create game preset" FontSize="20" FontWeight="SemiBold" />
+        <TextBlock x:Name="DialogHeading" Text="Create game preset" FontSize="20" FontWeight="SemiBold" />
         <TextBlock Grid.Row="1" Text="Give the game a name and paste its Roblox game-page URL."
                    Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,17" />
 
@@ -32,7 +32,7 @@
         <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
             <Button Content="Cancel" Width="90" Margin="0,16,8,0" Click="Cancel_Click"
                     Style="{StaticResource SecondaryButton}" />
-            <Button Content="Add preset" Width="104" Margin="0,16,0,0" Click="Add_Click" IsDefault="True" />
+            <Button x:Name="SaveButton" Content="Save preset" Width="104" Margin="0,16,0,0" Click="Add_Click" IsDefault="True" />
         </StackPanel>
     </Grid>
 </Window>

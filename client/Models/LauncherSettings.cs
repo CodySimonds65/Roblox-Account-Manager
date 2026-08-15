@@ -10,5 +10,6 @@ public sealed class LauncherSettings
     public string PreferredLauncher { get; set; } = "Auto";
     public List<string> LastSelectedProfileIds { get; set; } = [];
     public string LastGameName { get; set; } = string.Empty;
+    public List<string> RecentGameNames { get; set; } = [];
     public bool ClearBrowserDataOnNextStart { get; set; }
 }
