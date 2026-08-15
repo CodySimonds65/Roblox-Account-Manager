@@ -32,7 +32,7 @@ The Activity panel is selectable and copy-pasteable. Use **Copy all** to copy th
 
 ## Prebuilt release
 
-The release is a single self-contained Windows x64 executable. Users only need `RobloxAltClient.exe`; .NET is included. Microsoft WebView2 Runtime is the only system requirement. It is included with Windows 11, and the client links to Microsoft's installer if it is missing.
+The release is a single self-contained Windows x64 executable. Users only need `RobloxAltClient.exe`; .NET is included. Each release also includes `SHA256SUMS.txt` so the download can be verified. Microsoft WebView2 Runtime is the only system requirement. It is included with Windows 11, and the client links to Microsoft's installer if it is missing.
 
 On the first multi-launch, the client downloads Sysinternals Handle directly from Microsoft and caches it under `%LOCALAPPDATA%\RobloxAltClient\Tools`. The Microsoft utility is not redistributed with this project.
 
