@@ -8,7 +8,6 @@ public sealed class SettingsStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _settingsFile;
-    private readonly SemaphoreSlim _saveLock = new(1, 1);
 
     public SettingsStore(string? appDataDirectory = null)
     {
@@ -22,35 +21,11 @@ public sealed class SettingsStore
     {
         var directory = Path.GetDirectoryName(_settingsFile)!;
         Directory.CreateDirectory(directory);
-        if (!File.Exists(_settingsFile))
-        {
-            return new LauncherSettings();
-        }
-
-        try
-        {
-            await using var stream = File.OpenRead(_settingsFile);
-            return await JsonSerializer.DeserializeAsync<LauncherSettings>(stream, JsonOptions) ?? new LauncherSettings();
-        }
-        catch (JsonException)
-        {
-            return new LauncherSettings();
-        }
+        return await JsonFileStore.LoadAsync(_settingsFile, new LauncherSettings(), JsonOptions);
     }
 
     public async Task SaveAsync(LauncherSettings settings)
     {
-        await _saveLock.WaitAsync();
-        try
-        {
-            var directory = Path.GetDirectoryName(_settingsFile)!;
-            Directory.CreateDirectory(directory);
-            await using var stream = File.Create(_settingsFile);
-            await JsonSerializer.SerializeAsync(stream, settings, JsonOptions);
-        }
-        finally
-        {
-            _saveLock.Release();
-        }
+        await JsonFileStore.SaveAsync(_settingsFile, settings, JsonOptions);
     }
 }

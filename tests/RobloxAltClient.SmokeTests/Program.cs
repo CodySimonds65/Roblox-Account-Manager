@@ -76,6 +76,21 @@ try
     Require(loadedSettings.LaunchTimeoutSeconds == 60, "The launch timeout setting did not reload.");
     Require(loadedSettings.PreferredLauncher == "Bloxstrap", "The preferred launcher setting did not reload.");
     Require(loadedSettings.LastSelectedProfileIds.SequenceEqual(["profile-one"]), "Remembered profiles did not reload.");
+
+    expectedSettings.LaunchDelaySeconds = 10;
+    await settingsStore.SaveAsync(expectedSettings);
+    await File.WriteAllTextAsync(Path.Combine(testDirectory, "settings.json"), "{ invalid json");
+    var recoveredSettings = await settingsStore.LoadAsync();
+    Require(recoveredSettings.LaunchDelaySeconds == 5, "Settings did not recover from the last valid backup.");
+
+    var accountStore = new AccountStore(testDirectory);
+    var expectedAccounts = new List<AccountProfile>
+    {
+        new() { Label = "Favorite", Group = "Farm", IsFavorite = true, SortOrder = 0 }
+    };
+    await accountStore.SaveAsync(expectedAccounts);
+    var loadedAccounts = await accountStore.LoadAsync();
+    Require(loadedAccounts.Count == 1 && loadedAccounts[0].IsFavorite, "Account profile metadata did not reload.");
 }
 finally
 {
