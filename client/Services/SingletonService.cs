@@ -37,7 +37,7 @@ public sealed class SingletonService
         }
 
         var resultPath = Path.Combine(Path.GetTempPath(), $"roblox-alt-unlock-{Guid.NewGuid():N}.json");
-        var arguments = $"-NoProfile -ExecutionPolicy Bypass -File {Quote(helperPath)} -HandleTool {Quote(handlePath)} -ResultPath {Quote(resultPath)}";
+        var arguments = $"-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File {Quote(helperPath)} -HandleTool {Quote(handlePath)} -ResultPath {Quote(resultPath)}";
 
         try
         {
@@ -47,7 +47,7 @@ public sealed class SingletonService
                 Arguments = arguments,
                 UseShellExecute = true,
                 Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Normal
+                WindowStyle = ProcessWindowStyle.Hidden
             });
 
             if (process is null)
