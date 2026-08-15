@@ -61,6 +61,21 @@ try
     await store.SaveAsync(expected);
     var loaded = await store.LoadAsync();
     Require(loaded.SequenceEqual(expected), "Saved presets did not reload correctly.");
+
+    var settingsStore = new SettingsStore(testDirectory);
+    var expectedSettings = new LauncherSettings
+    {
+        LaunchDelaySeconds = 5,
+        LaunchTimeoutSeconds = 60,
+        PreferredLauncher = "Bloxstrap",
+        LastSelectedProfileIds = ["profile-one"]
+    };
+    await settingsStore.SaveAsync(expectedSettings);
+    var loadedSettings = await settingsStore.LoadAsync();
+    Require(loadedSettings.LaunchDelaySeconds == 5, "The launch delay setting did not reload.");
+    Require(loadedSettings.LaunchTimeoutSeconds == 60, "The launch timeout setting did not reload.");
+    Require(loadedSettings.PreferredLauncher == "Bloxstrap", "The preferred launcher setting did not reload.");
+    Require(loadedSettings.LastSelectedProfileIds.SequenceEqual(["profile-one"]), "Remembered profiles did not reload.");
 }
 finally
 {
