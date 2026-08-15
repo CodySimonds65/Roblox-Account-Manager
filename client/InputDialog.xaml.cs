@@ -6,11 +6,15 @@ namespace RobloxAltClient;
 public partial class InputDialog : Window
 {
     public string AccountLabel => LabelBox.Text.Trim();
+    public string AccountGroup => GroupBox.Text.Trim();
 
-    public InputDialog()
+    public InputDialog(string? label = null, string? group = null)
     {
         InitializeComponent();
         WindowAppearance.ApplyModernChrome(this);
+        LabelBox.Text = label ?? string.Empty;
+        GroupBox.Text = group ?? string.Empty;
+        Title = label is null ? "Add account profile" : "Edit account profile";
         Loaded += (_, _) => LabelBox.Focus();
     }
 

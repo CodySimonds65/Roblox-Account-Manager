@@ -43,18 +43,98 @@
                     </Border>
                 </Grid>
 
-                <ListBox x:Name="AccountsList" Grid.Row="2" SelectionMode="Multiple"
-                         SelectionChanged="AccountsList_SelectionChanged">
+                <ListBox x:Name="AccountsList" Grid.Row="2" SelectionMode="Multiple" AllowDrop="True"
+                         SelectionChanged="AccountsList_SelectionChanged"
+                         PreviewMouseLeftButtonDown="AccountsList_PreviewMouseLeftButtonDown"
+                         PreviewMouseMove="AccountsList_PreviewMouseMove" Drop="AccountsList_Drop">
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <CheckBox Content="{Binding Label}"
-                                      IsChecked="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=IsSelected, Mode=TwoWay}" />
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <CheckBox VerticalAlignment="Center"
+                                          IsChecked="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=IsSelected, Mode=TwoWay}">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding Group}" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
+                                                   TextTrimming="CharacterEllipsis">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Style.Triggers>
+                                                        <Trigger Property="Text" Value="">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                        </Trigger>
+                                                        <Trigger Property="Text" Value="{x:Null}">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                        </Trigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </StackPanel>
+                                </CheckBox>
+                                <Button Grid.Column="1" Click="ToggleFavorite_Click" ToolTip="Favorite"
+                                        AutomationProperties.Name="Favorite" VerticalAlignment="Center"
+                                        Margin="5,0,5,0" Padding="5" Focusable="False">
+                                    <Button.Style>
+                                        <Style TargetType="Button">
+                                            <Setter Property="Content" Value="☆" />
+                                            <Setter Property="Foreground" Value="#7D8598" />
+                                            <Setter Property="Opacity" Value="0.55" />
+                                            <Setter Property="FontFamily" Value="Segoe UI Symbol" />
+                                            <Setter Property="FontSize" Value="19" />
+                                            <Setter Property="FontWeight" Value="Normal" />
+                                            <Setter Property="Cursor" Value="Hand" />
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border Background="Transparent" Padding="{TemplateBinding Padding}" CornerRadius="7">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                        </Border>
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
+                                            <Style.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Foreground" Value="#F5C451" />
+                                                    <Setter Property="Opacity" Value="1" />
+                                                </Trigger>
+                                                <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                                    <Setter Property="Content" Value="★" />
+                                                    <Setter Property="Foreground" Value="#F5C451" />
+                                                    <Setter Property="Opacity" Value="1" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                            </Grid>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
 
                 <StackPanel Grid.Row="3" Margin="0,14,0,0">
                     <Button x:Name="AddAccountButton" Content="＋  Add account profile" Click="AddAccount_Click" />
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button Content="Select all" Click="SelectAllAccounts_Click" Style="{StaticResource CompactButton}" Margin="0,0,4,0" />
+                        <Button Grid.Column="1" Content="Select none" Click="SelectNoAccounts_Click" Style="{StaticResource CompactButton}" Margin="4,0,0,0" />
+                    </Grid>
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="EditAccountButton" Content="Edit profile" Click="EditAccount_Click" Style="{StaticResource SecondaryButton}" Margin="0,0,6,0" />
+                        <Button Grid.Column="1" Content="↑" ToolTip="Move profile up" Click="MoveAccountUp_Click" Style="{StaticResource CompactButton}" Width="34" Margin="0,0,5,0" />
+                        <Button Grid.Column="2" Content="↓" ToolTip="Move profile down" Click="MoveAccountDown_Click" Style="{StaticResource CompactButton}" Width="34" />
+                    </Grid>
                     <Button x:Name="RemoveAccountButton" Content="Remove selected session" Click="RemoveAccount_Click"
                             Style="{StaticResource DangerButton}" Margin="0,8,0,0" />
                     <TextBlock Text="Sessions stay isolated and local to this PC." TextWrapping="Wrap"
@@ -77,29 +157,40 @@
                     <TextBlock Text="Choose profiles, pick a game, and launch every client in sequence."
                                Foreground="{StaticResource MutedTextBrush}" FontSize="13" Margin="0,3,0,0" />
                 </StackPanel>
-                <Border HorizontalAlignment="Right" VerticalAlignment="Center" Background="#10261F"
-                        BorderBrush="#1C4B3C" BorderThickness="1" CornerRadius="12" Padding="10,5">
-                    <StackPanel Orientation="Horizontal">
-                        <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}" Margin="0,0,7,0" />
-                        <TextBlock Text="LOCAL ONLY" FontSize="10" FontWeight="Bold" Foreground="#7DE6BC" />
-                    </StackPanel>
-                </Border>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button Content="Settings" Click="Settings_Click" Style="{StaticResource SecondaryButton}"
+                            Padding="12,6" Margin="0,0,8,0" />
+                    <Button Content="Diagnostics" Click="Diagnostics_Click" Style="{StaticResource SecondaryButton}"
+                            Padding="12,6" Margin="0,0,8,0" />
+                    <Border Background="#10261F" BorderBrush="#1C4B3C" BorderThickness="1" CornerRadius="12" Padding="10,5">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}" Margin="0,0,7,0" />
+                            <TextBlock Text="LOCAL ONLY" FontSize="10" FontWeight="Bold" Foreground="#7DE6BC" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
             </Grid>
 
             <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
                     BorderThickness="1" CornerRadius="14" Padding="15" Margin="0,0,0,14">
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="285" />
+                        <ColumnDefinition Width="500" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <StackPanel>
                         <TextBlock Text="GAME PRESET" FontSize="10" FontWeight="Bold" Foreground="{StaticResource MutedTextBrush}" Margin="2,0,0,6" />
+                        <TextBox x:Name="PresetSearchBox" TextChanged="PresetSearch_TextChanged" ToolTip="Search game presets"
+                                 Margin="0,0,0,7" />
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
@@ -110,6 +201,18 @@
                             <Button x:Name="RemoveGamePresetButton" Grid.Column="2" Content="−" ToolTip="Remove selected preset"
                                     Click="RemoveGamePreset_Click" Style="{StaticResource CompactButton}"
                                     Width="34" Height="34" Padding="0" Margin="5,0,0,0" IsEnabled="False" />
+                            <Button x:Name="EditGamePresetButton" Grid.Column="3" Content="✎" ToolTip="Edit selected preset"
+                                    Click="EditGamePreset_Click" Style="{StaticResource CompactButton}"
+                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" IsEnabled="False" />
+                            <Button x:Name="DuplicateGamePresetButton" Grid.Column="4" Content="⧉" ToolTip="Duplicate selected preset"
+                                    Click="DuplicateGamePreset_Click" Style="{StaticResource CompactButton}"
+                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
+                            <Button Grid.Column="5" Content="⇩" ToolTip="Import presets"
+                                    Click="ImportGamePresets_Click" Style="{StaticResource CompactButton}"
+                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
+                            <Button Grid.Column="6" Content="⇧" ToolTip="Export presets"
+                                    Click="ExportGamePresets_Click" Style="{StaticResource CompactButton}"
+                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
                         </Grid>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Margin="12,0,0,0">

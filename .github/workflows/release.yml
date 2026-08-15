@@ -101,6 +101,46 @@ jobs:
           $version = '${{ steps.version.outputs.tag }}'.TrimStart('v')
           dotnet publish .\client\RobloxAltClient.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=$version -o .\release
 
+      - name: Sign standalone client when configured
+        if: steps.version.outputs.release == 'true'
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE)) {
+              'Code signing is not configured; publishing the checksum-verified unsigned executable.' >> $env:GITHUB_STEP_SUMMARY
+              exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PASSWORD)) {
+              throw 'The signing certificate is configured, but WINDOWS_SIGNING_CERTIFICATE_PASSWORD is missing.'
+          }
+
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'roblox-alt-client-signing.pfx'
+          try {
+              [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:SIGNING_CERTIFICATE))
+              $signTool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Filter signtool.exe -Recurse |
+                  Where-Object FullName -Match '\\x64\\signtool\.exe$' |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1
+              if (-not $signTool) {
+                  throw 'SignTool was not found on the Windows runner.'
+              }
+
+              & $signTool.FullName sign /f $certificatePath /p $env:SIGNING_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 '.\release\RobloxAltClient.exe'
+              if ($LASTEXITCODE -ne 0) {
+                  throw "SignTool failed with exit code $LASTEXITCODE."
+              }
+
+              $signature = Get-AuthenticodeSignature -LiteralPath '.\release\RobloxAltClient.exe'
+              if ($signature.Status -ne 'Valid') {
+                  throw "The Authenticode signature is not valid: $($signature.StatusMessage)"
+              }
+              'The release executable was Authenticode signed.' >> $env:GITHUB_STEP_SUMMARY
+          } finally {
+              Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Create checksum
         if: steps.version.outputs.release == 'true'
         id: checksum

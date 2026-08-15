@@ -1,9 +1,14 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Data;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
+using Microsoft.Win32;
 using RobloxAltClient.Models;
 using RobloxAltClient.Services;
 
@@ -15,6 +20,9 @@ public partial class MainWindow : Window
     private readonly GamePresetStore _gamePresetStore = new();
     private readonly SingletonService _singletonService = new();
     private readonly UpdateService _updateService = new();
+    private readonly CompatibilityService _compatibilityService = new();
+    private readonly SettingsStore _settingsStore = new();
+    private readonly RobloxLauncherService _robloxLauncherService = new();
     private readonly ObservableCollection<AccountProfile> _accounts = [];
     private readonly ObservableCollection<LaunchQueueItem> _launchQueue = [];
     private readonly ObservableCollection<GamePreset> _games =
@@ -30,6 +38,9 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _launchCancellation;
     private string? _lastLaunchUrl;
     private bool _isLaunching;
+    private LauncherSettings _settings = new();
+    private Point _accountDragStart;
+    private bool _startupComplete;
 
     public MainWindow()
     {
@@ -44,12 +55,27 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        _ = CheckForUpdatesAsync();
+        UpdateService.ConfirmUpdatedLaunch(Environment.GetCommandLineArgs().Skip(1).ToArray());
 
         try
         {
-            foreach (var account in await _accountStore.LoadAsync())
+            _settings = await _settingsStore.LoadAsync();
+            await ApplyPendingDataCleanupAsync();
+            ApplySettingsToControls();
+            if (_settings.UpdateChecksEnabled)
             {
+                _ = CheckForUpdatesAsync();
+            }
+            else
+            {
+                Log("Automatic update checks are disabled in Settings.");
+            }
+
+            var loadedAccounts = await _accountStore.LoadAsync();
+            for (var index = 0; index < loadedAccounts.Count; index++)
+            {
+                var account = loadedAccounts[index];
+                account.SortOrder = index;
                 _accounts.Add(account);
             }
 
@@ -63,6 +89,8 @@ public partial class MainWindow : Window
                 }
             }
 
+            ApplyRecentGameOrder();
+
             _webEnvironment = await CoreWebView2Environment.CreateAsync(
                 browserExecutableFolder: null,
                 userDataFolder: _accountStore.WebViewDataDirectory);
@@ -70,8 +98,11 @@ public partial class MainWindow : Window
             Log("Ready. Add an account profile or select an existing one.");
             if (_accounts.Count > 0)
             {
-                AccountsList.SelectedIndex = 0;
+                RestoreRememberedSelections();
             }
+
+            RestoreRememberedGame();
+            _startupComplete = true;
         }
         catch (WebView2RuntimeNotFoundException)
         {
@@ -140,11 +171,169 @@ public partial class MainWindow : Window
             return;
         }
 
-        var account = new AccountProfile { Label = dialog.AccountLabel };
+        var account = new AccountProfile
+        {
+            Label = dialog.AccountLabel,
+            Group = dialog.AccountGroup,
+            SortOrder = _accounts.Count
+        };
         _accounts.Add(account);
         await _accountStore.SaveAsync(_accounts);
         AccountsList.SelectedItem = account;
         Log($"Created isolated browser profile for {account.Label}. Sign in directly on Roblox's page.");
+    }
+
+    private async void EditAccount_Click(object sender, RoutedEventArgs e)
+    {
+        if (AccountsList.SelectedItem is not AccountProfile account)
+        {
+            MessageBox.Show(this, "Select one account profile to edit.", "No profile selected");
+            return;
+        }
+
+        var dialog = new InputDialog(account.Label, account.Group) { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        account.Label = dialog.AccountLabel;
+        account.Group = dialog.AccountGroup;
+        await _accountStore.SaveAsync(_accounts);
+        AccountsList.Items.Refresh();
+        if (_activeAccount?.Id == account.Id)
+        {
+            ActiveProfileText.Text = account.Label;
+        }
+
+        Log($"Updated account profile: {account.Label}.");
+    }
+
+    private void SelectAllAccounts_Click(object sender, RoutedEventArgs e) => AccountsList.SelectAll();
+
+    private void SelectNoAccounts_Click(object sender, RoutedEventArgs e) => AccountsList.UnselectAll();
+
+    private async void ToggleFavorite_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: AccountProfile account })
+        {
+            return;
+        }
+
+        e.Handled = true;
+        account.IsFavorite = !account.IsFavorite;
+        ReorderAccountsForDisplay();
+        await SaveAccountOrderAsync();
+        AccountsList.Items.Refresh();
+        AccountsList.ScrollIntoView(account);
+        Log($"{(account.IsFavorite ? "Favorited" : "Unfavorited")} profile: {account.Label}.");
+    }
+
+    private void ReorderAccountsForDisplay()
+    {
+        var orderedAccounts = AccountStore.OrderForDisplay(_accounts);
+        for (var targetIndex = 0; targetIndex < orderedAccounts.Count; targetIndex++)
+        {
+            var currentIndex = _accounts.IndexOf(orderedAccounts[targetIndex]);
+            if (currentIndex != targetIndex)
+            {
+                _accounts.Move(currentIndex, targetIndex);
+            }
+        }
+    }
+
+    private async void MoveAccountUp_Click(object sender, RoutedEventArgs e) => await MoveSelectedAccountAsync(-1);
+
+    private async void MoveAccountDown_Click(object sender, RoutedEventArgs e) => await MoveSelectedAccountAsync(1);
+
+    private async Task MoveSelectedAccountAsync(int offset)
+    {
+        if (AccountsList.SelectedItem is not AccountProfile account)
+        {
+            return;
+        }
+
+        var oldIndex = _accounts.IndexOf(account);
+        var newIndex = Math.Clamp(oldIndex + offset, 0, _accounts.Count - 1);
+        if (newIndex == oldIndex)
+        {
+            return;
+        }
+
+        if (_accounts[newIndex].IsFavorite != account.IsFavorite)
+        {
+            return;
+        }
+
+        _accounts.Move(oldIndex, newIndex);
+        AccountsList.SelectedItem = account;
+        await SaveAccountOrderAsync();
+    }
+
+    private void AccountsList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e) =>
+        _accountDragStart = e.GetPosition(AccountsList);
+
+    private void AccountsList_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed ||
+            Math.Abs(e.GetPosition(AccountsList).Y - _accountDragStart.Y) < SystemParameters.MinimumVerticalDragDistance ||
+            AccountsList.SelectedItem is not AccountProfile account)
+        {
+            return;
+        }
+
+        DragDrop.DoDragDrop(AccountsList, account, DragDropEffects.Move);
+    }
+
+    private async void AccountsList_Drop(object sender, DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(typeof(AccountProfile)) || e.Data.GetData(typeof(AccountProfile)) is not AccountProfile source)
+        {
+            return;
+        }
+
+        var target = FindAncestor<ListBoxItem>((DependencyObject)e.OriginalSource)?.DataContext as AccountProfile;
+        if (target is null || ReferenceEquals(source, target))
+        {
+            return;
+        }
+
+        if (source.IsFavorite != target.IsFavorite)
+        {
+            return;
+        }
+
+        var oldIndex = _accounts.IndexOf(source);
+        var newIndex = _accounts.IndexOf(target);
+        _accounts.Move(oldIndex, newIndex);
+        AccountsList.SelectedItem = source;
+        await SaveAccountOrderAsync();
+        Log($"Moved {source.Label} in the profile list.");
+    }
+
+    private async Task SaveAccountOrderAsync()
+    {
+        for (var index = 0; index < _accounts.Count; index++)
+        {
+            _accounts[index].SortOrder = index;
+        }
+
+        await _accountStore.SaveAsync(_accounts);
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T match)
+            {
+                return match;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
     }
 
     private async void RemoveAccount_Click(object sender, RoutedEventArgs e)
@@ -172,7 +361,7 @@ public partial class MainWindow : Window
         }
 
         _accounts.Remove(account);
-        await _accountStore.SaveAsync(_accounts);
+        await SaveAccountOrderAsync();
         _activeAccount = null;
         ActiveProfileText.Text = "No profile selected";
         BrowserPlaceholder.Visibility = Visibility.Visible;
@@ -184,6 +373,11 @@ public partial class MainWindow : Window
         if (AccountsList.SelectedItem is AccountProfile account)
         {
             await OpenAccountAsync(account);
+        }
+
+        if (_startupComplete)
+        {
+            await SaveRememberedStateAsync();
         }
     }
 
@@ -261,6 +455,129 @@ public partial class MainWindow : Window
 
         _lastLaunchUrl = gameUrl;
         await RunLaunchQueueAsync(_launchQueue.ToArray(), gameUrl);
+        if (_launchQueue.Any(item => item.State == LaunchQueueState.Running))
+        {
+            await RecordRecentGameAsync();
+        }
+    }
+
+    private async void Diagnostics_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Log("Running privacy-safe compatibility diagnostics...");
+            var checks = await _compatibilityService.RunAsync();
+            new CompatibilityDialog(checks) { Owner = this }.ShowDialog();
+            Log("Compatibility diagnostics completed.");
+        }
+        catch (Exception exception)
+        {
+            Log($"Compatibility diagnostics failed: {exception.Message}");
+            MessageBox.Show(this, exception.Message, "Diagnostics failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new SettingsDialog(_settings) { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        if (dialog.ClearToolsRequested)
+        {
+            var toolsDirectory = Path.Combine(_accountStore.AppDataDirectory, "Tools");
+            if (Directory.Exists(toolsDirectory))
+            {
+                Directory.Delete(toolsDirectory, recursive: true);
+                Log("Cleared the downloaded Sysinternals tool cache.");
+            }
+        }
+
+        if (dialog.ClearSessionsRequested)
+        {
+            _settings.ClearBrowserDataOnNextStart = true;
+            Log("All browser sessions will be cleared on the next restart.");
+        }
+
+        ApplySettingsToControls();
+        await SaveRememberedStateAsync();
+        Log("Launcher settings saved.");
+    }
+
+    private async Task ApplyPendingDataCleanupAsync()
+    {
+        if (!_settings.ClearBrowserDataOnNextStart)
+        {
+            return;
+        }
+
+        if (Directory.Exists(_accountStore.WebViewDataDirectory))
+        {
+            Directory.Delete(_accountStore.WebViewDataDirectory, recursive: true);
+        }
+
+        _settings.ClearBrowserDataOnNextStart = false;
+        await _settingsStore.SaveAsync(_settings);
+        Log("Cleared all saved Roblox browser sessions.");
+    }
+
+    private void ApplySettingsToControls()
+    {
+        ContinueOnFailureCheckBox.IsChecked = _settings.ContinueOnFailure;
+        LaunchTimeoutPicker.SelectedItem = LaunchTimeoutPicker.Items.Cast<ComboBoxItem>()
+            .FirstOrDefault(item => string.Equals(item.Tag?.ToString(), _settings.LaunchTimeoutSeconds.ToString(), StringComparison.Ordinal))
+            ?? LaunchTimeoutPicker.Items[1];
+    }
+
+    private void RestoreRememberedSelections()
+    {
+        if (!_settings.RememberSelections || _settings.LastSelectedProfileIds.Count == 0)
+        {
+            AccountsList.SelectedIndex = 0;
+            return;
+        }
+
+        foreach (var account in _accounts.Where(account => _settings.LastSelectedProfileIds.Contains(account.Id, StringComparer.Ordinal)))
+        {
+            AccountsList.SelectedItems.Add(account);
+        }
+
+        if (AccountsList.SelectedItems.Count == 0)
+        {
+            AccountsList.SelectedIndex = 0;
+        }
+    }
+
+    private void RestoreRememberedGame()
+    {
+        if (!_settings.RememberSelections || string.IsNullOrWhiteSpace(_settings.LastGameName))
+        {
+            return;
+        }
+
+        var rememberedGame = _games.FirstOrDefault(game => string.Equals(game.Name, _settings.LastGameName, StringComparison.Ordinal));
+        if (rememberedGame is not null)
+        {
+            GamePicker.SelectedItem = rememberedGame;
+        }
+    }
+
+    private async Task SaveRememberedStateAsync()
+    {
+        if (_settings.RememberSelections)
+        {
+            _settings.LastSelectedProfileIds = AccountsList.SelectedItems.Cast<AccountProfile>().Select(account => account.Id).ToList();
+            _settings.LastGameName = (GamePicker.SelectedItem as GamePreset)?.Name ?? string.Empty;
+        }
+        else
+        {
+            _settings.LastSelectedProfileIds.Clear();
+            _settings.LastGameName = string.Empty;
+        }
+
+        await _settingsStore.SaveAsync(_settings);
     }
 
     private void CancelLaunch_Click(object sender, RoutedEventArgs e)
@@ -301,6 +618,9 @@ public partial class MainWindow : Window
         var cancellationToken = _launchCancellation.Token;
         var timeout = GetLaunchTimeout();
         var continueOnFailure = ContinueOnFailureCheckBox.IsChecked == true;
+        _settings.LaunchTimeoutSeconds = (int)timeout.TotalSeconds;
+        _settings.ContinueOnFailure = continueOnFailure;
+        await _settingsStore.SaveAsync(_settings);
 
         _isLaunching = true;
         PrepareLaunch_ClickButtonState(false);
@@ -310,9 +630,17 @@ public partial class MainWindow : Window
         try
         {
             Log($"Starting launch queue for {items.Count} account(s); timeout {timeout.TotalSeconds:0} seconds.");
+            var firstItem = true;
             foreach (var item in items)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!firstItem && _settings.LaunchDelaySeconds > 0)
+                {
+                    Log($"Waiting {_settings.LaunchDelaySeconds} seconds before the next account...");
+                    await Task.Delay(TimeSpan.FromSeconds(_settings.LaunchDelaySeconds), cancellationToken);
+                }
+
+                firstItem = false;
                 var (success, detail) = await LaunchAccountAsync(item, gameUrl, timeout, cancellationToken);
                 item.Detail = detail;
 
@@ -429,15 +757,22 @@ public partial class MainWindow : Window
         return TimeSpan.FromSeconds(45);
     }
 
-    private void GamePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void GamePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         var isCustom = GamePicker.SelectedItem is GamePreset game && string.IsNullOrEmpty(game.Url);
         CustomUrlBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
         PresetHint.Visibility = isCustom ? Visibility.Collapsed : Visibility.Visible;
         RemoveGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        EditGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        DuplicateGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
         if (!isCustom && GamePicker.SelectedItem is GamePreset selectedGame)
         {
             PresetHintText.Text = $"Ready to launch {selectedGame.Name}";
+        }
+
+        if (_startupComplete)
+        {
+            await SaveRememberedStateAsync();
         }
     }
 
@@ -469,6 +804,171 @@ public partial class MainWindow : Window
         Log($"Added game preset: {preset.Name}.");
     }
 
+    private async void EditGamePreset_Click(object sender, RoutedEventArgs e)
+    {
+        if (GamePicker.SelectedItem is not GamePreset { IsBuiltIn: false } preset)
+        {
+            return;
+        }
+
+        var dialog = new GamePresetDialog(preset) { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        if (_games.Any(game => !ReferenceEquals(game, preset) &&
+                               (string.Equals(game.Name, dialog.GameName, StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(game.Url, dialog.GameUrl, StringComparison.OrdinalIgnoreCase))))
+        {
+            MessageBox.Show(this, "Another preset already uses that name or URL.", "Duplicate preset");
+            return;
+        }
+
+        var index = _games.IndexOf(preset);
+        var updated = new GamePreset(dialog.GameName, dialog.GameUrl);
+        _games[index] = updated;
+        var recentIndex = _settings.RecentGameNames.FindIndex(name => string.Equals(name, preset.Name, StringComparison.Ordinal));
+        if (recentIndex >= 0)
+        {
+            _settings.RecentGameNames[recentIndex] = updated.Name;
+        }
+
+        await SaveCustomGamePresetsAsync();
+        await _settingsStore.SaveAsync(_settings);
+        GamePicker.SelectedItem = updated;
+        Log($"Updated game preset: {updated.Name}.");
+    }
+
+    private async void DuplicateGamePreset_Click(object sender, RoutedEventArgs e)
+    {
+        if (GamePicker.SelectedItem is not GamePreset { Url.Length: > 0 } preset)
+        {
+            return;
+        }
+
+        var baseName = $"{preset.Name} copy";
+        var name = baseName;
+        for (var suffix = 2; _games.Any(game => string.Equals(game.Name, name, StringComparison.OrdinalIgnoreCase)); suffix++)
+        {
+            name = $"{baseName} {suffix}";
+        }
+
+        var duplicate = new GamePreset(name, preset.Url);
+        _games.Insert(_games.Count - 1, duplicate);
+        await SaveCustomGamePresetsAsync();
+        GamePicker.SelectedItem = duplicate;
+        Log($"Duplicated game preset: {duplicate.Name}.");
+    }
+
+    private async void ImportGamePresets_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Import Roblox game presets",
+            Filter = "Roblox Alt Client presets (*.json)|*.json|JSON files (*.json)|*.json"
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var imported = await PresetTransferService.ImportAsync(dialog.FileName);
+            var added = 0;
+            foreach (var preset in imported)
+            {
+                if (_games.Any(existing =>
+                        string.Equals(existing.Name, preset.Name, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(existing.Url, preset.Url, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                _games.Insert(_games.Count - 1, preset);
+                added++;
+            }
+
+            await SaveCustomGamePresetsAsync();
+            Log($"Imported {added} game preset(s). Existing names and URLs were skipped.");
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "Preset import failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void ExportGamePresets_Click(object sender, RoutedEventArgs e)
+    {
+        var customPresets = _games.Where(game => !game.IsBuiltIn).ToArray();
+        if (customPresets.Length == 0)
+        {
+            MessageBox.Show(this, "There are no custom presets to export.", "No presets");
+            return;
+        }
+
+        var dialog = new SaveFileDialog
+        {
+            Title = "Export Roblox game presets",
+            Filter = "Roblox Alt Client presets (*.json)|*.json",
+            FileName = "roblox-game-presets.json",
+            AddExtension = true,
+            DefaultExt = ".json"
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        await PresetTransferService.ExportAsync(dialog.FileName, customPresets);
+        Log($"Exported {customPresets.Length} custom game preset(s). No account or session data was included.");
+    }
+
+    private void PresetSearch_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        var query = PresetSearchBox.Text.Trim();
+        var view = CollectionViewSource.GetDefaultView(_games);
+        view.Filter = item => item is GamePreset preset &&
+                              (query.Length == 0 || preset.Name.Contains(query, StringComparison.OrdinalIgnoreCase));
+        view.Refresh();
+    }
+
+    private void ApplyRecentGameOrder()
+    {
+        foreach (var name in _settings.RecentGameNames.AsEnumerable().Reverse())
+        {
+            var game = _games.FirstOrDefault(candidate =>
+                !string.IsNullOrEmpty(candidate.Url) &&
+                string.Equals(candidate.Name, name, StringComparison.Ordinal));
+            if (game is null)
+            {
+                continue;
+            }
+
+            _games.Move(_games.IndexOf(game), 0);
+        }
+    }
+
+    private async Task RecordRecentGameAsync()
+    {
+        if (GamePicker.SelectedItem is not GamePreset { Url.Length: > 0 } game)
+        {
+            return;
+        }
+
+        _settings.RecentGameNames.RemoveAll(name => string.Equals(name, game.Name, StringComparison.Ordinal));
+        _settings.RecentGameNames.Insert(0, game.Name);
+        if (_settings.RecentGameNames.Count > 5)
+        {
+            _settings.RecentGameNames.RemoveRange(5, _settings.RecentGameNames.Count - 5);
+        }
+
+        await _settingsStore.SaveAsync(_settings);
+        ApplyRecentGameOrder();
+        GamePicker.SelectedItem = game;
+    }
+
     private async void RemoveGamePreset_Click(object sender, RoutedEventArgs e)
     {
         if (GamePicker.SelectedItem is not GamePreset { IsBuiltIn: false } preset)
@@ -488,7 +988,9 @@ public partial class MainWindow : Window
         }
 
         _games.Remove(preset);
+        _settings.RecentGameNames.RemoveAll(name => string.Equals(name, preset.Name, StringComparison.Ordinal));
         await SaveCustomGamePresetsAsync();
+        await _settingsStore.SaveAsync(_settings);
         GamePicker.SelectedIndex = 0;
         Log($"Removed game preset: {preset.Name}.");
     }
@@ -612,11 +1114,7 @@ public partial class MainWindow : Window
 
         try
         {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = args.Uri,
-                UseShellExecute = true
-            });
+            _robloxLauncherService.Start(args.Uri, _settings.PreferredLauncher);
             _externalLaunchRequest?.TrySetResult(true);
         }
         catch (Exception exception)
@@ -660,6 +1158,9 @@ public partial class MainWindow : Window
         CustomUrlBox.IsEnabled = enabled;
         AddGamePresetButton.IsEnabled = enabled;
         RemoveGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        EditGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        DuplicateGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
+        PresetSearchBox.IsEnabled = enabled;
         AddAccountButton.IsEnabled = enabled;
         RemoveAccountButton.IsEnabled = enabled;
         OpenLoginButton.IsEnabled = enabled;

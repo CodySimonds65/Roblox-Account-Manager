@@ -21,27 +21,11 @@ public sealed class GamePresetStore
     {
         var directory = Path.GetDirectoryName(_presetFile)!;
         Directory.CreateDirectory(directory);
-        if (!File.Exists(_presetFile))
-        {
-            return [];
-        }
-
-        try
-        {
-            await using var stream = File.OpenRead(_presetFile);
-            return await JsonSerializer.DeserializeAsync<List<GamePreset>>(stream, JsonOptions) ?? [];
-        }
-        catch (JsonException)
-        {
-            return [];
-        }
+        return await JsonFileStore.LoadAsync(_presetFile, new List<GamePreset>(), JsonOptions);
     }
 
     public async Task SaveAsync(IEnumerable<GamePreset> presets)
     {
-        var directory = Path.GetDirectoryName(_presetFile)!;
-        Directory.CreateDirectory(directory);
-        await using var stream = File.Create(_presetFile);
-        await JsonSerializer.SerializeAsync(stream, presets, JsonOptions);
+        await JsonFileStore.SaveAsync(_presetFile, presets.ToList(), JsonOptions);
     }
 }

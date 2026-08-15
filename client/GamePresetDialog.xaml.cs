@@ -9,10 +9,17 @@ public partial class GamePresetDialog : Window
     public string GameName => GameNameBox.Text.Trim();
     public string GameUrl { get; private set; } = string.Empty;
 
-    public GamePresetDialog()
+    public GamePresetDialog(GamePreset? preset = null)
     {
         InitializeComponent();
         WindowAppearance.ApplyModernChrome(this);
+        if (preset is not null)
+        {
+            Title = "Edit game preset";
+            DialogHeading.Text = "Edit game preset";
+            GameNameBox.Text = preset.Name;
+            GameUrlBox.Text = preset.Url;
+        }
         Loaded += (_, _) => GameNameBox.Focus();
     }
 
