@@ -5,8 +5,10 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Data;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
+using Microsoft.Win32;
 using RobloxAltClient.Models;
 using RobloxAltClient.Services;
 
@@ -86,6 +88,8 @@ public partial class MainWindow : Window
                     _games.Insert(_games.Count - 1, new GamePreset(preset.Name, normalizedUrl));
                 }
             }
+
+            ApplyRecentGameOrder();
 
             _webEnvironment = await CoreWebView2Environment.CreateAsync(
                 browserExecutableFolder: null,
@@ -414,6 +418,10 @@ public partial class MainWindow : Window
 
         _lastLaunchUrl = gameUrl;
         await RunLaunchQueueAsync(_launchQueue.ToArray(), gameUrl);
+        if (_launchQueue.Any(item => item.State == LaunchQueueState.Running))
+        {
+            await RecordRecentGameAsync();
+        }
     }
 
     private async void Diagnostics_Click(object sender, RoutedEventArgs e)
@@ -718,6 +726,8 @@ public partial class MainWindow : Window
         CustomUrlBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
         PresetHint.Visibility = isCustom ? Visibility.Collapsed : Visibility.Visible;
         RemoveGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        EditGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        DuplicateGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
         if (!isCustom && GamePicker.SelectedItem is GamePreset selectedGame)
         {
             PresetHintText.Text = $"Ready to launch {selectedGame.Name}";
@@ -757,6 +767,171 @@ public partial class MainWindow : Window
         Log($"Added game preset: {preset.Name}.");
     }
 
+    private async void EditGamePreset_Click(object sender, RoutedEventArgs e)
+    {
+        if (GamePicker.SelectedItem is not GamePreset { IsBuiltIn: false } preset)
+        {
+            return;
+        }
+
+        var dialog = new GamePresetDialog(preset) { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        if (_games.Any(game => !ReferenceEquals(game, preset) &&
+                               (string.Equals(game.Name, dialog.GameName, StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(game.Url, dialog.GameUrl, StringComparison.OrdinalIgnoreCase))))
+        {
+            MessageBox.Show(this, "Another preset already uses that name or URL.", "Duplicate preset");
+            return;
+        }
+
+        var index = _games.IndexOf(preset);
+        var updated = new GamePreset(dialog.GameName, dialog.GameUrl);
+        _games[index] = updated;
+        var recentIndex = _settings.RecentGameNames.FindIndex(name => string.Equals(name, preset.Name, StringComparison.Ordinal));
+        if (recentIndex >= 0)
+        {
+            _settings.RecentGameNames[recentIndex] = updated.Name;
+        }
+
+        await SaveCustomGamePresetsAsync();
+        await _settingsStore.SaveAsync(_settings);
+        GamePicker.SelectedItem = updated;
+        Log($"Updated game preset: {updated.Name}.");
+    }
+
+    private async void DuplicateGamePreset_Click(object sender, RoutedEventArgs e)
+    {
+        if (GamePicker.SelectedItem is not GamePreset { Url.Length: > 0 } preset)
+        {
+            return;
+        }
+
+        var baseName = $"{preset.Name} copy";
+        var name = baseName;
+        for (var suffix = 2; _games.Any(game => string.Equals(game.Name, name, StringComparison.OrdinalIgnoreCase)); suffix++)
+        {
+            name = $"{baseName} {suffix}";
+        }
+
+        var duplicate = new GamePreset(name, preset.Url);
+        _games.Insert(_games.Count - 1, duplicate);
+        await SaveCustomGamePresetsAsync();
+        GamePicker.SelectedItem = duplicate;
+        Log($"Duplicated game preset: {duplicate.Name}.");
+    }
+
+    private async void ImportGamePresets_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Import Roblox game presets",
+            Filter = "Roblox Alt Client presets (*.json)|*.json|JSON files (*.json)|*.json"
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var imported = await PresetTransferService.ImportAsync(dialog.FileName);
+            var added = 0;
+            foreach (var preset in imported)
+            {
+                if (_games.Any(existing =>
+                        string.Equals(existing.Name, preset.Name, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(existing.Url, preset.Url, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                _games.Insert(_games.Count - 1, preset);
+                added++;
+            }
+
+            await SaveCustomGamePresetsAsync();
+            Log($"Imported {added} game preset(s). Existing names and URLs were skipped.");
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "Preset import failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void ExportGamePresets_Click(object sender, RoutedEventArgs e)
+    {
+        var customPresets = _games.Where(game => !game.IsBuiltIn).ToArray();
+        if (customPresets.Length == 0)
+        {
+            MessageBox.Show(this, "There are no custom presets to export.", "No presets");
+            return;
+        }
+
+        var dialog = new SaveFileDialog
+        {
+            Title = "Export Roblox game presets",
+            Filter = "Roblox Alt Client presets (*.json)|*.json",
+            FileName = "roblox-game-presets.json",
+            AddExtension = true,
+            DefaultExt = ".json"
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        await PresetTransferService.ExportAsync(dialog.FileName, customPresets);
+        Log($"Exported {customPresets.Length} custom game preset(s). No account or session data was included.");
+    }
+
+    private void PresetSearch_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        var query = PresetSearchBox.Text.Trim();
+        var view = CollectionViewSource.GetDefaultView(_games);
+        view.Filter = item => item is GamePreset preset &&
+                              (query.Length == 0 || preset.Name.Contains(query, StringComparison.OrdinalIgnoreCase));
+        view.Refresh();
+    }
+
+    private void ApplyRecentGameOrder()
+    {
+        foreach (var name in _settings.RecentGameNames.AsEnumerable().Reverse())
+        {
+            var game = _games.FirstOrDefault(candidate =>
+                !string.IsNullOrEmpty(candidate.Url) &&
+                string.Equals(candidate.Name, name, StringComparison.Ordinal));
+            if (game is null)
+            {
+                continue;
+            }
+
+            _games.Move(_games.IndexOf(game), 0);
+        }
+    }
+
+    private async Task RecordRecentGameAsync()
+    {
+        if (GamePicker.SelectedItem is not GamePreset { Url.Length: > 0 } game)
+        {
+            return;
+        }
+
+        _settings.RecentGameNames.RemoveAll(name => string.Equals(name, game.Name, StringComparison.Ordinal));
+        _settings.RecentGameNames.Insert(0, game.Name);
+        if (_settings.RecentGameNames.Count > 5)
+        {
+            _settings.RecentGameNames.RemoveRange(5, _settings.RecentGameNames.Count - 5);
+        }
+
+        await _settingsStore.SaveAsync(_settings);
+        ApplyRecentGameOrder();
+        GamePicker.SelectedItem = game;
+    }
+
     private async void RemoveGamePreset_Click(object sender, RoutedEventArgs e)
     {
         if (GamePicker.SelectedItem is not GamePreset { IsBuiltIn: false } preset)
@@ -776,7 +951,9 @@ public partial class MainWindow : Window
         }
 
         _games.Remove(preset);
+        _settings.RecentGameNames.RemoveAll(name => string.Equals(name, preset.Name, StringComparison.Ordinal));
         await SaveCustomGamePresetsAsync();
+        await _settingsStore.SaveAsync(_settings);
         GamePicker.SelectedIndex = 0;
         Log($"Removed game preset: {preset.Name}.");
     }
@@ -944,6 +1121,9 @@ public partial class MainWindow : Window
         CustomUrlBox.IsEnabled = enabled;
         AddGamePresetButton.IsEnabled = enabled;
         RemoveGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        EditGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
+        DuplicateGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
+        PresetSearchBox.IsEnabled = enabled;
         AddAccountButton.IsEnabled = enabled;
         RemoveAccountButton.IsEnabled = enabled;
         OpenLoginButton.IsEnabled = enabled;

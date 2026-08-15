@@ -20,6 +20,8 @@ flowchart LR
 3. Choose a game preset or paste a Roblox game URL.
 4. Click **Auto-launch selected**.
 
+Profiles support groups, favorites, drag ordering, and multi-select launch queues. Game presets can be searched, edited, duplicated, imported, or exported; private-server links are supported.
+
 The Windows x64 EXE includes .NET. Microsoft WebView2 Runtime is required. Updates are downloaded from GitHub, checksum-verified, and installed after you approve a restart.
 
 ## Privacy
@@ -38,6 +40,8 @@ build-client.cmd
 ```
 
 Output: `release\RobloxAltClient.exe`. The source is under `client\` and licensed under MIT.
+
+Release signing is optional. Configure a base64-encoded PFX as `WINDOWS_SIGNING_CERTIFICATE_BASE64` and its password as `WINDOWS_SIGNING_CERTIFICATE_PASSWORD` in GitHub repository secrets. Releases are signed before checksums are generated.
 
 ## Notes
 

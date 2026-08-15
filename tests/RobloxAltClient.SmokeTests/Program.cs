@@ -24,6 +24,11 @@ Require(
 Require(
     !GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/home", out _),
     "A non-game Roblox URL was accepted.");
+Require(
+    GamePreset.TryNormalizeRobloxGameUrl(
+        "https://www.roblox.com/games/123456/Test?privateServerLinkCode=secret",
+        out var privateServerUrl) && privateServerUrl.Contains("privateServerLinkCode=secret"),
+    "A Roblox private-server link was not preserved.");
 
 Require(
     UpdateService.TryParseReleaseVersion("v1.2.3", out var releaseVersion) && releaseVersion == new Version(1, 2, 3),
@@ -91,6 +96,21 @@ try
     await accountStore.SaveAsync(expectedAccounts);
     var loadedAccounts = await accountStore.LoadAsync();
     Require(loadedAccounts.Count == 1 && loadedAccounts[0].IsFavorite, "Account profile metadata did not reload.");
+
+    var transferPath = Path.Combine(testDirectory, "preset-transfer.json");
+    await PresetTransferService.ExportAsync(transferPath,
+    [
+        new GamePreset("Built in", "https://www.roblox.com/games/111/Built-In", true),
+        new GamePreset("Private game", "https://www.roblox.com/games/222/Private?privateServerLinkCode=abc")
+    ]);
+    var transferredPresets = await PresetTransferService.ImportAsync(transferPath);
+    Require(transferredPresets.Count == 1, "Preset export included built-in games.");
+    Require(transferredPresets[0].Url.Contains("privateServerLinkCode=abc"), "Preset transfer lost a private-server link.");
+
+    var confirmationPath = Path.Combine(Path.GetTempPath(), $"RobloxAltClient-update-{Guid.NewGuid():N}.ok");
+    UpdateService.ConfirmUpdatedLaunch(["--confirm-update", confirmationPath]);
+    Require(File.Exists(confirmationPath), "The updater did not receive its successful-start confirmation.");
+    File.Delete(confirmationPath);
 }
 finally
 {
