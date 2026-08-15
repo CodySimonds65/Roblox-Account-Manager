@@ -90,21 +90,35 @@
                     BorderThickness="1" CornerRadius="14" Padding="15" Margin="0,0,0,14">
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="250" />
+                        <ColumnDefinition Width="285" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <StackPanel>
-                        <TextBlock Text="GAME" FontSize="10" FontWeight="Bold" Foreground="{StaticResource MutedTextBrush}" Margin="2,0,0,6" />
-                        <ComboBox x:Name="GamePicker" SelectionChanged="GamePicker_SelectionChanged" />
+                        <TextBlock Text="GAME PRESET" FontSize="10" FontWeight="Bold" Foreground="{StaticResource MutedTextBrush}" Margin="2,0,0,6" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="GamePicker" SelectionChanged="GamePicker_SelectionChanged" />
+                            <Button x:Name="AddGamePresetButton" Grid.Column="1" Content="＋" ToolTip="Add game preset"
+                                    Click="AddGamePreset_Click" Style="{StaticResource CompactButton}"
+                                    Width="34" Height="34" Padding="0" Margin="7,0,0,0" />
+                            <Button x:Name="RemoveGamePresetButton" Grid.Column="2" Content="−" ToolTip="Remove selected preset"
+                                    Click="RemoveGamePreset_Click" Style="{StaticResource CompactButton}"
+                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" IsEnabled="False" />
+                        </Grid>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Margin="12,0,0,0">
                         <TextBlock Text="CUSTOM ROBLOX URL" FontSize="10" FontWeight="Bold" Foreground="{StaticResource MutedTextBrush}" Margin="2,0,0,6" />
                         <TextBox x:Name="CustomUrlBox" Visibility="Collapsed" Text="https://www.roblox.com/games/" />
                         <Border x:Name="PresetHint" Background="#0D1016" BorderBrush="{StaticResource BorderBrush}"
                                 BorderThickness="1" CornerRadius="8" Padding="11,8">
-                            <TextBlock Text="Using the selected game preset" Foreground="{StaticResource MutedTextBrush}" FontSize="13" />
+                            <TextBlock x:Name="PresetHintText" Text="Using the selected game preset"
+                                       Foreground="{StaticResource MutedTextBrush}" FontSize="13" TextTrimming="CharacterEllipsis" />
                         </Border>
                     </StackPanel>
                     <Button x:Name="OpenLoginButton" Grid.Column="2" Content="Login / Home" Click="OpenLogin_Click"
