@@ -1,0 +1,20 @@
+<Window x:Class="RobloxAltClient.InputDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add Roblox account" Height="180" Width="420"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="#171923" Foreground="White">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <TextBlock Text="Account label" FontWeight="SemiBold" Margin="0,0,0,8" />
+        <TextBox x:Name="LabelBox" Grid.Row="1" />
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+            <Button Content="Cancel" Width="90" Margin="0,12,8,0" Click="Cancel_Click" Background="#3C4054" />
+            <Button Content="Add" Width="90" Margin="0,12,0,0" Click="Add_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

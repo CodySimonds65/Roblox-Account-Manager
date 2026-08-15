@@ -1,0 +1,21 @@
+# .NET build output
+client/bin/
+client/obj/
+
+# Packaged output
+dist/
+single-file/
+release/
+
+# Microsoft Sysinternals binaries are downloaded from Microsoft at runtime.
+# Their license does not permit third-party redistribution.
+tools/*.exe
+
+# Visual Studio and local user state
+.vs/
+*.user
+*.suo
+
+# OS metadata
+Thumbs.db
+Desktop.ini

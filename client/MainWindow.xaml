@@ -1,0 +1,173 @@
+<Window x:Class="RobloxAltClient.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Roblox Alt Client" Height="860" Width="1380" MinHeight="700" MinWidth="1080"
+        Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="18">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="286" />
+            <ColumnDefinition Width="18" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="16" Padding="17">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid Margin="2,1,2,25">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="44" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Width="38" Height="38" CornerRadius="11" Background="{StaticResource AccentBrush}">
+                        <TextBlock Text="R" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0">
+                        <TextBlock Text="Alt Client" FontSize="18" FontWeight="SemiBold" />
+                        <TextBlock Text="Roblox launcher" FontSize="12" Foreground="{StaticResource MutedTextBrush}" />
+                    </StackPanel>
+                </Grid>
+
+                <Grid Grid.Row="1" Margin="2,0,2,10">
+                    <TextBlock Text="ACCOUNT PROFILES" FontSize="11" FontWeight="SemiBold"
+                               Foreground="{StaticResource MutedTextBrush}" />
+                    <Border HorizontalAlignment="Right" Background="#211D38" CornerRadius="8" Padding="7,2">
+                        <TextBlock Text="MULTI-SELECT" FontSize="9" FontWeight="Bold" Foreground="#B5A7FF" />
+                    </Border>
+                </Grid>
+
+                <ListBox x:Name="AccountsList" Grid.Row="2" SelectionMode="Multiple"
+                         SelectionChanged="AccountsList_SelectionChanged">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <CheckBox Content="{Binding Label}"
+                                      IsChecked="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=IsSelected, Mode=TwoWay}" />
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <StackPanel Grid.Row="3" Margin="0,14,0,0">
+                    <Button x:Name="AddAccountButton" Content="＋  Add account profile" Click="AddAccount_Click" />
+                    <Button x:Name="RemoveAccountButton" Content="Remove selected session" Click="RemoveAccount_Click"
+                            Style="{StaticResource DangerButton}" Margin="0,8,0,0" />
+                    <TextBlock Text="Sessions stay isolated and local to this PC." TextWrapping="Wrap"
+                               FontSize="11" Foreground="{StaticResource MutedTextBrush}" Margin="3,13,3,0" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Column="2">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="176" />
+            </Grid.RowDefinitions>
+
+            <Grid Margin="2,3,2,18">
+                <StackPanel>
+                    <TextBlock Text="Launch workspace" FontSize="25" FontWeight="SemiBold" />
+                    <TextBlock Text="Choose profiles, pick a game, and launch every client in sequence."
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="13" Margin="0,3,0,0" />
+                </StackPanel>
+                <Border HorizontalAlignment="Right" VerticalAlignment="Center" Background="#10261F"
+                        BorderBrush="#1C4B3C" BorderThickness="1" CornerRadius="12" Padding="10,5">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}" Margin="0,0,7,0" />
+                        <TextBlock Text="LOCAL ONLY" FontSize="10" FontWeight="Bold" Foreground="#7DE6BC" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="14" Padding="15" Margin="0,0,0,14">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="250" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="GAME" FontSize="10" FontWeight="Bold" Foreground="{StaticResource MutedTextBrush}" Margin="2,0,0,6" />
+                        <ComboBox x:Name="GamePicker" SelectionChanged="GamePicker_SelectionChanged" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                        <TextBlock Text="CUSTOM ROBLOX URL" FontSize="10" FontWeight="Bold" Foreground="{StaticResource MutedTextBrush}" Margin="2,0,0,6" />
+                        <TextBox x:Name="CustomUrlBox" Visibility="Collapsed" Text="https://www.roblox.com/games/" />
+                        <Border x:Name="PresetHint" Background="#0D1016" BorderBrush="{StaticResource BorderBrush}"
+                                BorderThickness="1" CornerRadius="8" Padding="11,8">
+                            <TextBlock Text="Using the selected game preset" Foreground="{StaticResource MutedTextBrush}" FontSize="13" />
+                        </Border>
+                    </StackPanel>
+                    <Button x:Name="OpenLoginButton" Grid.Column="2" Content="Login / Home" Click="OpenLogin_Click"
+                            Style="{StaticResource SecondaryButton}" Margin="12,16,8,0" VerticalAlignment="Top" />
+                    <Button x:Name="AutoLaunchButton" Grid.Column="3" Content="▶  Auto-launch selected" Click="PrepareLaunch_Click"
+                            Margin="0,16,0,0" VerticalAlignment="Top" />
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="2" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="14" ClipToBounds="True">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="46" />
+                        <RowDefinition Height="3" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid Background="{StaticResource ElevatedBrush}" Margin="0">
+                        <StackPanel Orientation="Horizontal" Margin="15,0" VerticalAlignment="Center">
+                            <Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}" Margin="0,0,9,0" />
+                            <TextBlock x:Name="ActiveProfileText" Text="No profile selected" FontSize="13" FontWeight="SemiBold" />
+                            <TextBlock Text="  •  ISOLATED ROBLOX SESSION" FontSize="10" FontWeight="Bold"
+                                       Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
+                    <ProgressBar x:Name="LaunchProgress" Grid.Row="1" IsIndeterminate="True" Visibility="Collapsed"
+                                 Foreground="{StaticResource AccentBrush}" Background="Transparent" BorderThickness="0" />
+                    <Grid x:Name="BrowserHost" Grid.Row="2" Background="#0B0D12">
+                        <StackPanel x:Name="BrowserPlaceholder" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Border Width="54" Height="54" CornerRadius="16" Background="#1B1E29" HorizontalAlignment="Center">
+                                <TextBlock Text="↗" FontSize="24" Foreground="{StaticResource MutedTextBrush}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <TextBlock Text="Select an account profile" FontSize="16" FontWeight="SemiBold"
+                                       HorizontalAlignment="Center" Margin="0,14,0,4" />
+                            <TextBlock Text="Its private Roblox session will open here."
+                                       Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="3" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="14" Padding="13" Margin="0,14,0,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid Margin="2,0,2,9">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Activity" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <TextBlock Text="  Live diagnostics" FontSize="11" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <Button Content="Copy log" HorizontalAlignment="Right" Style="{StaticResource CompactButton}"
+                                Click="CopyActivity_Click" />
+                    </Grid>
+                    <TextBox x:Name="ActivityLog" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True"
+                             TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                             FontFamily="Cascadia Mono" FontSize="12" Background="#0B0D12" Foreground="#CBD1DE"
+                             BorderBrush="#202531" Padding="10,8" />
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>
