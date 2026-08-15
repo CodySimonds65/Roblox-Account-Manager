@@ -1,7 +1,7 @@
 <Window x:Class="RobloxAltClient.InputDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Account profile" Height="285" Width="440"
+        Title="Account profile" Width="440" MinHeight="285" SizeToContent="Height"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Background="#171923" Foreground="White">
     <Grid Margin="20">
