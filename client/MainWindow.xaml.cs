@@ -466,7 +466,7 @@ public partial class MainWindow : Window
                 _browser.CoreWebView2.Navigate(args.Uri);
             };
             _browser.CoreWebView2.Navigate("https://www.roblox.com/home");
-            Log($"Opened isolated Roblox session for {account.Label}.");
+            Log($"Opened Roblox session for {account.Label}.");
         }
         catch (Exception exception)
         {
