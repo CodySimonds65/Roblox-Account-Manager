@@ -34,7 +34,7 @@ jobs:
           $signals = "$env:PR_TITLE $env:PR_LABELS"
           $bump = if ($signals -match '(?i)\b(BREAKING|major)\b') {
               'major'
-          } elseif ($signals -match '(?i)\bminor\b') {
+          } elseif ($signals -match '(?i)\b(feat|feature|minor)\b') {
               'minor'
           } elseif ($signals -match '(?i)\b(fix|chore)\b') {
               'patch'
