@@ -151,11 +151,8 @@ jobs:
               throw 'The published executable was not found.'
           }
 
-          # Keep the old filename in releases so existing installations can update in place.
-          Copy-Item -LiteralPath $executable -Destination '.\release\RobloxAltClient.exe' -Force
           $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  RobloxAccountManager.exe" | Set-Content -LiteralPath '.\release\SHA256SUMS.txt' -Encoding ascii
-          "$hash  RobloxAltClient.exe" | Add-Content -LiteralPath '.\release\SHA256SUMS.txt' -Encoding ascii
           "sha256=$hash" >> $env:GITHUB_OUTPUT
 
       - name: Publish GitHub release
@@ -166,6 +163,6 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_TARGET: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
-          gh release create $env:RELEASE_TAG '.\release\RobloxAccountManager.exe#RobloxAccountManager.exe' '.\release\RobloxAltClient.exe#RobloxAltClient.exe' '.\release\SHA256SUMS.txt#SHA256SUMS.txt' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "Roblox Account Manager $env:RELEASE_TAG" --generate-notes --fail-on-no-commits
+          gh release create $env:RELEASE_TAG '.\release\RobloxAccountManager.exe#RobloxAccountManager.exe' '.\release\SHA256SUMS.txt#SHA256SUMS.txt' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "Roblox Account Manager $env:RELEASE_TAG" --generate-notes --fail-on-no-commits
           "### Published $env:RELEASE_TAG" >> $env:GITHUB_STEP_SUMMARY
           "SHA-256: ``${{ steps.checksum.outputs.sha256 }}``" >> $env:GITHUB_STEP_SUMMARY
