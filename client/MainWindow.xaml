@@ -252,7 +252,7 @@
                         <StackPanel Orientation="Horizontal" Margin="15,0" VerticalAlignment="Center">
                             <Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}" Margin="0,0,9,0" />
                             <TextBlock x:Name="ActiveProfileText" Text="No profile selected" FontSize="13" FontWeight="SemiBold" />
-                            <TextBlock Text="  •  ISOLATED ROBLOX SESSION" FontSize="10" FontWeight="Bold"
+                            <TextBlock Text="  •  SESSION" FontSize="10" FontWeight="Bold"
                                        Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
                         </StackPanel>
                     </Grid>
