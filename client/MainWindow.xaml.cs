@@ -741,7 +741,7 @@ public partial class MainWindow : Window
             {
                 await _singletonUnlockSession.DisposeAsync();
                 _singletonUnlockSession = null;
-                Log("Closed the queue's administrator unlock helper.");
+                Log("Closed the queue's native singleton session.");
             }
 
             var running = _launchQueue.Count(item => item.State == LaunchQueueState.Running);
@@ -841,7 +841,7 @@ public partial class MainWindow : Window
     {
         if (_singletonUnlockSession is null)
         {
-            Log($"Preparing {accountLabel}: requesting administrator approval once for this launch queue...");
+            Log($"Preparing {accountLabel}: using the client's existing elevation for this launch queue...");
             var sessionResult = await _singletonService.StartSessionAsync(cancellationToken);
             foreach (var message in sessionResult.Messages)
             {

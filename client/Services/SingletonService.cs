@@ -1,219 +1,230 @@
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
-using System.Reflection;
-using System.Security.Cryptography;
-using System.Text.Json;
+using System.Security.Principal;
+using System.Text.RegularExpressions;
 
 namespace RobloxAltClient.Services;
 
-public sealed class SingletonService
+public sealed partial class SingletonService
 {
     private static readonly Uri HandleDownloadUri = new("https://download.sysinternals.com/files/Handle.zip");
     private static readonly HttpClient HttpClient = new();
 
     public async Task<UnlockResult> ReleaseAsync()
     {
-        string helperPath;
-        string handlePath;
-        try
+        if (!IsAdministrator())
         {
-            (helperPath, handlePath) = await PrepareToolsAsync();
+            return new UnlockResult(
+                false,
+                0,
+                ["Roblox Account Manager is not running as administrator. Close it and start it again."]);
         }
-        catch (Exception exception)
-        {
-            return new UnlockResult(false, 0, [$"Could not prepare the unlock tools: {exception.Message}"]);
-        }
-
-        var resultPath = Path.Combine(Path.GetTempPath(), $"roblox-alt-unlock-{Guid.NewGuid():N}.json");
-        var arguments = $"-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File {Quote(helperPath)} -HandleTool {Quote(handlePath)} -ResultPath {Quote(resultPath)}";
 
         try
         {
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                Arguments = arguments,
-                UseShellExecute = true,
-                Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Hidden
-            });
-
-            if (process is null)
-            {
-                return new UnlockResult(false, 0, ["Windows could not start the administrator unlock helper."]);
-            }
-
-            await process.WaitForExitAsync();
-            if (!File.Exists(resultPath))
-            {
-                return new UnlockResult(false, 0, [$"The unlock helper exited with code {process.ExitCode} without producing a result."]);
-            }
-
-            return await ReadResultAsync(resultPath);
-        }
-        catch (Win32Exception exception) when (exception.NativeErrorCode == 1223)
-        {
-            return new UnlockResult(false, 0, ["Administrator approval was cancelled."]);
+            var handlePath = await PrepareHandleToolAsync();
+            return await ReleaseHandlesAsync(handlePath, CancellationToken.None);
         }
         catch (Exception exception)
         {
             return new UnlockResult(false, 0, [exception.Message]);
         }
-        finally
-        {
-            if (File.Exists(resultPath))
-            {
-                File.Delete(resultPath);
-            }
-        }
     }
 
-    public async Task<SingletonSessionStartResult> StartSessionAsync(CancellationToken cancellationToken = default)
+    public async Task<SingletonSessionStartResult> StartSessionAsync(
+        CancellationToken cancellationToken = default)
     {
-        string sessionDirectory = string.Empty;
-        Process? process = null;
         try
         {
-            var (helperPath, handlePath) = await PrepareToolsAsync();
-            sessionDirectory = Path.Combine(Path.GetTempPath(), $"roblox-alt-unlock-session-{Guid.NewGuid():N}");
-            Directory.CreateDirectory(sessionDirectory);
-            var arguments = $"-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File {Quote(helperPath)} -HandleTool {Quote(handlePath)} -SessionDirectory {Quote(sessionDirectory)}";
-            process = Process.Start(new ProcessStartInfo
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsAdministrator())
             {
-                FileName = "powershell.exe",
-                Arguments = arguments,
-                UseShellExecute = true,
-                Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Hidden
-            });
-
-            if (process is null)
-            {
-                DeleteSessionDirectory(sessionDirectory);
-                return new SingletonSessionStartResult(false, null, ["Windows could not start the administrator unlock helper."]);
+                return new SingletonSessionStartResult(
+                    false,
+                    null,
+                    ["Roblox Account Manager is not running as administrator. Close it and start it again."]);
             }
 
-            var readyPath = Path.Combine(sessionDirectory, "ready");
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
-            while (!File.Exists(readyPath))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (process.HasExited)
-                {
-                    var exitCode = process.ExitCode;
-                    process.Dispose();
-                    DeleteSessionDirectory(sessionDirectory);
-                    return new SingletonSessionStartResult(
-                        false,
-                        null,
-                        [$"The administrator unlock helper exited with code {exitCode} before it was ready."]);
-                }
-
-                if (DateTime.UtcNow >= deadline)
-                {
-                    StopSessionProcess(process, sessionDirectory);
-                    process.Dispose();
-                    DeleteSessionDirectory(sessionDirectory);
-                    return new SingletonSessionStartResult(false, null, ["The administrator unlock helper did not become ready in time."]);
-                }
-
-                await Task.Delay(100, cancellationToken);
-            }
-
+            var handlePath = await PrepareHandleToolAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             return new SingletonSessionStartResult(
                 true,
-                new SingletonUnlockSession(process, sessionDirectory),
-                ["Administrator approval will be reused for the rest of this launch queue."]);
-        }
-        catch (Win32Exception exception) when (exception.NativeErrorCode == 1223)
-        {
-            StopSessionProcess(process, sessionDirectory);
-            process?.Dispose();
-            DeleteSessionDirectory(sessionDirectory);
-            return new SingletonSessionStartResult(false, null, ["Administrator approval was cancelled."]);
+                new SingletonUnlockSession(handlePath),
+                ["Using the client's existing elevated security context; no additional UAC prompt will be requested."]);
         }
         catch (OperationCanceledException)
         {
-            StopSessionProcess(process, sessionDirectory);
-            process?.Dispose();
-            DeleteSessionDirectory(sessionDirectory);
             throw;
         }
         catch (Exception exception)
         {
-            StopSessionProcess(process, sessionDirectory);
-            process?.Dispose();
-            DeleteSessionDirectory(sessionDirectory);
-            return new SingletonSessionStartResult(false, null, [$"Could not start the administrator unlock helper: {exception.Message}"]);
+            return new SingletonSessionStartResult(
+                false,
+                null,
+                [$"Could not prepare the native singleton unlock service: {exception.Message}"]);
         }
     }
 
-    private static async Task<(string HelperPath, string HandlePath)> PrepareToolsAsync()
+    private static bool IsAdministrator()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static async Task<string> PrepareHandleToolAsync(CancellationToken cancellationToken = default)
     {
         var toolDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "RobloxAltClient",
             "Tools");
         Directory.CreateDirectory(toolDirectory);
-
-        var helperPath = await ExtractEmbeddedResourceAsync(
-            "RobloxAltClient.Resources.Unlock-Roblox.ps1",
-            Path.Combine(toolDirectory, "Unlock-Roblox.ps1"));
-        var handlePath = await EnsureHandleToolAsync(Path.Combine(toolDirectory, "handle64.exe"));
-        return (helperPath, handlePath);
+        return await EnsureHandleToolAsync(Path.Combine(toolDirectory, "handle64.exe"), cancellationToken);
     }
 
-    internal static async Task<UnlockResult> ReadResultAsync(string resultPath)
+    internal static async Task<UnlockResult> ReleaseHandlesAsync(
+        string handlePath,
+        CancellationToken cancellationToken)
     {
-        var json = await File.ReadAllTextAsync(resultPath);
-        return JsonSerializer.Deserialize<UnlockResult>(json, new JsonSerializerOptions
+        var processes = Process.GetProcessesByName("RobloxPlayerBeta");
+        if (processes.Length == 0)
         {
-            PropertyNameCaseInsensitive = true
-        }) ?? new UnlockResult(false, 0, ["The unlock helper returned an unreadable result."]);
-    }
+            return new UnlockResult(
+                false,
+                0,
+                ["No running Roblox client was found. Launch the first account into a game before preparing another account."]);
+        }
 
-    internal static void DeleteSessionDirectory(string sessionDirectory)
-    {
-        if (!string.IsNullOrWhiteSpace(sessionDirectory) && Directory.Exists(sessionDirectory))
+        var messages = new List<string>();
+        var closedCount = 0;
+        try
         {
             try
             {
-                Directory.Delete(sessionDirectory, recursive: true);
+                foreach (var process in processes)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var queryResult = await RunHandleAsync(
+                        handlePath,
+                        cancellationToken,
+                        "-accepteula", "-nobanner", "-a", "-p", process.Id.ToString());
+                    EnsureHandleSucceeded(queryResult, $"inspect Roblox PID {process.Id}");
+
+                    foreach (var handle in ParseSingletonHandles(queryResult.Output))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var closeResult = await RunHandleAsync(
+                            handlePath,
+                            cancellationToken,
+                            "-accepteula", "-nobanner", "-c", handle.Id, "-p", process.Id.ToString(), "-y");
+                        EnsureHandleSucceeded(closeResult, $"release {handle.Name} in PID {process.Id}");
+                        closedCount++;
+                        messages.Add($"Released {handle.Name} in PID {process.Id}.");
+                    }
+                }
             }
-            catch
+            finally
             {
-                // The helper may still be releasing its final file handle. The
-                // temporary directory is harmless and will be cleaned by Windows.
+                foreach (var process in processes)
+                {
+                    process.Dispose();
+                }
             }
+
+            if (closedCount == 0)
+            {
+                messages.Add("No singleton handles are currently present; Roblox is already unlocked.");
+            }
+
+            var verificationProcesses = Process.GetProcessesByName("RobloxPlayerBeta");
+            try
+            {
+                foreach (var process in verificationProcesses)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var verificationResult = await RunHandleAsync(
+                        handlePath,
+                        cancellationToken,
+                        "-accepteula", "-nobanner", "-a", "-p", process.Id.ToString());
+                    EnsureHandleSucceeded(verificationResult, $"verify Roblox PID {process.Id}");
+
+                    if (ParseSingletonHandles(verificationResult.Output).Count > 0)
+                    {
+                        throw new InvalidOperationException($"Roblox still owns a singleton object in PID {process.Id}.");
+                    }
+                }
+            }
+            finally
+            {
+                foreach (var process in verificationProcesses)
+                {
+                    process.Dispose();
+                }
+            }
+
+            return new UnlockResult(true, closedCount, [.. messages]);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            messages.Add(exception.Message);
+            return new UnlockResult(false, closedCount, [.. messages]);
         }
     }
 
-    internal static void StopSessionProcess(Process? process, string sessionDirectory)
+    private static List<SingletonHandle> ParseSingletonHandles(string output)
     {
-        if (process is null)
+        var handles = new List<SingletonHandle>();
+        foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
         {
-            return;
+            var match = HandleLineRegex().Match(line);
+            if (!match.Success)
+            {
+                continue;
+            }
+
+            var nameMatch = SingletonNameRegex().Match(match.Groups["name"].Value.Trim());
+            if (nameMatch.Success)
+            {
+                handles.Add(new SingletonHandle(
+                    match.Groups["id"].Value,
+                    nameMatch.Value.TrimStart('\\')));
+            }
         }
 
+        return handles;
+    }
+
+    private static async Task<HandleResult> RunHandleAsync(
+        string handlePath,
+        CancellationToken cancellationToken,
+        params string[] arguments)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = handlePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Windows could not start the Sysinternals Handle tool.");
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
         try
         {
-            if (process.HasExited)
-            {
-                return;
-            }
-
-            if (!string.IsNullOrWhiteSpace(sessionDirectory) && Directory.Exists(sessionDirectory))
-            {
-                File.WriteAllText(Path.Combine(sessionDirectory, "stop"), string.Empty);
-            }
-
-            if (!process.WaitForExit(2000))
-            {
-                process.Kill(entireProcessTree: true);
-            }
+            await process.WaitForExitAsync(cancellationToken);
         }
         catch
         {
@@ -226,26 +237,47 @@ public sealed class SingletonService
             }
             catch
             {
-                // Elevated processes can deny termination to a standard token.
+                // Best effort cleanup when cancellation races process exit.
             }
+
+            throw;
         }
+
+        var output = await standardOutput;
+        var error = await standardError;
+        return new HandleResult(process.ExitCode, string.Join(Environment.NewLine, new[] { output, error }
+            .Where(value => !string.IsNullOrWhiteSpace(value))));
     }
 
-    private static string Quote(string value) => $"\"{value.Replace("\"", "")}\"";
+    private static void EnsureHandleSucceeded(HandleResult result, string operation)
+    {
+        if (result.ExitCode == 0)
+        {
+            return;
+        }
 
-    private static async Task<string> EnsureHandleToolAsync(string destinationPath)
+        var detail = string.IsNullOrWhiteSpace(result.Output)
+            ? "No diagnostic output was produced."
+            : result.Output.Trim();
+        throw new InvalidOperationException(
+            $"Sysinternals Handle could not {operation} (exit code {result.ExitCode}): {detail}");
+    }
+
+    private static async Task<string> EnsureHandleToolAsync(
+        string destinationPath,
+        CancellationToken cancellationToken = default)
     {
         if (File.Exists(destinationPath) && new FileInfo(destinationPath).Length > 0)
         {
             return destinationPath;
         }
 
-        using var response = await HttpClient.GetAsync(HandleDownloadUri);
+        using var response = await HttpClient.GetAsync(HandleDownloadUri, cancellationToken);
         response.EnsureSuccessStatusCode();
 
-        await using var download = await response.Content.ReadAsStreamAsync();
+        await using var download = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var archiveBytes = new MemoryStream();
-        await download.CopyToAsync(archiveBytes);
+        await download.CopyToAsync(archiveBytes, cancellationToken);
         archiveBytes.Position = 0;
 
         using var archive = new ZipArchive(archiveBytes, ZipArchiveMode.Read);
@@ -259,7 +291,7 @@ public sealed class SingletonService
             await using (var source = handleEntry.Open())
             await using (var destination = File.Create(temporaryPath))
             {
-                await source.CopyToAsync(destination);
+                await source.CopyToAsync(destination, cancellationToken);
             }
 
             if (new FileInfo(temporaryPath).Length == 0)
@@ -279,42 +311,14 @@ public sealed class SingletonService
         }
     }
 
-    private static async Task<string> ExtractEmbeddedResourceAsync(string resourceName, string destinationPath)
-    {
-        await using var resource = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName)
-            ?? throw new InvalidOperationException($"Embedded resource '{resourceName}' is missing.");
+    [GeneratedRegex(@"^\s*(?<id>[0-9A-Fa-f]+):\s+\S+\s+(?<name>.+)$")]
+    private static partial Regex HandleLineRegex();
 
-        using var memory = new MemoryStream();
-        await resource.CopyToAsync(memory);
-        var expectedBytes = memory.ToArray();
-        var expectedHash = SHA256.HashData(expectedBytes);
+    [GeneratedRegex(@"\\ROBLOX_singleton(?:Event|Mutex)$", RegexOptions.IgnoreCase)]
+    private static partial Regex SingletonNameRegex();
 
-        if (File.Exists(destinationPath))
-        {
-            await using var existing = File.OpenRead(destinationPath);
-            var existingHash = await SHA256.HashDataAsync(existing);
-            if (CryptographicOperations.FixedTimeEquals(expectedHash, existingHash))
-            {
-                return destinationPath;
-            }
-        }
-
-        var temporaryPath = $"{destinationPath}.{Guid.NewGuid():N}.tmp";
-        await File.WriteAllBytesAsync(temporaryPath, expectedBytes);
-        try
-        {
-            File.Move(temporaryPath, destinationPath, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
-
-        return destinationPath;
-    }
+    private sealed record SingletonHandle(string Id, string Name);
+    private sealed record HandleResult(int ExitCode, string Output);
 }
 
 public sealed record UnlockResult(bool Success, int ClosedCount, string[] Messages);
@@ -326,118 +330,23 @@ public sealed record SingletonSessionStartResult(
 
 public sealed class SingletonUnlockSession : IAsyncDisposable
 {
-    private readonly Process _process;
-    private readonly string _sessionDirectory;
+    private readonly string _handlePath;
     private bool _disposed;
 
-    internal SingletonUnlockSession(Process process, string sessionDirectory)
+    internal SingletonUnlockSession(string handlePath)
     {
-        _process = process;
-        _sessionDirectory = sessionDirectory;
+        _handlePath = handlePath;
     }
 
-    public async Task<UnlockResult> ReleaseAsync(CancellationToken cancellationToken = default)
+    public Task<UnlockResult> ReleaseAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_process.HasExited)
-        {
-            return new UnlockResult(false, 0, ["The queue's administrator unlock helper is no longer running."]);
-        }
-
-        var requestId = Guid.NewGuid().ToString("N");
-        var requestPath = Path.Combine(_sessionDirectory, $"request-{requestId}");
-        var temporaryRequestPath = $"{requestPath}.tmp";
-        var resultPath = Path.Combine(_sessionDirectory, $"result-{requestId}.json");
-        try
-        {
-            await File.WriteAllTextAsync(temporaryRequestPath, requestId, cancellationToken);
-            File.Move(temporaryRequestPath, requestPath);
-
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
-            while (!File.Exists(resultPath))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (_process.HasExited)
-                {
-                    return new UnlockResult(false, 0, ["The queue's administrator unlock helper exited unexpectedly."]);
-                }
-
-                if (DateTime.UtcNow >= deadline)
-                {
-                    return new UnlockResult(false, 0, ["The queue's administrator unlock helper did not respond in time."]);
-                }
-
-                await Task.Delay(100, cancellationToken);
-            }
-
-            return await SingletonService.ReadResultAsync(resultPath);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            return new UnlockResult(false, 0, [$"Could not communicate with the administrator unlock helper: {exception.Message}"]);
-        }
-        finally
-        {
-            foreach (var path in new[] { temporaryRequestPath, requestPath, resultPath })
-            {
-                if (File.Exists(path))
-                {
-                    try
-                    {
-                        File.Delete(path);
-                    }
-                    catch
-                    {
-                        // The session shutdown path will retry directory cleanup.
-                    }
-                }
-            }
-        }
+        return SingletonService.ReleaseHandlesAsync(_handlePath, cancellationToken);
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_disposed)
-        {
-            return;
-        }
-
         _disposed = true;
-        try
-        {
-            if (!_process.HasExited)
-            {
-                await File.WriteAllTextAsync(Path.Combine(_sessionDirectory, "stop"), string.Empty);
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                try
-                {
-                    await _process.WaitForExitAsync(timeout.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    try
-                    {
-                        _process.Kill(entireProcessTree: true);
-                    }
-                    catch
-                    {
-                        // Elevated processes can deny termination to a standard token.
-                    }
-                }
-            }
-        }
-        catch
-        {
-            SingletonService.StopSessionProcess(_process, _sessionDirectory);
-        }
-        finally
-        {
-            _process.Dispose();
-            SingletonService.DeleteSessionDirectory(_sessionDirectory);
-        }
+        return ValueTask.CompletedTask;
     }
 }
