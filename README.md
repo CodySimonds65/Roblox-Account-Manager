@@ -50,6 +50,7 @@ The **Game settings** tab stores global defaults and optional per-game overrides
 ## Notes
 
 - The first multi-launch downloads Sysinternals Handle to `%LOCALAPPDATA%\RobloxAltClient\Tools`.
+- Multi-launch requests administrator approval once, then reuses the hidden unlock helper until that launch queue finishes.
 - The original PowerShell launcher remains available through `launch.cmd`.
 - The Activity log can be selected or copied with **Copy all**.
 
