@@ -2,6 +2,8 @@ namespace RobloxAltClient.Models;
 
 public sealed record GamePreset(string Name, string Url, bool IsBuiltIn = false)
 {
+    public GameSettings? Settings { get; set; }
+
     public override string ToString() => Name;
 
     public static bool TryNormalizeRobloxGameUrl(string value, out string normalizedUrl)

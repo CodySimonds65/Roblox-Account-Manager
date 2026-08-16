@@ -164,10 +164,12 @@
                             Padding="12,6" Margin="0,0,8,0" />
                     <Button Content="Diagnostics" Click="Diagnostics_Click" Style="{StaticResource SecondaryButton}"
                             Padding="12,6" Margin="0,0,8,0" />
-                    <Border Background="#10261F" BorderBrush="#1C4B3C" BorderThickness="1" CornerRadius="12" Padding="10,5">
+                    <Border Background="#10261F" BorderBrush="#1C4B3C" BorderThickness="1" CornerRadius="12"
+                            Height="34" MinWidth="108" Padding="11,0" VerticalAlignment="Center">
                         <StackPanel Orientation="Horizontal">
-                            <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}" Margin="0,0,7,0" />
-                            <TextBlock Text="LOCAL ONLY" FontSize="10" FontWeight="Bold" Foreground="#7DE6BC" />
+                            <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}" Margin="0,0,7,0" VerticalAlignment="Center" />
+                            <TextBlock Text="LOCAL ONLY" FontSize="10" FontWeight="Bold" Foreground="#7DE6BC"
+                                       VerticalAlignment="Center" />
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -195,6 +197,8 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <ComboBox x:Name="GamePicker" SelectionChanged="GamePicker_SelectionChanged" />
                             <Button x:Name="AddGamePresetButton" Grid.Column="1" Content="＋" ToolTip="Add game preset"
@@ -209,10 +213,13 @@
                             <Button x:Name="DuplicateGamePresetButton" Grid.Column="4" Content="⧉" ToolTip="Duplicate selected preset"
                                     Click="DuplicateGamePreset_Click" Style="{StaticResource CompactButton}"
                                     Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
-                            <Button Grid.Column="5" Content="⇩" ToolTip="Import presets"
+                            <Button x:Name="ConfigureGameSettingsButton" Grid.Column="5" Content="⚙" ToolTip="Configure game settings"
+                                    Click="ConfigureGameSettings_Click" Style="{StaticResource CompactButton}"
+                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" IsEnabled="False" />
+                            <Button Grid.Column="6" Content="⇩" ToolTip="Import presets"
                                     Click="ImportGamePresets_Click" Style="{StaticResource CompactButton}"
                                     Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
-                            <Button Grid.Column="6" Content="⇧" ToolTip="Export presets"
+                            <Button Grid.Column="7" Content="⇧" ToolTip="Export presets"
                                     Click="ExportGamePresets_Click" Style="{StaticResource CompactButton}"
                                     Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
                         </Grid>

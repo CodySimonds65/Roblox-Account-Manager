@@ -12,7 +12,10 @@ public static class PresetTransferService
     {
         var export = presets
             .Where(preset => !preset.IsBuiltIn)
-            .Select(preset => new GamePreset(preset.Name, preset.Url))
+            .Select(preset => new GamePreset(preset.Name, preset.Url)
+            {
+                Settings = preset.Settings?.Clone()
+            })
             .ToList();
         await using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
         await JsonSerializer.SerializeAsync(stream, export, JsonOptions);
@@ -44,7 +47,16 @@ public static class PresetTransferService
                 continue;
             }
 
-            validated.Add(new GamePreset(preset.Name.Trim(), normalizedUrl));
+            if (preset.Settings is not null &&
+                !RobloxClientSettingsService.TryValidateSettings(preset.Settings, out var settingsError))
+            {
+                throw new InvalidOperationException($"The preset file contains invalid engine settings: {settingsError}");
+            }
+
+            validated.Add(new GamePreset(preset.Name.Trim(), normalizedUrl)
+            {
+                Settings = preset.Settings?.Clone()
+            });
         }
 
         return validated;
