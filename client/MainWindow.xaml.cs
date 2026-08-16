@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private readonly RobloxLauncherService _robloxLauncherService = new();
     private readonly RobloxClientSettingsService _robloxClientSettingsService = new();
     private readonly RobloxMenuSettingsService _robloxMenuSettingsService = new();
+    private SingletonUnlockSession? _singletonUnlockSession;
     private readonly ObservableCollection<AccountProfile> _accounts = [];
     private readonly ObservableCollection<LaunchQueueItem> _launchQueue = [];
     private readonly ObservableCollection<GamePreset> _games =
@@ -736,6 +737,13 @@ public partial class MainWindow : Window
         }
         finally
         {
+            if (_singletonUnlockSession is not null)
+            {
+                await _singletonUnlockSession.DisposeAsync();
+                _singletonUnlockSession = null;
+                Log("Closed the queue's administrator unlock helper.");
+            }
+
             var running = _launchQueue.Count(item => item.State == LaunchQueueState.Running);
             var failed = _launchQueue.Count(item => item.State == LaunchQueueState.Failed);
             Log($"Launch queue finished: {running} running, {failed} failed.");
@@ -767,8 +775,7 @@ public partial class MainWindow : Window
         if (previousProcessCount > 0)
         {
             item.Detail = "Releasing singleton";
-            Log($"Preparing {item.Label}: requesting administrator approval to release Roblox singleton handles...");
-            var result = await _singletonService.ReleaseAsync();
+            var result = await ReleaseSingletonAsync(item.Label, cancellationToken);
             foreach (var message in result.Messages)
             {
                 Log(message);
@@ -828,6 +835,28 @@ public partial class MainWindow : Window
 
         Log($"{item.Label} is running.");
         return (true, "Roblox started");
+    }
+
+    private async Task<UnlockResult> ReleaseSingletonAsync(string accountLabel, CancellationToken cancellationToken)
+    {
+        if (_singletonUnlockSession is null)
+        {
+            Log($"Preparing {accountLabel}: requesting administrator approval once for this launch queue...");
+            var sessionResult = await _singletonService.StartSessionAsync(cancellationToken);
+            foreach (var message in sessionResult.Messages)
+            {
+                Log(message);
+            }
+
+            if (!sessionResult.Success || sessionResult.Session is null)
+            {
+                return new UnlockResult(false, 0, []);
+            }
+
+            _singletonUnlockSession = sessionResult.Session;
+        }
+
+        return await _singletonUnlockSession.ReleaseAsync(cancellationToken);
     }
 
     private TimeSpan GetLaunchTimeout()
