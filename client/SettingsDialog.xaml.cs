@@ -23,10 +23,17 @@ public partial class SettingsDialog : Window
         SelectByTag(TimeoutBox, settings.LaunchTimeoutSeconds.ToString());
         SelectByTag(DelayBox, settings.LaunchDelaySeconds.ToString());
         SelectByTag(LauncherBox, settings.PreferredLauncher);
+        GameSettingsEditor.LoadSettings(settings.GameSettings);
     }
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
+        if (!GameSettingsEditor.TryReadSettings(out var gameSettings, out var gameSettingsError))
+        {
+            MessageBox.Show(this, gameSettingsError, "Game settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         if (ClearSessionsRequested)
         {
             var answer = MessageBox.Show(
@@ -47,6 +54,7 @@ public partial class SettingsDialog : Window
         _settings.LaunchTimeoutSeconds = ReadIntTag(TimeoutBox, 45);
         _settings.LaunchDelaySeconds = ReadIntTag(DelayBox, 0);
         _settings.PreferredLauncher = ReadTag(LauncherBox, "Auto");
+        _settings.GameSettings = gameSettings;
         DialogResult = true;
     }
 

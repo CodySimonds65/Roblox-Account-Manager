@@ -23,6 +23,8 @@ public partial class MainWindow : Window
     private readonly CompatibilityService _compatibilityService = new();
     private readonly SettingsStore _settingsStore = new();
     private readonly RobloxLauncherService _robloxLauncherService = new();
+    private readonly RobloxClientSettingsService _robloxClientSettingsService = new();
+    private readonly RobloxMenuSettingsService _robloxMenuSettingsService = new();
     private readonly ObservableCollection<AccountProfile> _accounts = [];
     private readonly ObservableCollection<LaunchQueueItem> _launchQueue = [];
     private readonly ObservableCollection<GamePreset> _games =
@@ -87,6 +89,23 @@ public partial class MainWindow : Window
         try
         {
             _settings = await _settingsStore.LoadAsync();
+            // Older settings files do not contain game settings, and a hand-edited
+            // file may contain explicit nulls. Keep those files usable with the
+            // new optional fields and use a case-insensitive URL map.
+            _settings.GameSettings ??= new GameSettings();
+            var normalizedOverrides = new Dictionary<string, GameSettings>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in _settings.GameOverrides ?? [])
+            {
+                if (pair.Value is not null && GamePreset.TryNormalizeRobloxGameUrl(pair.Key, out var normalizedKey))
+                {
+                    // Assignment deliberately makes duplicate legacy keys deterministic
+                    // instead of crashing when only URL casing differs.
+                    normalizedOverrides[normalizedKey] = pair.Value;
+                }
+            }
+
+            _settings.GameOverrides = normalizedOverrides;
+            await _robloxClientSettingsService.RecoverPendingAsync(Log);
             await ApplyPendingDataCleanupAsync();
             ApplySettingsToControls();
             if (_settings.UpdateChecksEnabled)
@@ -112,7 +131,16 @@ public partial class MainWindow : Window
                     GamePreset.TryNormalizeRobloxGameUrl(preset.Url, out var normalizedUrl) &&
                     !_games.Any(game => string.Equals(game.Name, preset.Name, StringComparison.OrdinalIgnoreCase)))
                 {
-                    _games.Insert(_games.Count - 1, new GamePreset(preset.Name, normalizedUrl));
+                    var loadedPreset = new GamePreset(preset.Name, normalizedUrl)
+                    {
+                        Settings = preset.Settings?.Clone()
+                    };
+                    _games.Insert(_games.Count - 1, loadedPreset);
+                    if (loadedPreset.Settings is not null &&
+                        !_settings.GameOverrides.ContainsKey(normalizedUrl))
+                    {
+                        _settings.GameOverrides[normalizedUrl] = loadedPreset.Settings.Clone();
+                    }
                 }
             }
 
@@ -530,6 +558,10 @@ public partial class MainWindow : Window
 
         ApplySettingsToControls();
         await SaveRememberedStateAsync();
+        await _robloxMenuSettingsService.ApplyAsync(
+            _settings.GameSettings,
+            null,
+            message => Log($"Game settings: {message}"));
         Log("Launcher settings saved.");
     }
 
@@ -756,6 +788,22 @@ public partial class MainWindow : Window
 
         item.State = LaunchQueueState.Launching;
         item.Detail = "Requesting Roblox";
+        var gameOverride = GetGameOverrideForLaunch(gameUrl);
+        await _robloxMenuSettingsService.ApplyAsync(
+            _settings.GameSettings,
+            gameOverride,
+            message => Log($"Game settings: {message}"));
+        var engineSettingsStartedUtc = DateTime.UtcNow;
+        await using var engineSettingsTransaction = await _robloxClientSettingsService.ApplyAsync(
+            _settings.GameSettings,
+            gameOverride,
+            _settings.PreferredLauncher,
+            message => Log($"Engine settings: {message}"));
+        if (RobloxLauncherService.UsesBloxstrap(_settings.PreferredLauncher))
+        {
+            Log("Bloxstrap may apply its own allowlist or overrides; engine settings are best effort.");
+        }
+
         if (!await NavigateAndAutoLaunchAsync(gameUrl, cancellationToken))
         {
             Log($"{item.Label} did not produce a Roblox launch request.");
@@ -767,6 +815,15 @@ public partial class MainWindow : Window
         {
             Log($"No new Roblox process appeared for {item.Label} within {processTimeout.TotalSeconds:0} seconds.");
             return (false, "Process timed out");
+        }
+
+        if (engineSettingsTransaction.IsActive)
+        {
+            await _robloxClientSettingsService.WaitForClientSettingsLoadAsync(
+                engineSettingsStartedUtc,
+                TimeSpan.FromSeconds(6),
+                cancellationToken,
+                message => Log($"Engine settings: {message}"));
         }
 
         Log($"{item.Label} is running.");
@@ -792,6 +849,7 @@ public partial class MainWindow : Window
         RemoveGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         EditGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         DuplicateGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
+        ConfigureGameSettingsButton.IsEnabled = GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
         if (!isCustom && GamePicker.SelectedItem is GamePreset selectedGame)
         {
             PresetHintText.Text = $"Ready to launch {selectedGame.Name}";
@@ -853,8 +911,23 @@ public partial class MainWindow : Window
         }
 
         var index = _games.IndexOf(preset);
+        var oldOverrideKey = NormalizeGameUrl(preset.Url);
+        _settings.GameOverrides.TryGetValue(oldOverrideKey, out var oldOverride);
         var updated = new GamePreset(dialog.GameName, dialog.GameUrl);
         _games[index] = updated;
+        var newOverrideKey = NormalizeGameUrl(updated.Url);
+        if (!string.Equals(oldOverrideKey, newOverrideKey, StringComparison.OrdinalIgnoreCase))
+        {
+            if (oldOverride is not null)
+            {
+                _settings.GameOverrides[newOverrideKey] = oldOverride.Clone();
+            }
+
+            if (!IsGameOverrideKeyInUse(oldOverrideKey))
+            {
+                _settings.GameOverrides.Remove(oldOverrideKey);
+            }
+        }
         var recentIndex = _settings.RecentGameNames.FindIndex(name => string.Equals(name, preset.Name, StringComparison.Ordinal));
         if (recentIndex >= 0)
         {
@@ -865,6 +938,38 @@ public partial class MainWindow : Window
         await _settingsStore.SaveAsync(_settings);
         GamePicker.SelectedItem = updated;
         Log($"Updated game preset: {updated.Name}.");
+    }
+
+    private async void ConfigureGameSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (GamePicker.SelectedItem is not GamePreset { Url.Length: > 0 } preset)
+        {
+            return;
+        }
+
+        var key = NormalizeGameUrl(preset.Url);
+        _settings.GameOverrides.TryGetValue(key, out var existing);
+        var dialog = new GameSettingsDialog(preset.Name, existing) { Owner = this };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        if (dialog.Settings is null)
+        {
+            _settings.GameOverrides.Remove(key);
+            preset.Settings = null;
+            Log($"Cleared game settings override for {preset.Name}.");
+        }
+        else
+        {
+            _settings.GameOverrides[key] = dialog.Settings.Clone();
+            preset.Settings = dialog.Settings.Clone();
+            Log($"Saved game settings override for {preset.Name}.");
+        }
+
+        await SaveCustomGamePresetsAsync();
+        await _settingsStore.SaveAsync(_settings);
     }
 
     private async void DuplicateGamePreset_Click(object sender, RoutedEventArgs e)
@@ -882,8 +987,14 @@ public partial class MainWindow : Window
         }
 
         var duplicate = new GamePreset(name, preset.Url);
+        if (_settings.GameOverrides.TryGetValue(NormalizeGameUrl(preset.Url), out var duplicateSettings))
+        {
+            duplicate.Settings = duplicateSettings.Clone();
+            _settings.GameOverrides[NormalizeGameUrl(duplicate.Url)] = duplicateSettings.Clone();
+        }
         _games.Insert(_games.Count - 1, duplicate);
         await SaveCustomGamePresetsAsync();
+        await _settingsStore.SaveAsync(_settings);
         GamePicker.SelectedItem = duplicate;
         Log($"Duplicated game preset: {duplicate.Name}.");
     }
@@ -914,10 +1025,15 @@ public partial class MainWindow : Window
                 }
 
                 _games.Insert(_games.Count - 1, preset);
+                if (preset.Settings is not null)
+                {
+                    _settings.GameOverrides[NormalizeGameUrl(preset.Url)] = preset.Settings.Clone();
+                }
                 added++;
             }
 
             await SaveCustomGamePresetsAsync();
+            await _settingsStore.SaveAsync(_settings);
             Log($"Imported {added} game preset(s). Existing names and URLs were skipped.");
         }
         catch (Exception exception)
@@ -928,6 +1044,7 @@ public partial class MainWindow : Window
 
     private async void ExportGamePresets_Click(object sender, RoutedEventArgs e)
     {
+        await SaveCustomGamePresetsAsync();
         var customPresets = _games.Where(game => !game.IsBuiltIn).ToArray();
         if (customPresets.Length == 0)
         {
@@ -1016,14 +1133,43 @@ public partial class MainWindow : Window
 
         _games.Remove(preset);
         _settings.RecentGameNames.RemoveAll(name => string.Equals(name, preset.Name, StringComparison.Ordinal));
+        var overrideKey = NormalizeGameUrl(preset.Url);
+        if (!IsGameOverrideKeyInUse(overrideKey))
+        {
+            _settings.GameOverrides.Remove(overrideKey);
+        }
         await SaveCustomGamePresetsAsync();
         await _settingsStore.SaveAsync(_settings);
         GamePicker.SelectedIndex = 0;
         Log($"Removed game preset: {preset.Name}.");
     }
 
-    private Task SaveCustomGamePresetsAsync() =>
-        _gamePresetStore.SaveAsync(_games.Where(game => !game.IsBuiltIn));
+    private Task SaveCustomGamePresetsAsync()
+    {
+        foreach (var preset in _games.Where(game => !game.IsBuiltIn && game.Url.Length > 0))
+        {
+            preset.Settings = _settings.GameOverrides.TryGetValue(NormalizeGameUrl(preset.Url), out var settings)
+                ? settings.Clone()
+                : null;
+        }
+
+        return _gamePresetStore.SaveAsync(_games.Where(game => !game.IsBuiltIn));
+    }
+
+    private static string NormalizeGameUrl(string url) =>
+        GamePreset.TryNormalizeRobloxGameUrl(url, out var normalized) ? normalized : url.Trim();
+
+    private bool IsGameOverrideKeyInUse(string key) =>
+        _games.Any(game => game.Url.Length > 0 &&
+                           string.Equals(NormalizeGameUrl(game.Url), key, StringComparison.OrdinalIgnoreCase));
+
+    private GameSettings? GetGameOverride(string gameUrl) =>
+        _settings.GameOverrides.TryGetValue(NormalizeGameUrl(gameUrl), out var settings) ? settings : null;
+
+    private GameSettings? GetGameOverrideForLaunch(string gameUrl) =>
+        GamePicker.SelectedItem is GamePreset { Url.Length: > 0 }
+            ? GetGameOverride(gameUrl)
+            : null;
 
     private string GetSelectedGameUrl() => GamePicker.SelectedItem is GamePreset game && !string.IsNullOrEmpty(game.Url)
         ? game.Url
@@ -1187,6 +1333,7 @@ public partial class MainWindow : Window
         RemoveGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         EditGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         DuplicateGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
+        ConfigureGameSettingsButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
         PresetSearchBox.IsEnabled = enabled;
         AddAccountButton.IsEnabled = enabled;
         RemoveAccountButton.IsEnabled = enabled;

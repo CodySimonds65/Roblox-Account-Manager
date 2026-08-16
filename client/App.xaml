@@ -15,6 +15,97 @@
         <SolidColorBrush x:Key="AccentPressedBrush" Color="#6847E8" />
         <SolidColorBrush x:Key="DangerBrush" Color="#D94F65" />
         <SolidColorBrush x:Key="SuccessBrush" Color="#35D399" />
+        <SolidColorBrush x:Key="InputBrush" Color="#0D1016" />
+        <SolidColorBrush x:Key="SelectionSurfaceBrush" Color="#2A234D" />
+        <SolidColorBrush x:Key="SelectionBorderBrush" Color="#544394" />
+        <SolidColorBrush x:Key="ScrollTrackBrush" Color="#11141B" />
+        <SolidColorBrush x:Key="ScrollThumbBrush" Color="#4A5266" />
+        <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#626C84" />
+
+        <Style x:Key="ScrollBarPageButton" TargetType="RepeatButton">
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RepeatButton">
+                        <Border Background="Transparent" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ScrollBarThumb" TargetType="Thumb">
+            <Setter Property="Background" Value="{StaticResource ScrollThumbBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="ThumbChrome" Background="{TemplateBinding Background}"
+                                CornerRadius="5" Margin="2" />
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ThumbChrome" Property="Background" Value="{StaticResource ScrollThumbHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="ThumbChrome" Property="Background" Value="{StaticResource AccentBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <ControlTemplate x:Key="VerticalScrollBarTemplate" TargetType="ScrollBar">
+            <Grid Background="{TemplateBinding Background}">
+                <Border Background="{StaticResource ScrollTrackBrush}" CornerRadius="6" Margin="2,0" />
+                <Track x:Name="PART_Track" Orientation="Vertical" IsDirectionReversed="True">
+                    <Track.DecreaseRepeatButton>
+                        <RepeatButton Command="{x:Static ScrollBar.PageUpCommand}"
+                                      Style="{StaticResource ScrollBarPageButton}" />
+                    </Track.DecreaseRepeatButton>
+                    <Track.Thumb>
+                        <Thumb MinHeight="28" Style="{StaticResource ScrollBarThumb}" />
+                    </Track.Thumb>
+                    <Track.IncreaseRepeatButton>
+                        <RepeatButton Command="{x:Static ScrollBar.PageDownCommand}"
+                                      Style="{StaticResource ScrollBarPageButton}" />
+                    </Track.IncreaseRepeatButton>
+                </Track>
+            </Grid>
+        </ControlTemplate>
+
+        <ControlTemplate x:Key="HorizontalScrollBarTemplate" TargetType="ScrollBar">
+            <Grid Background="{TemplateBinding Background}">
+                <Border Background="{StaticResource ScrollTrackBrush}" CornerRadius="6" Margin="0,2" />
+                <Track x:Name="PART_Track" Orientation="Horizontal">
+                    <Track.DecreaseRepeatButton>
+                        <RepeatButton Command="{x:Static ScrollBar.PageLeftCommand}"
+                                      Style="{StaticResource ScrollBarPageButton}" />
+                    </Track.DecreaseRepeatButton>
+                    <Track.Thumb>
+                        <Thumb MinWidth="28" Style="{StaticResource ScrollBarThumb}" />
+                    </Track.Thumb>
+                    <Track.IncreaseRepeatButton>
+                        <RepeatButton Command="{x:Static ScrollBar.PageRightCommand}"
+                                      Style="{StaticResource ScrollBarPageButton}" />
+                    </Track.IncreaseRepeatButton>
+                </Track>
+            </Grid>
+        </ControlTemplate>
+
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Width" Value="12" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Template" Value="{StaticResource VerticalScrollBarTemplate}" />
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Horizontal">
+                    <Setter Property="Width" Value="Auto" />
+                    <Setter Property="Height" Value="12" />
+                    <Setter Property="Template" Value="{StaticResource HorizontalScrollBarTemplate}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
 
         <Style TargetType="Window">
             <Setter Property="FontFamily" Value="Segoe UI Variable Text" />
@@ -92,7 +183,7 @@
         </Style>
 
         <Style TargetType="TextBox">
-            <Setter Property="Background" Value="#0D1016" />
+            <Setter Property="Background" Value="{StaticResource InputBrush}" />
             <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
             <Setter Property="CaretBrush" Value="{StaticResource TextBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
@@ -132,14 +223,14 @@
                     <Setter Property="Background" Value="{StaticResource HoverBrush}" />
                 </Trigger>
                 <Trigger Property="IsSelected" Value="True">
-                    <Setter Property="Background" Value="#2A234D" />
+                    <Setter Property="Background" Value="{StaticResource SelectionSurfaceBrush}" />
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <Style TargetType="ComboBox">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-            <Setter Property="Background" Value="#0D1016" />
+            <Setter Property="Background" Value="{StaticResource InputBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
             <Setter Property="Padding" Value="11,8" />
             <Setter Property="FontSize" Value="13" />
@@ -211,8 +302,8 @@
                                 <Setter TargetName="ItemCard" Property="Background" Value="{StaticResource HoverBrush}" />
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="ItemCard" Property="Background" Value="#211D38" />
-                                <Setter TargetName="ItemCard" Property="BorderBrush" Value="#544394" />
+                                <Setter TargetName="ItemCard" Property="Background" Value="{StaticResource SelectionSurfaceBrush}" />
+                                <Setter TargetName="ItemCard" Property="BorderBrush" Value="{StaticResource SelectionBorderBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -232,7 +323,7 @@
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
                             <Border x:Name="CheckSurface" Width="20" Height="20" CornerRadius="6"
-                                    Background="#0D1016" BorderBrush="#3A4254" BorderThickness="1">
+                                    Background="{StaticResource InputBrush}" BorderBrush="#3A4254" BorderThickness="1">
                                 <Path x:Name="CheckMark" Visibility="Collapsed" Data="M 3 8 L 7 12 L 14 4"
                                       Stroke="White" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
                             </Border>

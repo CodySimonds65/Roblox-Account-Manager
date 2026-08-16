@@ -12,4 +12,6 @@ public sealed class LauncherSettings
     public string LastGameName { get; set; } = string.Empty;
     public List<string> RecentGameNames { get; set; } = [];
     public bool ClearBrowserDataOnNextStart { get; set; }
+    public GameSettings GameSettings { get; set; } = new();
+    public Dictionary<string, GameSettings> GameOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }

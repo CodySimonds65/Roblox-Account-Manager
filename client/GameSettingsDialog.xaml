@@ -1,0 +1,27 @@
+<Window x:Class="RobloxAltClient.GameSettingsDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:RobloxAltClient"
+        Title="Game settings" Width="720" Height="720" MinWidth="620" MinHeight="620"
+        ResizeMode="CanResize" Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+            <TextBlock x:Name="Heading" Text="Game settings" FontSize="23" FontWeight="SemiBold" TextWrapping="Wrap" />
+            <TextBlock x:Name="Subtitle" Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,0" TextWrapping="Wrap" />
+        </StackPanel>
+        <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                BorderThickness="1" CornerRadius="14" Padding="17">
+            <local:GameSettingsEditor x:Name="Editor" IsOverrideMode="True" />
+        </Border>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button Content="Cancel" Click="Cancel_Click" Style="{StaticResource SecondaryButton}" Width="90" Margin="0,0,8,0" />
+            <Button Content="Save overrides" Click="Save_Click" Width="120" />
+        </StackPanel>
+    </Grid>
+</Window>
