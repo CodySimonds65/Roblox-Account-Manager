@@ -144,13 +144,13 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Column="2">
+        <Grid x:Name="WorkspaceGrid" Grid.Column="2" ClipToBounds="True" LayoutUpdated="WorkspaceGrid_LayoutUpdated">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="*" MinHeight="160" />
+                <RowDefinition x:Name="BrowserRow" Height="1.2*" MinHeight="160" />
                 <RowDefinition Height="6" />
-                <RowDefinition Height="250" MinHeight="130" />
+                <RowDefinition x:Name="ActivityRow" Height="1*" MinHeight="130" />
             </Grid.RowDefinitions>
 
             <Grid Margin="2,3,2,18">

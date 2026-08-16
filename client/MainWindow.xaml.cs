@@ -41,6 +41,7 @@ public partial class MainWindow : Window
     private LauncherSettings _settings = new();
     private Point _accountDragStart;
     private bool _startupComplete;
+    private bool _isClampingActivityLayout;
 
     public MainWindow()
     {
@@ -51,6 +52,32 @@ public partial class MainWindow : Window
         GamePicker.ItemsSource = _games;
         GamePicker.SelectedIndex = 0;
         Loaded += MainWindow_Loaded;
+    }
+
+    private void WorkspaceGrid_LayoutUpdated(object? sender, EventArgs e)
+    {
+        if (_isClampingActivityLayout || WorkspaceGrid.ActualHeight <= 0)
+        {
+            return;
+        }
+
+        var rows = WorkspaceGrid.RowDefinitions;
+        var fixedHeight = rows[0].ActualHeight + rows[1].ActualHeight + rows[3].ActualHeight;
+        var maxActivityHeight = WorkspaceGrid.ActualHeight - fixedHeight - BrowserRow.MinHeight;
+        if (maxActivityHeight < ActivityRow.MinHeight || ActivityRow.ActualHeight <= maxActivityHeight + 0.5)
+        {
+            return;
+        }
+
+        _isClampingActivityLayout = true;
+        try
+        {
+            ActivityRow.Height = new GridLength(maxActivityHeight);
+        }
+        finally
+        {
+            _isClampingActivityLayout = false;
+        }
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
