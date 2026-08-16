@@ -34,10 +34,10 @@ Require(
     UpdateService.TryParseReleaseVersion("v1.2.3", out var releaseVersion) && releaseVersion == new Version(1, 2, 3),
     "A valid release version was rejected.");
 Require(
-    UpdateService.ParseSha256($"{new string('a', 64)}  RobloxAltClient.exe", "RobloxAltClient.exe") == new string('a', 64),
+    UpdateService.ParseSha256($"{new string('a', 64)}  RobloxAccountManager.exe", "RobloxAccountManager.exe") == new string('a', 64),
     "A valid release checksum was rejected.");
 Require(
-    UpdateService.ParseSha256($"{new string('a', 63)}  RobloxAltClient.exe", "RobloxAltClient.exe") is null,
+    UpdateService.ParseSha256($"{new string('a', 63)}  RobloxAccountManager.exe", "RobloxAccountManager.exe") is null,
     "An invalid release checksum was accepted.");
 
 var queueItem = new LaunchQueueItem(new AccountProfile { Label = "Queue test" });
@@ -109,7 +109,7 @@ try
     Require(transferredPresets.Count == 1, "Preset export included built-in games.");
     Require(transferredPresets[0].Url.Contains("privateServerLinkCode=abc"), "Preset transfer lost a private-server link.");
 
-    var confirmationPath = Path.Combine(Path.GetTempPath(), $"RobloxAltClient-update-{Guid.NewGuid():N}.ok");
+    var confirmationPath = Path.Combine(Path.GetTempPath(), $"RobloxAccountManager-update-{Guid.NewGuid():N}.ok");
     UpdateService.ConfirmUpdatedLaunch(["--confirm-update", confirmationPath]);
     Require(File.Exists(confirmationPath), "The updater did not receive its successful-start confirmation.");
     File.Delete(confirmationPath);

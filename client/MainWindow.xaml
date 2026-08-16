@@ -1,7 +1,8 @@
 <Window x:Class="RobloxAltClient.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Roblox Alt Client" Height="860" Width="1380" MinHeight="700" MinWidth="1080"
+        Title="Roblox Account Manager" Height="860" Width="1380" MinHeight="700" MinWidth="1080"
+        Icon="Assets/RobloxAccountManager.ico"
         Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
         WindowStartupLocation="CenterScreen">
     <Grid Margin="18">
@@ -30,7 +31,7 @@
                         <TextBlock Text="R" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
                     <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0">
-                        <TextBlock Text="Alt Client" FontSize="18" FontWeight="SemiBold" />
+                        <TextBlock Text="Account Manager" FontSize="18" FontWeight="SemiBold" />
                         <TextBlock Text="Roblox launcher" FontSize="12" Foreground="{StaticResource MutedTextBrush}" />
                     </StackPanel>
                 </Grid>

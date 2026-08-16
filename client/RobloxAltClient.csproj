@@ -5,7 +5,10 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>RobloxAltClient</AssemblyName>
+    <AssemblyName>RobloxAccountManager</AssemblyName>
+    <Product>Roblox Account Manager</Product>
+    <Description>Open-source Roblox account and multi-client launcher.</Description>
+    <ApplicationIcon>Assets\RobloxAccountManager.ico</ApplicationIcon>
     <RootNamespace>RobloxAltClient</RootNamespace>
     <Version>1.1.1</Version>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -19,6 +22,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Resource Include="Assets\RobloxAccountManager.ico" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
     <EmbeddedResource Include="Unlock-Roblox.ps1"
                       LogicalName="RobloxAltClient.Resources.Unlock-Roblox.ps1" />

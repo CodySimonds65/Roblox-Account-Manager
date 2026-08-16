@@ -12,8 +12,8 @@ public sealed record UpdatePackage(Version Version, string Tag, string Executabl
 
 public sealed class UpdateService
 {
-    private const string LatestReleaseApi = "https://api.github.com/repos/CodySimonds65/roblox-alt-launcher/releases/latest";
-    private const string ExecutableAssetName = "RobloxAltClient.exe";
+    private const string LatestReleaseApi = "https://api.github.com/repos/CodySimonds65/roblox-account-manager/releases/latest";
+    private const string ExecutableAssetName = "RobloxAccountManager.exe";
     private const string ChecksumAssetName = "SHA256SUMS.txt";
     private static readonly HttpClient HttpClient = CreateHttpClient();
 
@@ -149,13 +149,13 @@ public sealed class UpdateService
         {
             File.Delete(backupPath);
             throw new InvalidOperationException(
-                "Windows could not replace the existing Roblox Alt Client executable. Move it to a writable folder and try again.",
+                "Windows could not replace the existing Roblox Account Manager executable. Move it to a writable folder and try again.",
                 lastError);
         }
 
         var confirmationPath = Path.Combine(
             Path.GetTempPath(),
-            $"RobloxAltClient-update-{Guid.NewGuid():N}.ok");
+            $"RobloxAccountManager-update-{Guid.NewGuid():N}.ok");
         Process? updatedClient = null;
         Exception? updateError = null;
         try
@@ -220,7 +220,7 @@ public sealed class UpdateService
         var temporaryRoot = Path.GetFullPath(Path.GetTempPath());
         var fileName = Path.GetFileName(confirmationPath);
         if (!confirmationPath.StartsWith(temporaryRoot, StringComparison.OrdinalIgnoreCase) ||
-            !fileName.StartsWith("RobloxAltClient-update-", StringComparison.Ordinal) ||
+            !fileName.StartsWith("RobloxAccountManager-update-", StringComparison.Ordinal) ||
             !fileName.EndsWith(".ok", StringComparison.Ordinal))
         {
             return;
@@ -283,7 +283,7 @@ public sealed class UpdateService
     private static HttpClient CreateHttpClient()
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("RobloxAltClient-Updater");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("RobloxAccountManager-Updater");
         client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         return client;
     }

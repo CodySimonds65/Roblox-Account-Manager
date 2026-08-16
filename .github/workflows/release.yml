@@ -127,12 +127,12 @@ jobs:
                   throw 'SignTool was not found on the Windows runner.'
               }
 
-              & $signTool.FullName sign /f $certificatePath /p $env:SIGNING_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 '.\release\RobloxAltClient.exe'
+              & $signTool.FullName sign /f $certificatePath /p $env:SIGNING_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 '.\release\RobloxAccountManager.exe'
               if ($LASTEXITCODE -ne 0) {
                   throw "SignTool failed with exit code $LASTEXITCODE."
               }
 
-              $signature = Get-AuthenticodeSignature -LiteralPath '.\release\RobloxAltClient.exe'
+              $signature = Get-AuthenticodeSignature -LiteralPath '.\release\RobloxAccountManager.exe'
               if ($signature.Status -ne 'Valid') {
                   throw "The Authenticode signature is not valid: $($signature.StatusMessage)"
               }
@@ -146,13 +146,13 @@ jobs:
         id: checksum
         shell: pwsh
         run: |
-          $executable = '.\release\RobloxAltClient.exe'
+          $executable = '.\release\RobloxAccountManager.exe'
           if (-not (Test-Path -LiteralPath $executable)) {
               throw 'The published executable was not found.'
           }
 
           $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  RobloxAltClient.exe" | Set-Content -LiteralPath '.\release\SHA256SUMS.txt' -Encoding ascii
+          "$hash  RobloxAccountManager.exe" | Set-Content -LiteralPath '.\release\SHA256SUMS.txt' -Encoding ascii
           "sha256=$hash" >> $env:GITHUB_OUTPUT
 
       - name: Publish GitHub release
@@ -163,6 +163,6 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_TARGET: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
-          gh release create $env:RELEASE_TAG '.\release\RobloxAltClient.exe#RobloxAltClient.exe' '.\release\SHA256SUMS.txt#SHA256SUMS.txt' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "Roblox Alt Client $env:RELEASE_TAG" --generate-notes --fail-on-no-commits
+          gh release create $env:RELEASE_TAG '.\release\RobloxAccountManager.exe#RobloxAccountManager.exe' '.\release\SHA256SUMS.txt#SHA256SUMS.txt' --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_TARGET --title "Roblox Account Manager $env:RELEASE_TAG" --generate-notes --fail-on-no-commits
           "### Published $env:RELEASE_TAG" >> $env:GITHUB_STEP_SUMMARY
           "SHA-256: ``${{ steps.checksum.outputs.sha256 }}``" >> $env:GITHUB_STEP_SUMMARY

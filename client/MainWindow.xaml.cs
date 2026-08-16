@@ -125,7 +125,7 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             Log($"Startup error: {exception.Message}");
-            MessageBox.Show(this, exception.Message, "Roblox Alt Client startup error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, exception.Message, "Roblox Account Manager startup error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -137,14 +137,14 @@ public partial class MainWindow : Window
             var package = await _updateService.CheckAndDownloadAsync();
             if (package is null)
             {
-                Log("Roblox Alt Client is up to date.");
+                Log("Roblox Account Manager is up to date.");
                 return;
             }
 
             Log($"Update {package.Tag} downloaded and verified.");
             var answer = MessageBox.Show(
                 this,
-                $"Roblox Alt Client {package.Tag} is ready. Restart now to install it?",
+                $"Roblox Account Manager {package.Tag} is ready. Restart now to install it?",
                 "Update ready",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Information);
@@ -866,7 +866,7 @@ public partial class MainWindow : Window
         var dialog = new OpenFileDialog
         {
             Title = "Import Roblox game presets",
-            Filter = "Roblox Alt Client presets (*.json)|*.json|JSON files (*.json)|*.json"
+            Filter = "Roblox Account Manager presets (*.json)|*.json|JSON files (*.json)|*.json"
         };
         if (dialog.ShowDialog(this) != true)
         {
@@ -911,7 +911,7 @@ public partial class MainWindow : Window
         var dialog = new SaveFileDialog
         {
             Title = "Export Roblox game presets",
-            Filter = "Roblox Alt Client presets (*.json)|*.json",
+            Filter = "Roblox Account Manager presets (*.json)|*.json",
             FileName = "roblox-game-presets.json",
             AddExtension = true,
             DefaultExt = ".json"
