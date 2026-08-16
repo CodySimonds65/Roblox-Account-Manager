@@ -19,7 +19,7 @@ public partial class App : Application
             {
                 MessageBox.Show(
                     exception.Message,
-                    "Roblox Alt Client update failed",
+                    "Roblox Account Manager update failed",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }
@@ -28,13 +28,13 @@ public partial class App : Application
             return;
         }
 
-        _singleInstanceMutex = new Mutex(initiallyOwned: true, "Local\\RobloxAltClient", out var createdNew);
+        _singleInstanceMutex = new Mutex(initiallyOwned: true, "Local\\RobloxAccountManager", out var createdNew);
         if (!createdNew)
         {
             _singleInstanceMutex.Dispose();
             _singleInstanceMutex = null;
             MessageBox.Show(
-                "Roblox Alt Client is already open.",
+                "Roblox Account Manager is already open.",
                 "Already running",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);

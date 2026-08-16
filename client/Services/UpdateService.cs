@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -12,8 +13,12 @@ public sealed record UpdatePackage(Version Version, string Tag, string Executabl
 
 public sealed class UpdateService
 {
-    private const string LatestReleaseApi = "https://api.github.com/repos/CodySimonds65/roblox-alt-launcher/releases/latest";
-    private const string ExecutableAssetName = "RobloxAltClient.exe";
+    private static readonly string[] LatestReleaseApis =
+    [
+        "https://api.github.com/repos/CodySimonds65/roblox-account-manager/releases/latest",
+        "https://api.github.com/repos/CodySimonds65/roblox-alt-launcher/releases/latest"
+    ];
+    private const string ExecutableAssetName = "RobloxAccountManager.exe";
     private const string ChecksumAssetName = "SHA256SUMS.txt";
     private static readonly HttpClient HttpClient = CreateHttpClient();
 
@@ -22,8 +27,7 @@ public sealed class UpdateService
 
     public async Task<UpdatePackage?> CheckAndDownloadAsync(CancellationToken cancellationToken = default)
     {
-        using var response = await HttpClient.GetAsync(LatestReleaseApi, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        using var response = await GetLatestReleaseAsync(cancellationToken);
 
         await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var release = await JsonSerializer.DeserializeAsync<GitHubRelease>(responseStream, cancellationToken: cancellationToken)
@@ -34,8 +38,15 @@ public sealed class UpdateService
             return null;
         }
 
-        var executableAsset = FindAsset(release, ExecutableAssetName);
+        var executableAsset = FindAssetOrNull(release, ExecutableAssetName);
         var checksumAsset = FindAsset(release, ChecksumAssetName);
+        if (executableAsset is null)
+        {
+            // Older releases only contain the legacy filename and cannot be used
+            // as an update for the renamed executable because their confirmation
+            // marker is different.
+            return null;
+        }
         var checksumText = await HttpClient.GetStringAsync(checksumAsset.DownloadUrl, cancellationToken);
         var expectedHash = ParseSha256(checksumText, ExecutableAssetName)
                            ?? throw new InvalidOperationException("The release checksum file is invalid.");
@@ -149,13 +160,13 @@ public sealed class UpdateService
         {
             File.Delete(backupPath);
             throw new InvalidOperationException(
-                "Windows could not replace the existing Roblox Alt Client executable. Move it to a writable folder and try again.",
+                "Windows could not replace the existing Roblox Account Manager executable. Move it to a writable folder and try again.",
                 lastError);
         }
 
         var confirmationPath = Path.Combine(
             Path.GetTempPath(),
-            $"RobloxAltClient-update-{Guid.NewGuid():N}.ok");
+            $"RobloxAccountManager-update-{Guid.NewGuid():N}.ok");
         Process? updatedClient = null;
         Exception? updateError = null;
         try
@@ -220,7 +231,7 @@ public sealed class UpdateService
         var temporaryRoot = Path.GetFullPath(Path.GetTempPath());
         var fileName = Path.GetFileName(confirmationPath);
         if (!confirmationPath.StartsWith(temporaryRoot, StringComparison.OrdinalIgnoreCase) ||
-            !fileName.StartsWith("RobloxAltClient-update-", StringComparison.Ordinal) ||
+            !fileName.StartsWith("RobloxAccountManager-update-", StringComparison.Ordinal) ||
             !fileName.EndsWith(".ok", StringComparison.Ordinal))
         {
             return;
@@ -262,6 +273,31 @@ public sealed class UpdateService
         release.Assets.FirstOrDefault(asset => string.Equals(asset.Name, name, StringComparison.OrdinalIgnoreCase))
         ?? throw new InvalidOperationException($"The latest release does not contain {name}.");
 
+    private static GitHubAsset? FindAssetOrNull(GitHubRelease release, string name) =>
+        release.Assets.FirstOrDefault(asset => string.Equals(asset.Name, name, StringComparison.OrdinalIgnoreCase));
+
+    private static async Task<HttpResponseMessage> GetLatestReleaseAsync(CancellationToken cancellationToken)
+    {
+        foreach (var api in LatestReleaseApis)
+        {
+            var response = await HttpClient.GetAsync(api, cancellationToken);
+            if (response.IsSuccessStatusCode)
+            {
+                return response;
+            }
+
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                response.Dispose();
+                continue;
+            }
+
+            response.EnsureSuccessStatusCode();
+        }
+
+        throw new HttpRequestException("GitHub does not have a release feed for Roblox Account Manager yet.");
+    }
+
     private static async Task DownloadFileAsync(Uri downloadUrl, string destinationPath, CancellationToken cancellationToken)
     {
         using var response = await HttpClient.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
@@ -283,7 +319,7 @@ public sealed class UpdateService
     private static HttpClient CreateHttpClient()
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("RobloxAltClient-Updater");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("RobloxAccountManager-Updater");
         client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         return client;
     }

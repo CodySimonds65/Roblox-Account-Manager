@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-echo Building self-contained Roblox Alt Client...
+echo Building self-contained Roblox Account Manager...
 dotnet publish ".\client\RobloxAltClient.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ".\release"
 if errorlevel 1 (
   echo.
@@ -10,5 +10,5 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo Build complete: %~dp0release\RobloxAltClient.exe
+echo Build complete: %~dp0release\RobloxAccountManager.exe
 pause

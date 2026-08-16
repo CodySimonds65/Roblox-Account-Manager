@@ -29,7 +29,7 @@ public sealed class CompatibilityService
     {
         var lines = new List<string>
         {
-            "Roblox Alt Client diagnostics",
+            "Roblox Account Manager diagnostics",
             $"Generated: {DateTimeOffset.Now:O}",
             string.Empty
         };

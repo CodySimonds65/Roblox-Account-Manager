@@ -1,4 +1,4 @@
-# Roblox Alt Client
+# Roblox Account Manager
 
 An open-source Windows launcher for running multiple Roblox accounts with separate local login sessions.
 
@@ -13,7 +13,7 @@ flowchart LR
 
 ## Download and use
 
-[Download the latest `RobloxAltClient.exe`](https://github.com/CodySimonds65/roblox-alt-launcher/releases/latest/download/RobloxAltClient.exe)
+[Download the latest `RobloxAccountManager.exe`](https://github.com/CodySimonds65/roblox-account-manager/releases/latest/download/RobloxAccountManager.exe)
 
 1. Add a profile and sign in on Roblox.
 2. Select one or more profiles.
@@ -39,7 +39,7 @@ Requires Windows, the .NET 8 SDK or newer, and Microsoft WebView2 Runtime.
 build-client.cmd
 ```
 
-Output: `release\RobloxAltClient.exe`. The source is under `client\` and licensed under MIT.
+Output: `release\RobloxAccountManager.exe`. The source is under `client\` and licensed under MIT.
 
 Release signing is optional. Configure a base64-encoded PFX as `WINDOWS_SIGNING_CERTIFICATE_BASE64` and its password as `WINDOWS_SIGNING_CERTIFICATE_PASSWORD` in GitHub repository secrets. Releases are signed before checksums are generated.
 
