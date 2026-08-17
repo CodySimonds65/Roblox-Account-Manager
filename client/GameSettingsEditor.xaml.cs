@@ -28,6 +28,7 @@ public partial class GameSettingsEditor : UserControl
         SelectByTag(GraphicsQualityBox, string.Empty);
         SelectByTag(TextureQualityBox, string.Empty);
         SelectByTag(FpsBox, string.Empty);
+        SelectByTag(VolumeBox, string.Empty);
         SelectByTag(ClientScalingBox, "Auto");
         CustomFpsBox.IsEnabled = false;
     }
@@ -57,10 +58,12 @@ public partial class GameSettingsEditor : UserControl
                 CustomFpsBox.Text = value.FpsLimit.ToString();
             }
 
+            SelectByTag(VolumeBox, value.MasterVolumeLevel?.ToString() ?? string.Empty);
+
             if (IsOverrideMode)
             {
                 ClientScalingBox.Items.Clear();
-                ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Inherit global", Tag = "Inherit" });
+                ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Inherit lower level", Tag = "Inherit" });
                 ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Disabled", Tag = "Disabled" });
                 ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Preserve quality", Tag = "Preserve" });
                 SelectByTag(ClientScalingBox, value.PreserveRenderingQuality switch
@@ -93,7 +96,8 @@ public partial class GameSettingsEditor : UserControl
 
         if (!TryReadIntTag(MsaaBox, out var msaa, allowEmpty: true, minimum: 0, maximum: 8, out error) ||
             !TryReadIntTag(GraphicsQualityBox, out var graphics, allowEmpty: true, minimum: 1, maximum: 10, out error) ||
-            !TryReadIntTag(TextureQualityBox, out var texture, allowEmpty: true, minimum: 0, maximum: 6, out error))
+            !TryReadIntTag(TextureQualityBox, out var texture, allowEmpty: true, minimum: 0, maximum: 6, out error) ||
+            !TryReadIntTag(VolumeBox, out var volume, allowEmpty: true, minimum: 0, maximum: 10, out error))
         {
             ValidationText.Text = error;
             return false;
@@ -130,6 +134,7 @@ public partial class GameSettingsEditor : UserControl
             GraphicsQuality = graphics,
             TextureQuality = texture,
             FpsLimit = fps,
+            MasterVolumeLevel = volume,
             PreserveRenderingQuality = scalingTag switch
             {
                 "Preserve" => true,
@@ -156,20 +161,21 @@ public partial class GameSettingsEditor : UserControl
         _loading = true;
         try
         {
-            var inheritedLabel = IsOverrideMode ? "Inherit global" : "Automatic";
+            var inheritedLabel = IsOverrideMode ? "Inherit lower level" : "Automatic";
             SetFirstItemLabel(MsaaBox, inheritedLabel);
             SetFirstItemLabel(GraphicsQualityBox, inheritedLabel);
             SetFirstItemLabel(TextureQualityBox, inheritedLabel);
             SetFirstItemLabel(FpsBox, inheritedLabel);
+            SetFirstItemLabel(VolumeBox, inheritedLabel);
             TipText.Text = IsOverrideMode
-                ? "Tip: Inherit global leaves that game value unchanged. Curated controls take priority over duplicate advanced flags."
+                ? "Tip: Inherit lower level leaves this scope unchanged. Curated controls take priority over duplicate advanced flags."
                 : "Tip: Automatic removes only that override. Curated controls take priority over duplicate advanced flags.";
 
             var current = ReadTag(ClientScalingBox);
             ClientScalingBox.Items.Clear();
             if (IsOverrideMode)
             {
-                ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Inherit global", Tag = "Inherit" });
+                ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Inherit lower level", Tag = "Inherit" });
                 ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Disabled", Tag = "Disabled" });
                 ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Preserve quality", Tag = "Preserve" });
                 SelectByTag(ClientScalingBox, current is "Preserve" or "Disabled" ? current : "Inherit");
@@ -198,7 +204,7 @@ public partial class GameSettingsEditor : UserControl
 
     private void PreserveQuality_Unchecked(object sender, RoutedEventArgs e)
     {
-        if (!_loading)
+        if (!_loading && !string.Equals(ReadTag(ClientScalingBox), "Inherit", StringComparison.Ordinal))
         {
             SelectByTag(ClientScalingBox, IsOverrideMode ? "Disabled" : "Auto");
         }

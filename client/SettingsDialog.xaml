@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:RobloxAltClient"
-        Title="Launcher settings" Width="700" Height="760" MinWidth="620" MinHeight="620"
+        Title="Settings" Width="1080" Height="800" MinWidth="900" MinHeight="650"
         Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
         WindowStartupLocation="CenterOwner" ShowInTaskbar="False" ResizeMode="CanResize">
     <Window.Resources>
@@ -22,8 +22,7 @@
                         <Border x:Name="TabChrome" Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1"
                                 CornerRadius="8,8,0,0" Padding="{TemplateBinding Padding}">
-                            <ContentPresenter ContentSource="Header" HorizontalAlignment="Center"
-                                              VerticalAlignment="Center" />
+                            <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsSelected" Value="True">
@@ -47,10 +46,15 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <StackPanel Margin="0,0,0,14">
-            <TextBlock Text="Launcher settings" FontSize="23" FontWeight="SemiBold" />
+            <TextBlock Text="Settings" FontSize="23" FontWeight="SemiBold" />
             <TextBlock Text="Stored locally on this PC." Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,0" />
+            <Border Background="#17152B" BorderBrush="{StaticResource SelectionBorderBrush}" BorderThickness="1"
+                    CornerRadius="8" Padding="10,7" Margin="0,10,0,0">
+                <TextBlock Text="Priority: Profile overrides Game, and Game overrides Global. ‘Inherit lower level’ uses the next available value."
+                           Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+            </Border>
         </StackPanel>
-        <TabControl Grid.Row="1">
+        <TabControl x:Name="SettingsTabs" Grid.Row="1">
             <TabItem Header="Launcher">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,12,0,0">
                     <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
@@ -59,30 +63,26 @@
                             <CheckBox x:Name="UpdateChecksBox" Content="Check GitHub for updates at startup" Margin="0,0,0,12" />
                             <CheckBox x:Name="ContinueOnFailureBox" Content="Continue the queue after a failed account" Margin="0,0,0,12" />
                             <CheckBox x:Name="RememberSelectionsBox" Content="Remember selected profiles and game" Margin="0,0,0,18" />
-
-                            <TextBlock Text="Roblox process timeout" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,6" />
+                            <TextBlock Text="Roblox process timeout" FontWeight="SemiBold" Margin="0,0,0,6" />
                             <ComboBox x:Name="TimeoutBox" Margin="0,0,0,14">
                                 <ComboBoxItem Content="30 seconds" Tag="30" />
                                 <ComboBoxItem Content="45 seconds" Tag="45" />
                                 <ComboBoxItem Content="60 seconds" Tag="60" />
                                 <ComboBoxItem Content="90 seconds" Tag="90" />
                             </ComboBox>
-
-                            <TextBlock Text="Delay between accounts" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,6" />
+                            <TextBlock Text="Delay between accounts" FontWeight="SemiBold" Margin="0,0,0,6" />
                             <ComboBox x:Name="DelayBox" Margin="0,0,0,14">
                                 <ComboBoxItem Content="No delay" Tag="0" />
                                 <ComboBoxItem Content="2 seconds" Tag="2" />
                                 <ComboBoxItem Content="5 seconds" Tag="5" />
                                 <ComboBoxItem Content="10 seconds" Tag="10" />
                             </ComboBox>
-
-                            <TextBlock Text="Preferred launcher" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,6" />
+                            <TextBlock Text="Preferred launcher" FontWeight="SemiBold" Margin="0,0,0,6" />
                             <ComboBox x:Name="LauncherBox" Margin="0,0,0,14">
                                 <ComboBoxItem Content="Windows registered handler (recommended)" Tag="Auto" />
                                 <ComboBoxItem Content="Bloxstrap" Tag="Bloxstrap" />
                                 <ComboBoxItem Content="Standard Roblox" Tag="Standard" />
                             </ComboBox>
-
                             <Separator Margin="0,3,0,12" />
                             <CheckBox x:Name="ClearToolsBox" Content="Clear downloaded Sysinternals tool cache when saved" Margin="0,0,0,10" />
                             <CheckBox x:Name="ClearSessionsBox" Content="Clear all Roblox browser sessions on next restart" />
@@ -90,11 +90,85 @@
                     </Border>
                 </ScrollViewer>
             </TabItem>
-            <TabItem Header="Game settings">
+            <TabItem Header="Global defaults">
                 <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
                         BorderThickness="1" CornerRadius="14" Padding="17" Margin="0,12,0,4">
-                    <local:GameSettingsEditor x:Name="GameSettingsEditor" />
+                    <local:GameSettingsEditor x:Name="GlobalSettingsEditor" />
                 </Border>
+            </TabItem>
+            <TabItem Header="Games">
+                <Grid Margin="0,12,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="250" />
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="14" Padding="12">
+                        <DockPanel>
+                            <TextBox x:Name="GameSearchBox" DockPanel.Dock="Top" TextChanged="GameSearchBox_TextChanged"
+                                     ToolTip="Search saved games" Margin="0,0,0,10" />
+                            <TextBlock Text="Saved games" DockPanel.Dock="Top" FontWeight="SemiBold" Margin="2,0,0,8" />
+                            <ListBox x:Name="GamesList" SelectionChanged="GamesList_SelectionChanged">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Margin="2,3">
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding Url}" FontSize="10" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </DockPanel>
+                    </Border>
+                    <Border Grid.Column="2" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="14" Padding="17">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <TextBlock x:Name="GameScopeText" Text="Select a saved game" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10" />
+                            <local:GameSettingsEditor x:Name="GameSettingsEditor" Grid.Row="1" IsOverrideMode="True" />
+                        </Grid>
+                    </Border>
+                </Grid>
+            </TabItem>
+            <TabItem Header="Profiles">
+                <Grid Margin="0,12,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="250" />
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="14" Padding="12">
+                        <DockPanel>
+                            <TextBlock Text="Account profiles" DockPanel.Dock="Top" FontWeight="SemiBold" Margin="2,0,0,8" />
+                            <ListBox x:Name="ProfilesList" SelectionChanged="ProfilesList_SelectionChanged">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Margin="2,3">
+                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding Group}" FontSize="10" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </DockPanel>
+                    </Border>
+                    <Border Grid.Column="2" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="14" Padding="17">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <TextBlock x:Name="ProfileScopeText" Text="Select an account profile" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10" />
+                            <local:GameSettingsEditor x:Name="ProfileSettingsEditor" Grid.Row="1" IsOverrideMode="True" />
+                        </Grid>
+                    </Border>
+                </Grid>
             </TabItem>
         </TabControl>
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
