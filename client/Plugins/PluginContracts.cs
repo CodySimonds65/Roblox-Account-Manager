@@ -138,7 +138,8 @@ public sealed record PluginHandshake(
     int ProtocolMinor,
     string ManifestSha256,
     IReadOnlyList<string> DeclaredCapabilities,
-    int ProcessId = 0);
+    int ProcessId = 0,
+    long ProcessStartTimeUtcTicks = 0);
 
 public sealed class PluginJson
 {

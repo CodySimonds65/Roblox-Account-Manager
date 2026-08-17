@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Diagnostics;
 
 namespace RobloxAltClient.Plugins;
 
@@ -15,6 +16,7 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly PluginActionRouter _actions;
     private readonly Dictionary<string, InstalledPlugin> _installed = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _launchGates = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _launchTokens = new(StringComparer.Ordinal);
 
     public PluginRuntime()
     {
@@ -104,16 +106,19 @@ public sealed class PluginRuntime : IAsyncDisposable
         var manifestPath = Path.Combine(installed.InstallDirectory, "plugin.json");
         var manifestHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(manifestPath))).ToLowerInvariant();
         var token = _host.CreateLaunchToken(installed.Manifest.Id, manifestHash, effectiveCapabilities);
+        _launchTokens[pluginId] = token;
         int? pid = null;
         try
         {
             pid = _supervisor.Start(installed.Manifest, installed.EntryPointPath, _host.PipeName, token, _paths.GetDataDirectory(pluginId));
-            _host.BindLaunchProcess(token, pid.Value);
+            using (var process = Process.GetProcessById(pid.Value))
+                _host.BindLaunchProcess(token, pid.Value, process.StartTime.ToUniversalTime().Ticks);
             _supervisor.Resume(pluginId);
         }
         catch
         {
             _host.RevokeLaunchToken(token);
+            _launchTokens.TryRemove(pluginId, out _);
             if (pid is not null) await _supervisor.StopAsync(pluginId).ConfigureAwait(false);
             throw;
         }
@@ -202,6 +207,7 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     private void Supervisor_Exited(object? sender, (string PluginId, int ProcessId) e)
     {
+        if (_launchTokens.TryRemove(e.PluginId, out var token)) _host.RevokeLaunchToken(token);
         lock (_gate)
         {
             if (_installed.TryGetValue(e.PluginId, out var installed) && installed.ProcessId == e.ProcessId)

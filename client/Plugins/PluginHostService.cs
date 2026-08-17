@@ -5,6 +5,7 @@ using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 
 namespace RobloxAltClient.Plugins;
 
@@ -34,15 +35,16 @@ public sealed class PluginHostService : IAsyncDisposable
     {
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         _expected[token] = new ExpectedConnection(pluginId, manifestHash,
-            new HashSet<string>(capabilities, StringComparer.Ordinal), null);
+            new HashSet<string>(capabilities, StringComparer.Ordinal), null, null, DateTime.UtcNow);
+        _ = Task.Delay(TimeSpan.FromSeconds(30), _shutdown.Token).ContinueWith(_ => RevokeLaunchToken(token), TaskScheduler.Default);
         return token;
     }
 
-    public void BindLaunchProcess(string token, int processId)
+    public void BindLaunchProcess(string token, int processId, long processStartTimeUtcTicks)
     {
-        if (processId <= 0 || !_expected.TryGetValue(token, out var expected))
+        if (processId <= 0 || processStartTimeUtcTicks <= 0 || !_expected.TryGetValue(token, out var expected))
             throw new InvalidOperationException("The plugin launch token is unknown or the process id is invalid.");
-        _expected[token] = expected with { ProcessId = processId };
+        _expected[token] = expected with { ProcessId = processId, ProcessStartTimeUtcTicks = processStartTimeUtcTicks };
     }
 
     public void RevokeLaunchToken(string token) => _expected.TryRemove(token, out _);
@@ -123,6 +125,8 @@ public sealed class PluginHostService : IAsyncDisposable
                 !TryGetClientProcessId(pipe, out var clientProcessId) ||
                 expected.ProcessId is null || clientProcessId != expected.ProcessId ||
                 handshake.ProcessId != clientProcessId ||
+                expected.ProcessStartTimeUtcTicks is null || handshake.ProcessStartTimeUtcTicks != expected.ProcessStartTimeUtcTicks ||
+                !TryGetProcessStartTicks(clientProcessId, out var clientStartTicks) || clientStartTicks != expected.ProcessStartTimeUtcTicks ||
                 !_expected.TryRemove(handshake.Token, out _))
             {
                 await PluginWire.WriteAsync(pipe, new PluginEnvelope("host.reject", Guid.NewGuid().ToString("N"),
@@ -229,7 +233,15 @@ public sealed class PluginHostService : IAsyncDisposable
         _shutdown.Dispose();
     }
 
-    private sealed record ExpectedConnection(string PluginId, string ManifestHash, IReadOnlySet<string> GrantedCapabilities, int? ProcessId);
+    private sealed record ExpectedConnection(string PluginId, string ManifestHash, IReadOnlySet<string> GrantedCapabilities,
+        int? ProcessId, long? ProcessStartTimeUtcTicks, DateTime CreatedUtc);
+
+    private static bool TryGetProcessStartTicks(int processId, out long ticks)
+    {
+        ticks = 0;
+        try { using var process = Process.GetProcessById(processId); process.Refresh(); ticks = process.StartTime.ToUniversalTime().Ticks; return true; }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
+    }
 
     private static bool TryGetClientProcessId(NamedPipeServerStream pipe, out int processId)
     {

@@ -11,6 +11,7 @@ public sealed class PluginProcessSupervisor : IDisposable
     private readonly Dictionary<string, Process> _processes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, nint> _jobs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, nint> _suspendedThreads = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _tokenFiles = new(StringComparer.Ordinal);
 
     public event EventHandler<(string PluginId, int ProcessId)>? Exited;
 
@@ -32,10 +33,11 @@ public sealed class PluginProcessSupervisor : IDisposable
         {
             var suspended = MediumIntegrityProcessStarter.StartSuspended(executablePath, arguments, Path.GetDirectoryName(executablePath)!, job);
             process = suspended.Process;
-            lock (_gate) _suspendedThreads[manifest.Id] = suspended.ThreadHandle;
+            lock (_gate) { _suspendedThreads[manifest.Id] = suspended.ThreadHandle; _tokenFiles[manifest.Id] = tokenPath; }
         }
         catch
         {
+            try { File.Delete(tokenPath); } catch { }
             CloseHandle(job);
             throw;
         }
@@ -48,6 +50,7 @@ public sealed class PluginProcessSupervisor : IDisposable
                 try { if (!old.HasExited) old.Kill(entireProcessTree: true); } catch { }
                 old.Dispose();
                 if (_jobs.Remove(manifest.Id, out var oldJob) && oldJob != nint.Zero) CloseHandle(oldJob);
+                if (_tokenFiles.Remove(manifest.Id, out var oldToken)) try { File.Delete(oldToken); } catch { }
             }
             _processes[manifest.Id] = process;
             _jobs[manifest.Id] = job;
@@ -75,12 +78,15 @@ public sealed class PluginProcessSupervisor : IDisposable
         Process? process;
         nint job;
         nint suspendedThread;
+        string? tokenFile;
         lock (_gate)
         {
             _processes.Remove(pluginId, out process);
             _jobs.Remove(pluginId, out job);
             _suspendedThreads.Remove(pluginId, out suspendedThread);
+            _tokenFiles.Remove(pluginId, out tokenFile);
         }
+        if (tokenFile is not null) try { File.Delete(tokenFile); } catch { }
         if (suspendedThread != nint.Zero) CloseHandle(suspendedThread);
         if (process is not null)
         {
@@ -108,6 +114,8 @@ public sealed class PluginProcessSupervisor : IDisposable
                 _processes.Remove(pluginId);
                 if (_jobs.Remove(pluginId, out var job) && job != nint.Zero) CloseHandle(job);
                 _suspendedThreads.Remove(pluginId, out suspendedThread);
+                _tokenFiles.Remove(pluginId, out var tokenFile);
+                if (tokenFile is not null) try { File.Delete(tokenFile); } catch { }
             }
         }
         if (suspendedThread != nint.Zero) CloseHandle(suspendedThread);
@@ -125,6 +133,8 @@ public sealed class PluginProcessSupervisor : IDisposable
             jobs = _jobs.Values.ToArray();
             foreach (var thread in _suspendedThreads.Values) if (thread != nint.Zero) CloseHandle(thread);
             _suspendedThreads.Clear();
+            foreach (var tokenFile in _tokenFiles.Values) try { File.Delete(tokenFile); } catch { }
+            _tokenFiles.Clear();
             _jobs.Clear();
             _processes.Clear();
         }
