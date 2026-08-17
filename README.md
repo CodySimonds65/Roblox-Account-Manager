@@ -32,7 +32,7 @@ Requires Windows, the .NET 8 SDK or newer, and Microsoft WebView2 Runtime.
 build-client.cmd
 ```
 
-Output: `release\RobloxAccountManager.exe`. The source is under `client\` and licensed under MIT.
+Output: `release\RobloxAccountManager.exe`. The source is under `client\` and licensed under Apache 2.0.
 
 ## Settings
 
