@@ -1,0 +1,12 @@
+name: focus-safety
+on:
+  push:
+  pull_request:
+jobs:
+  static-gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check focus safety invariant
+        shell: pwsh
+        run: ./build/verify-focus-safety.ps1

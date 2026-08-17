@@ -591,6 +591,12 @@ public partial class MainWindow : Window
         Log("Launcher settings saved.");
     }
 
+    private void Plugins_Click(object sender, RoutedEventArgs e)
+    {
+        var window = new PluginsWindow { Owner = this };
+        window.ShowDialog();
+    }
+
     private async Task ApplyPendingDataCleanupAsync()
     {
         if (!_settings.ClearBrowserDataOnNextStart)
@@ -870,6 +876,10 @@ public partial class MainWindow : Window
             // fallback for clients that do not expose a window immediately.
             await WaitForRobloxStartupReadyAsync(newRobloxProcess, cancellationToken);
         }
+
+        // Persist the PID and process start time before the local process wrapper is
+        // disposed. The registry reattaches safely after restart and rejects PID reuse.
+        ((App)Application.Current).PluginRuntime.Accounts.Register(item.Account, newRobloxProcess);
 
         Log($"{item.Label} is running.");
         return (true, "Roblox started");

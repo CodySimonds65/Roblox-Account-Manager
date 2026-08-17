@@ -1,4 +1,5 @@
 using System.Windows;
+using RobloxAltClient.Plugins;
 using RobloxAltClient.Services;
 
 namespace RobloxAltClient;
@@ -6,6 +7,7 @@ namespace RobloxAltClient;
 public partial class App : Application
 {
     private Mutex? _singleInstanceMutex;
+    public PluginRuntime PluginRuntime { get; } = new();
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -47,6 +49,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        PluginRuntime.DisposeAsync().AsTask().GetAwaiter().GetResult();
         if (_singleInstanceMutex is not null)
         {
             _singleInstanceMutex.ReleaseMutex();

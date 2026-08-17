@@ -1,4 +1,5 @@
 using RobloxAltClient.Models;
+using RobloxAltClient.Plugins;
 using RobloxAltClient.Services;
 using System.Text.Json;
 
@@ -564,6 +565,45 @@ try
     {
         // Expected: imported settings use the same validation as the UI and launch path.
     }
+
+    var pluginManifest = PluginManifestReader.Parse("""
+        {
+          "schemaVersion": 1,
+          "id": "io.github.codysimonds65.ram.macros",
+          "name": "RAM Macros",
+          "version": "1.0.0",
+          "contractVersion": "1.0",
+          "publisher": "CodySimonds65",
+          "description": "Background-safe macro recording.",
+          "capabilities": ["host.accounts.read", "host.input.background"],
+          "entryPoint": "ram-macros.exe",
+          "autostartDefault": false
+        }
+        """);
+    Require(pluginManifest.Id == "io.github.codysimonds65.ram.macros", "Plugin manifest id did not parse.");
+    Require(pluginManifest.EntryPoint == "ram-macros.exe", "Plugin entrypoint did not parse.");
+    Require(PluginInstaller.ParseHash("abc123  plugin.zip".PadLeft(64 + 2 + 10, '0')).Length == 64,
+        "A valid plugin checksum was not parsed.");
+    try
+    {
+        _ = PluginManifestReader.Parse("{\"schemaVersion\":1,\"id\":\"bad\",\"name\":\"x\",\"version\":\"1\",\"contractVersion\":\"1\",\"publisher\":\"x\",\"description\":\"x\",\"capabilities\":[],\"entryPoint\":\"../bad.exe\"}");
+        throw new InvalidOperationException("Unsafe plugin manifest path was accepted.");
+    }
+    catch (InvalidDataException)
+    {
+        // Expected: manifest paths and ids are validated before installation.
+    }
+
+    var leaseCoordinator = new PriorityInputLeaseCoordinator();
+    await using (var firstLease = await leaseCoordinator.TryAcquireAsync("account", "afk", 100, TimeSpan.FromSeconds(1), CancellationToken.None)
+                 ?? throw new InvalidOperationException("The first input lease was not granted."))
+    {
+        using var leaseCancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
+        Require(await leaseCoordinator.TryAcquireAsync("account", "ocr", 200, TimeSpan.FromSeconds(1), leaseCancellation.Token) is null,
+            "A canceled input lease unexpectedly succeeded.");
+    }
+    await using var recoveredLease = await leaseCoordinator.TryAcquireAsync("account", "macros", 300, TimeSpan.FromSeconds(1), CancellationToken.None)
+        ?? throw new InvalidOperationException("A canceled input lease stranded the account.");
 
     var confirmationPath = Path.Combine(Path.GetTempPath(), $"RobloxAccountManager-update-{Guid.NewGuid():N}.ok");
     UpdateService.ConfirmUpdatedLaunch(["--confirm-update", confirmationPath]);

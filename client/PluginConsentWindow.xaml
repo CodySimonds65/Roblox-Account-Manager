@@ -1,0 +1,22 @@
+<Window x:Class="RobloxAltClient.PluginConsentWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Plugin permissions" Height="430" Width="560" MinHeight="360"
+        Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Grid Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="TitleText" FontSize="22" FontWeight="SemiBold" />
+        <TextBlock Grid.Row="1" Text="Select only the permissions this plugin needs. New permissions are never granted automatically on update."
+                   TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}" Margin="0,8,0,14" />
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="CapabilityList" />
+        </ScrollViewer>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Cancel" Click="Cancel_Click" Style="{StaticResource SecondaryButton}" Padding="18,7" Margin="0,0,8,0" />
+            <Button Content="Save permissions" Click="Save_Click" Padding="18,7" />
+        </StackPanel>
+    </Grid>
+</Window>
