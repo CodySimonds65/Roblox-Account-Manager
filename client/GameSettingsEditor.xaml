@@ -10,15 +10,16 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel Margin="0,0,4,0">
                 <TextBlock Text="Roblox game settings" FontSize="17" FontWeight="SemiBold" />
-                <TextBlock Text="Graphics quality and FPS mirror Roblox's menu on the next launch. MSAA, texture quality, and scaling are engine overrides."
+                <TextBlock Text="Graphics quality, FPS, and volume mirror Roblox's menu on the next launch. MSAA, texture quality, scaling, and advanced flags are engine overrides."
                            Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" Margin="0,4,0,14" />
 
                 <Border Background="{StaticResource ElevatedBrush}" BorderBrush="{StaticResource BorderBrush}"
                         BorderThickness="1" CornerRadius="10" Padding="14">
                     <Grid>
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -93,15 +94,32 @@
                             <TextBox x:Name="CustomFpsBox" Grid.Column="1" Margin="8,0,0,0" ToolTip="30 to 1000 FPS" />
                         </Grid>
 
-                        <TextBlock Grid.Row="5" Text="Client scaling" FontWeight="SemiBold" VerticalAlignment="Center" />
-                        <ComboBox x:Name="ClientScalingBox" Grid.Row="5" Grid.Column="1" Margin="10,0,0,10"
+                        <TextBlock Grid.Row="5" Text="Master volume" FontWeight="SemiBold" VerticalAlignment="Center"
+                                   ToolTip="Applies Roblox's master game volume for this settings scope." />
+                        <ComboBox x:Name="VolumeBox" Grid.Row="5" Grid.Column="1" Margin="10,0,0,10">
+                            <ComboBoxItem Content="Automatic" Tag="" />
+                            <ComboBoxItem Content="0% · Muted" Tag="0" />
+                            <ComboBoxItem Content="10%" Tag="1" />
+                            <ComboBoxItem Content="20%" Tag="2" />
+                            <ComboBoxItem Content="30%" Tag="3" />
+                            <ComboBoxItem Content="40%" Tag="4" />
+                            <ComboBoxItem Content="50%" Tag="5" />
+                            <ComboBoxItem Content="60%" Tag="6" />
+                            <ComboBoxItem Content="70%" Tag="7" />
+                            <ComboBoxItem Content="80%" Tag="8" />
+                            <ComboBoxItem Content="90%" Tag="9" />
+                            <ComboBoxItem Content="100%" Tag="10" />
+                        </ComboBox>
+
+                        <TextBlock Grid.Row="6" Text="Client scaling" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <ComboBox x:Name="ClientScalingBox" Grid.Row="6" Grid.Column="1" Margin="10,0,0,10"
                                   SelectionChanged="ClientScalingBox_SelectionChanged">
                             <ComboBoxItem Content="Automatic" Tag="Auto" />
                             <ComboBoxItem Content="Preserve quality" Tag="Preserve" />
                         </ComboBox>
 
-                        <TextBlock Grid.Row="6" Text="Advanced engine flags" FontWeight="SemiBold" VerticalAlignment="Top" Margin="0,3,0,0" />
-                        <StackPanel Grid.Row="6" Grid.Column="1" Margin="10,0,0,0">
+                        <TextBlock Grid.Row="7" Text="Advanced engine flags" FontWeight="SemiBold" VerticalAlignment="Top" Margin="0,3,0,0" />
+                        <StackPanel Grid.Row="7" Grid.Column="1" Margin="10,0,0,0">
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,7">
                                 <Button Content="Format JSON" Click="FormatFlags_Click" Style="{StaticResource CompactButton}" Margin="0,0,7,0" />
                                 <Button Content="Reset custom flags" Click="ResetFlags_Click" Style="{StaticResource CompactButton}" />

@@ -57,12 +57,20 @@ Require(
 Require(
     !RobloxClientSettingsService.TryValidateSettings(new GameSettings { FpsLimit = 10 }, out _),
     "An unsafe FPS value was accepted.");
+Require(
+    RobloxClientSettingsService.TryValidateSettings(new GameSettings { MasterVolumeLevel = 0 }, out _),
+    "A muted master volume was rejected.");
+Require(
+    !RobloxClientSettingsService.TryValidateSettings(new GameSettings { MasterVolumeLevel = 11 }, out _),
+    "An invalid master volume level was accepted.");
 Require(!new GameSettings { AdvancedFlagsJson = "{}" }.HasOverrides,
     "An empty advanced-flags object was treated as an active override.");
 
 var legacySettings = JsonSerializer.Deserialize<LauncherSettings>("{}");
 Require(legacySettings?.GameSettings is not null && legacySettings.GameOverrides is not null,
     "Legacy launcher settings did not receive game-settings defaults.");
+Require(JsonSerializer.Deserialize<AccountProfile>("{\"Label\":\"Legacy\"}")?.GameSettings is null,
+    "Legacy account profiles did not default to inherited settings.");
 
 Require(
     UpdateService.TryParseReleaseVersion("v1.2.3", out var releaseVersion) && releaseVersion == new Version(1, 2, 3),
@@ -108,10 +116,10 @@ try
         LaunchTimeoutSeconds = 60,
         PreferredLauncher = "Bloxstrap",
         LastSelectedProfileIds = ["profile-one"],
-        GameSettings = new GameSettings { GraphicsQuality = 7, TextureQuality = 4 },
+        GameSettings = new GameSettings { GraphicsQuality = 7, TextureQuality = 4, MasterVolumeLevel = 6 },
         GameOverrides = new Dictionary<string, GameSettings>(StringComparer.OrdinalIgnoreCase)
         {
-            ["https://www.roblox.com/games/123456/Test-Game"] = new GameSettings { FpsLimit = 240 }
+            ["https://www.roblox.com/games/123456/Test-Game"] = new GameSettings { FpsLimit = 240, MasterVolumeLevel = 8 }
         }
     };
     await settingsStore.SaveAsync(expectedSettings);
@@ -122,8 +130,11 @@ try
     Require(loadedSettings.LastSelectedProfileIds.SequenceEqual(["profile-one"]), "Remembered profiles did not reload.");
     Require(loadedSettings.GameSettings.TextureQuality == 4, "Global game settings did not reload.");
     Require(loadedSettings.GameSettings.GraphicsQuality == 7, "Native graphics quality did not reload.");
+    Require(loadedSettings.GameSettings.MasterVolumeLevel == 6, "Global master volume did not reload.");
     Require(loadedSettings.GameOverrides["https://www.roblox.com/games/123456/Test-Game"].FpsLimit == 240,
         "Per-game overrides did not reload.");
+    Require(loadedSettings.GameOverrides["https://www.roblox.com/games/123456/Test-Game"].MasterVolumeLevel == 8,
+        "Per-game master volume did not reload.");
     var serializedSettings = await File.ReadAllTextAsync(Path.Combine(testDirectory, "settings.json"));
     Require(!serializedSettings.Contains("HasOverrides", StringComparison.Ordinal),
         "A computed game-settings property leaked into the saved settings file.");
@@ -139,15 +150,18 @@ try
         MsaaSamples = 4,
         PreserveRenderingQuality = true,
         FpsLimit = 120,
+        MasterVolumeLevel = 2,
         AdvancedFlagsJson = "{\"FFlagGlobal\": \"True\"}"
     };
     var gameOverride = new GameSettings
     {
         FpsLimit = 240,
+        MasterVolumeLevel = 8,
         AdvancedFlagsJson = "{\"FFlagGame\": \"True\"}"
     };
     var mergedGameSettings = GameSettings.Merge(globalGameSettings, gameOverride);
     Require(mergedGameSettings.FpsLimit == 240, "Per-game FPS did not override the global value.");
+    Require(mergedGameSettings.MasterVolumeLevel == 8, "Per-game volume did not override the global value.");
     Require(mergedGameSettings.AdvancedFlagsJson?.Contains("FFlagGlobal") == true &&
             mergedGameSettings.AdvancedFlagsJson.Contains("FFlagGame"),
         "Global and per-game advanced flags did not merge.");
@@ -160,6 +174,62 @@ try
     var automaticMerge = GameSettings.Merge(globalGameSettings, automaticOverride);
     Require(automaticMerge.MsaaSamples == globalGameSettings.MsaaSamples && !automaticOverride.HasOverrides,
         "Automatic per-game values did not fall back to global settings.");
+    var profileOverride = new GameSettings
+    {
+        MasterVolumeLevel = 0,
+        GraphicsQuality = 5,
+        AdvancedFlagsJson = "{\"FFlagProfile\": \"True\", \"FFlagGame\": null}"
+    };
+    var resolvedSettings = GameSettings.Resolve(globalGameSettings, gameOverride, profileOverride);
+    Require(resolvedSettings.MasterVolumeLevel == 0 && resolvedSettings.GraphicsQuality == 5,
+        "Profile settings did not take priority over global and game values.");
+    Require(resolvedSettings.AdvancedFlagsJson?.Contains("FFlagProfile") == true &&
+            resolvedSettings.AdvancedFlagsJson.Contains("FFlagGlobal") &&
+            !resolvedSettings.AdvancedFlagsJson.Contains("FFlagGame"),
+        "Three-level advanced flags did not resolve correctly.");
+    Require(!GameSettings.TryResolve(
+                 globalGameSettings,
+                 new GameSettings { AdvancedFlagsJson = "{ invalid" },
+                 null,
+                 out _,
+                 out var invalidScopeError) &&
+            invalidScopeError.Contains("Game", StringComparison.OrdinalIgnoreCase),
+        "Malformed lower-level advanced flags were not rejected with their scope.");
+    var allGlobalSettings = new GameSettings
+    {
+        MsaaSamples = 2,
+        PreserveRenderingQuality = false,
+        GraphicsQuality = 2,
+        TextureQuality = 1,
+        FpsLimit = 60,
+        MasterVolumeLevel = 2
+    };
+    var allGameSettings = new GameSettings
+    {
+        MsaaSamples = 4,
+        PreserveRenderingQuality = true,
+        GraphicsQuality = 4,
+        TextureQuality = 3,
+        FpsLimit = 120,
+        MasterVolumeLevel = 4
+    };
+    var allProfileSettings = new GameSettings
+    {
+        MsaaSamples = 8,
+        PreserveRenderingQuality = false,
+        GraphicsQuality = 8,
+        TextureQuality = 6,
+        FpsLimit = 240,
+        MasterVolumeLevel = 8
+    };
+    var allResolvedSettings = GameSettings.Resolve(allGlobalSettings, allGameSettings, allProfileSettings);
+    Require(allResolvedSettings.MsaaSamples == 8 &&
+            allResolvedSettings.PreserveRenderingQuality == false &&
+            allResolvedSettings.GraphicsQuality == 8 &&
+            allResolvedSettings.TextureQuality == 6 &&
+            allResolvedSettings.FpsLimit == 240 &&
+            allResolvedSettings.MasterVolumeLevel == 8,
+        "Profile precedence did not apply to every scalar setting.");
 
     var robloxMenuSettingsPath = Path.Combine(testDirectory, "Roblox", "GlobalBasicSettings_13.xml");
     Directory.CreateDirectory(Path.GetDirectoryName(robloxMenuSettingsPath)!);
@@ -169,6 +239,7 @@ try
           <Item class="UserGameSettings">
             <Properties>
               <int name="FramerateCap">60</int>
+              <float name="MasterVolume">0.100000001</float>
               <token name="GraphicsOptimizationMode">0</token>
               <int name="GraphicsQualityLevel">1</int>
               <token name="SavedQualityLevel">1</token>
@@ -180,9 +251,11 @@ try
     await File.WriteAllTextAsync(robloxMenuSettingsPath, originalMenuSettings);
     var menuMessages = new List<string>();
     var menuSettingsService = new RobloxMenuSettingsService(robloxMenuSettingsPath);
+    Require(menuSettingsService.TryReadMasterVolumeLevel(out var detectedVolume) && detectedVolume == 1,
+        "The existing Roblox master volume was not read as a launcher level.");
     var menuChanged = await menuSettingsService.ApplyAsync(
         new GameSettings { GraphicsQuality = 3, FpsLimit = 120 },
-        new GameSettings { GraphicsQuality = 8, FpsLimit = 240 },
+        new GameSettings { GraphicsQuality = 8, FpsLimit = 240, MasterVolumeLevel = 8 },
         menuMessages.Add);
     Require(menuChanged, "Native Roblox menu settings were not updated.");
     var appliedMenuSettings = await File.ReadAllTextAsync(robloxMenuSettingsPath);
@@ -193,6 +266,8 @@ try
     Require(appliedMenuSettings.Contains("name=\"SavedQualityLevel\">8<") &&
             appliedMenuSettings.Contains("name=\"GraphicsQualityLevel\">17<"),
         "Per-game graphics quality did not update Roblox's native preferences.");
+    Require(appliedMenuSettings.Contains("name=\"MasterVolume\">0.8<"),
+        "Per-game master volume did not update Roblox's native preference.");
     Require(appliedMenuSettings.Contains("name=\"UnrelatedPreference\">true<"),
         "Updating Roblox menu settings removed an unrelated preference.");
     Require(menuMessages.Any(message => message.Contains("next launch", StringComparison.OrdinalIgnoreCase)),
@@ -202,6 +277,83 @@ try
         "Automatic native settings reported a file change.");
     Require(await File.ReadAllTextAsync(robloxMenuSettingsPath) == menuSettingsBeforeAutomatic,
         "Automatic native settings rewrote Roblox's preferences file.");
+
+    await File.WriteAllTextAsync(robloxMenuSettingsPath, originalMenuSettings);
+    var overlayMessages = new List<string>();
+    await using (var overlay = await menuSettingsService.ApplyForLaunchAsync(
+                     new GameSettings { GraphicsQuality = 9, MasterVolumeLevel = 0 },
+                     overlayMessages.Add))
+    {
+        var overlaySettings = await File.ReadAllTextAsync(robloxMenuSettingsPath);
+        Require(overlaySettings.Contains("name=\"SavedQualityLevel\">9<") &&
+                overlaySettings.Contains("name=\"MasterVolume\">0<"),
+            "Launch-time menu settings overlay was not applied.");
+        await File.WriteAllTextAsync(
+            robloxMenuSettingsPath,
+            overlaySettings.Replace("name=\"UnrelatedPreference\">true<", "name=\"UnrelatedPreference\">false<"));
+    }
+    var restoredOverlaySettings = await File.ReadAllTextAsync(robloxMenuSettingsPath);
+    Require(restoredOverlaySettings.Contains("name=\"SavedQualityLevel\">1<") &&
+            restoredOverlaySettings.Contains("name=\"MasterVolume\">0.100000001<") &&
+            restoredOverlaySettings.Contains("name=\"UnrelatedPreference\">false<"),
+        "Launch-time menu settings overlay did not restore the original XML values.");
+    Require(!File.Exists(robloxMenuSettingsPath + ".roblox-alt-menu-recovery.json"),
+        "Launch-time menu settings overlay left a recovery record after restoration.");
+
+    await File.WriteAllTextAsync(robloxMenuSettingsPath, originalMenuSettings);
+    var conflictService = new RobloxMenuSettingsService(robloxMenuSettingsPath);
+    var conflictTransaction = await conflictService.ApplyForLaunchAsync(new GameSettings { MasterVolumeLevel = 7 });
+    var conflictOverlaySettings = await File.ReadAllTextAsync(robloxMenuSettingsPath);
+    await File.WriteAllTextAsync(
+        robloxMenuSettingsPath,
+        conflictOverlaySettings.Replace("name=\"MasterVolume\">0.7<", "name=\"MasterVolume\">0.4<"));
+    await conflictTransaction.DisposeAsync();
+    var conflictRestoredSettings = await File.ReadAllTextAsync(robloxMenuSettingsPath);
+    Require(conflictRestoredSettings.Contains("name=\"MasterVolume\">0.4<") &&
+            !File.Exists(robloxMenuSettingsPath + ".roblox-alt-menu-recovery.json"),
+        "An external Roblox volume change was not preserved safely after overlay disposal.");
+
+    var missingVolumePath = Path.Combine(testDirectory, "Roblox", "MissingVolume.xml");
+    await File.WriteAllTextAsync(missingVolumePath, originalMenuSettings.Replace("<float name=\"MasterVolume\">0.100000001</float>", string.Empty));
+    var missingVolumeMessages = new List<string>();
+    var missingVolumeService = new RobloxMenuSettingsService(missingVolumePath);
+    Require(!await missingVolumeService.ApplyAsync(new GameSettings { MasterVolumeLevel = 5 }, missingVolumeMessages.Add),
+        "A volume-only override succeeded when Roblox's volume field was missing.");
+    Require(missingVolumeMessages.Any(message => message.Contains("MasterVolume", StringComparison.Ordinal)),
+        "A missing Roblox volume field did not produce a readable warning.");
+
+    await File.WriteAllTextAsync(robloxMenuSettingsPath, originalMenuSettings);
+    var menuInterruptedService = new RobloxMenuSettingsService(robloxMenuSettingsPath);
+    var interruptedMenuTransaction = await menuInterruptedService.ApplyForLaunchAsync(
+        new GameSettings { MasterVolumeLevel = 9 });
+    Require(File.Exists(robloxMenuSettingsPath + ".roblox-alt-menu-recovery.json"),
+        "Menu overlay did not create an interrupted-launch recovery record.");
+    var recoveringService = new RobloxMenuSettingsService(robloxMenuSettingsPath);
+    var interruptedRecoveryMessages = new List<string>();
+    Require(await recoveringService.RecoverPendingAsync(interruptedRecoveryMessages.Add),
+        $"Interrupted menu overlay recovery did not complete: {string.Join(" | ", interruptedRecoveryMessages)}");
+    Require((await File.ReadAllTextAsync(robloxMenuSettingsPath)).Contains("name=\"MasterVolume\">0.100000001<"),
+        "Interrupted menu overlay recovery did not restore the original volume.");
+    await interruptedMenuTransaction.DisposeAsync();
+
+    await File.WriteAllTextAsync(robloxMenuSettingsPath, originalMenuSettings);
+    var lockedMenuService = new RobloxMenuSettingsService(robloxMenuSettingsPath);
+    var lockedMenuTransaction = await lockedMenuService.ApplyForLaunchAsync(
+        new GameSettings { MasterVolumeLevel = 7 });
+    await using (var lockedMenuStream = new FileStream(
+                     robloxMenuSettingsPath,
+                     FileMode.Open,
+                     FileAccess.Read,
+                     FileShare.None))
+    {
+        await lockedMenuTransaction.DisposeAsync();
+    }
+    Require(File.Exists(robloxMenuSettingsPath + ".roblox-alt-menu-recovery.json"),
+        "A locked menu-settings restore discarded its recovery record.");
+    Require(await lockedMenuService.RecoverPendingAsync(),
+        "A deferred menu-settings restore did not recover after the lock was released.");
+    Require(!File.Exists(robloxMenuSettingsPath + ".roblox-alt-menu-recovery.json"),
+        "A successful deferred menu-settings restore left its recovery record behind.");
 
     var clientSettingsPath = Path.Combine(testDirectory, "Roblox", "ClientSettings", "ClientAppSettings.json");
     Directory.CreateDirectory(Path.GetDirectoryName(clientSettingsPath)!);
@@ -375,13 +527,14 @@ try
     var accountStore = new AccountStore(testDirectory);
     var expectedAccounts = new List<AccountProfile>
     {
-        new() { Label = "Standard", SortOrder = 0 },
+        new() { Label = "Standard", SortOrder = 0, GameSettings = new GameSettings { MasterVolumeLevel = 0 } },
         new() { Label = "Favorite", Group = "Farm", IsFavorite = true, SortOrder = 1 }
     };
     await accountStore.SaveAsync(expectedAccounts);
     var loadedAccounts = await accountStore.LoadAsync();
     Require(loadedAccounts.Count == 2 && loadedAccounts[0].IsFavorite, "Favorite profiles were not sorted first.");
     Require(loadedAccounts[0].Group == "Farm", "Account profile metadata did not reload.");
+    Require(loadedAccounts[1].GameSettings?.MasterVolumeLevel == 0, "Profile settings did not reload.");
 
     var transferPath = Path.Combine(testDirectory, "preset-transfer.json");
     await PresetTransferService.ExportAsync(transferPath,
@@ -389,13 +542,14 @@ try
         new GamePreset("Built in", "https://www.roblox.com/games/111/Built-In", true),
         new GamePreset("Private game", "https://www.roblox.com/games/222/Private?privateServerLinkCode=abc")
         {
-            Settings = new GameSettings { FpsLimit = 240 }
+            Settings = new GameSettings { FpsLimit = 240, MasterVolumeLevel = 3 }
         }
     ]);
     var transferredPresets = await PresetTransferService.ImportAsync(transferPath);
     Require(transferredPresets.Count == 1, "Preset export included built-in games.");
     Require(transferredPresets[0].Url.Contains("privateServerLinkCode=abc"), "Preset transfer lost a private-server link.");
     Require(transferredPresets[0].Settings?.FpsLimit == 240, "Preset transfer lost per-game settings.");
+    Require(transferredPresets[0].Settings?.MasterVolumeLevel == 3, "Preset transfer lost per-game volume.");
 
     var invalidTransferPath = Path.Combine(testDirectory, "invalid-preset-transfer.json");
     await File.WriteAllTextAsync(

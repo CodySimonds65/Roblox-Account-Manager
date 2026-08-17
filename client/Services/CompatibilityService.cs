@@ -120,7 +120,7 @@ public sealed class CompatibilityService
         return new CompatibilityCheck(
             "Administrator access",
             CompatibilityCheckState.Info,
-            elevated ? "Currently elevated" : "Requested only when needed",
-            "Required only while releasing Roblox singleton handles");
+            elevated ? "Elevated at startup" : "Not elevated",
+            "The client requests administrator access once at startup and reuses that context for singleton release");
     }
 }

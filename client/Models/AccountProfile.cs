@@ -8,6 +8,7 @@ public sealed class AccountProfile
     public string Group { get; set; } = string.Empty;
     public bool IsFavorite { get; set; }
     public int SortOrder { get; set; }
+    public GameSettings? GameSettings { get; set; }
 
     public override string ToString() => Label;
 }

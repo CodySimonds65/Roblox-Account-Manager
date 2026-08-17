@@ -45,9 +45,11 @@ Output: `release\RobloxAccountManager.exe`. The source is under `client\` and li
 
 Release signing is optional. Configure a base64-encoded PFX as `WINDOWS_SIGNING_CERTIFICATE_BASE64` and its password as `WINDOWS_SIGNING_CERTIFICATE_PASSWORD` in GitHub repository secrets. Releases are signed before checksums are generated.
 
-## Game settings
+## Settings
 
-The **Game settings** tab stores global defaults and optional per-game overrides. Graphics quality and maximum frame rate update Roblox's native in-game preferences for the next launch. MSAA, texture quality, scaling, and advanced flags are temporarily merged into `ClientAppSettings.json`, then the original file is restored. Roblox or Bloxstrap can ignore or reject engine flags after an update; the Activity log reports detected rejections.
+The top-right **Settings** window is the single place to manage launcher options and scoped Roblox settings. Its tabs cover launcher behavior, global defaults, saved games, and account profiles. Profile values override game values, and game values override global defaults; choosing **Inherit lower level** leaves that scope unchanged. The same window edits graphics quality, maximum frame rate, volume, MSAA, texture quality, scaling, and advanced flags.
+
+Graphics quality, volume, and maximum frame rate update Roblox's native in-game preferences for the next launch. MSAA, texture quality, scaling, and advanced flags are temporarily merged into `ClientAppSettings.json`, then the original file is restored. Roblox or Bloxstrap can ignore or reject engine flags after an update; the Activity log reports detected rejections.
 
 ## Notes
 

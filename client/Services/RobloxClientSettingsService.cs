@@ -71,15 +71,28 @@ public sealed class RobloxClientSettingsService
         string launcherPreference,
         Action<string>? warning = null)
     {
+        if (!GameSettings.TryResolve(global, gameOverride, null, out var resolved, out var resolutionError))
+        {
+            warning?.Invoke($"Engine settings were skipped: {resolutionError}");
+            return RobloxSettingsTransaction.NoOp();
+        }
+
+        return await ApplyAsync(resolved, launcherPreference, warning);
+    }
+
+    public async Task<RobloxSettingsTransaction> ApplyAsync(
+        GameSettings settings,
+        string launcherPreference,
+        Action<string>? warning = null)
+    {
         try
         {
-            var mergedSettings = GameSettings.Merge(global, gameOverride);
-            if (!mergedSettings.HasOverrides)
+            if (!settings.HasOverrides)
             {
                 return RobloxSettingsTransaction.NoOp();
             }
 
-            if (!TryValidateSettings(mergedSettings, out var settingsError))
+            if (!TryValidateSettings(settings, out var settingsError))
             {
                 warning?.Invoke($"Engine settings were skipped: {settingsError}");
                 return RobloxSettingsTransaction.NoOp();
@@ -87,7 +100,7 @@ public sealed class RobloxClientSettingsService
 
             // Graphics quality and FPS are native Roblox menu preferences. Do
             // not resolve or touch ClientAppSettings for native-only changes.
-            if (BuildFlags(mergedSettings).Count == 0)
+            if (BuildFlags(settings).Count == 0)
             {
                 return RobloxSettingsTransaction.NoOp();
             }
@@ -114,7 +127,7 @@ public sealed class RobloxClientSettingsService
                 }
             }
 
-            return await ApplyToPathsAsync(path, mergedSettings, additionalRestorePaths, warning);
+            return await ApplyToPathsAsync(path, settings, additionalRestorePaths, warning);
         }
         catch (Exception exception)
         {
@@ -322,6 +335,12 @@ public sealed class RobloxClientSettingsService
         if (settings.FpsLimit.HasValue && settings.FpsLimit.Value is < 30 or > 1000)
         {
             error = "FPS must be Automatic or a whole number from 30 through 1000.";
+            return false;
+        }
+
+        if (settings.MasterVolumeLevel.HasValue && settings.MasterVolumeLevel.Value is < 0 or > 10)
+        {
+            error = "Master volume must be Automatic or a level from 0 through 10.";
             return false;
         }
 

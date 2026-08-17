@@ -2,7 +2,8 @@ namespace RobloxAltClient.Models;
 
 /// <summary>
 /// Roblox menu preferences and engine overrides used by the launcher. Nullable
-/// values are used for per-game settings so a game can inherit the global value.
+/// values are used for game and profile overrides so each scope can inherit
+/// lower-priority values.
 /// </summary>
 public sealed class GameSettings
 {
@@ -11,6 +12,7 @@ public sealed class GameSettings
     public int? GraphicsQuality { get; set; }
     public int? TextureQuality { get; set; }
     public int? FpsLimit { get; set; }
+    public int? MasterVolumeLevel { get; set; }
     public string? AdvancedFlagsJson { get; set; }
 
     [System.Text.Json.Serialization.JsonIgnore]
@@ -20,6 +22,7 @@ public sealed class GameSettings
         GraphicsQuality.HasValue ||
         TextureQuality.HasValue ||
         FpsLimit.HasValue ||
+        MasterVolumeLevel.HasValue ||
         HasAdvancedOverrides();
 
     public GameSettings Clone() => new()
@@ -29,15 +32,73 @@ public sealed class GameSettings
         GraphicsQuality = GraphicsQuality,
         TextureQuality = TextureQuality,
         FpsLimit = FpsLimit,
+        MasterVolumeLevel = MasterVolumeLevel,
         AdvancedFlagsJson = AdvancedFlagsJson
     };
 
     public static GameSettings Merge(GameSettings global, GameSettings? overrideSettings)
+        => Resolve(global, overrideSettings, null);
+
+    public static bool TryResolve(
+        GameSettings global,
+        GameSettings? gameOverride,
+        GameSettings? profileOverride,
+        out GameSettings resolved,
+        out string error)
+    {
+        foreach (var (scope, settings) in new[]
+                 {
+                     ("Global", global),
+                     ("Game", gameOverride),
+                     ("Profile", profileOverride)
+                 })
+        {
+            if (settings is not null && !Services.RobloxClientSettingsService.TryValidateSettings(settings, out var scopeError))
+            {
+                resolved = new GameSettings();
+                error = $"{scope} settings are invalid: {scopeError}";
+                return false;
+            }
+        }
+
+        resolved = ResolveUnchecked(global, gameOverride, profileOverride);
+        error = string.Empty;
+        return true;
+    }
+
+    public static GameSettings Resolve(
+        GameSettings global,
+        GameSettings? gameOverride,
+        GameSettings? profileOverride)
+    {
+        if (!TryResolve(global, gameOverride, profileOverride, out var resolved, out var error))
+        {
+            throw new ArgumentException(error, nameof(global));
+        }
+
+        return resolved;
+    }
+
+    private static GameSettings ResolveUnchecked(
+        GameSettings global,
+        GameSettings? gameOverride,
+        GameSettings? profileOverride)
     {
         var merged = global.Clone();
+        ApplyOverride(merged, gameOverride);
+        ApplyOverride(merged, profileOverride);
+        merged.AdvancedFlagsJson = MergeAdvancedJson(
+            global.AdvancedFlagsJson,
+            gameOverride?.AdvancedFlagsJson,
+            profileOverride?.AdvancedFlagsJson);
+        return merged;
+    }
+
+    private static void ApplyOverride(GameSettings merged, GameSettings? overrideSettings)
+    {
         if (overrideSettings is null)
         {
-            return merged;
+            return;
         }
 
         if (overrideSettings.MsaaSamples.HasValue)
@@ -65,28 +126,23 @@ public sealed class GameSettings
             merged.FpsLimit = overrideSettings.FpsLimit;
         }
 
-        if (!string.IsNullOrWhiteSpace(overrideSettings.AdvancedFlagsJson))
+        if (overrideSettings.MasterVolumeLevel.HasValue)
         {
-            merged.AdvancedFlagsJson = MergeAdvancedJson(global.AdvancedFlagsJson, overrideSettings.AdvancedFlagsJson);
+            merged.MasterVolumeLevel = overrideSettings.MasterVolumeLevel;
         }
-
-        return merged;
     }
 
-    private static string MergeAdvancedJson(string? globalJson, string? overrideJson)
+    private static string? MergeAdvancedJson(params string?[] jsonLayers)
     {
         var values = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.OrdinalIgnoreCase);
-        if (Services.RobloxClientSettingsService.TryParseAdvancedFlags(globalJson, out var globalFlags, out _))
+        foreach (var json in jsonLayers)
         {
-            foreach (var pair in globalFlags)
+            if (!Services.RobloxClientSettingsService.TryParseAdvancedFlags(json, out var flags, out _))
             {
-                values[pair.Key] = pair.Value;
+                continue;
             }
-        }
 
-        if (Services.RobloxClientSettingsService.TryParseAdvancedFlags(overrideJson, out var overrideFlags, out _))
-        {
-            foreach (var pair in overrideFlags)
+            foreach (var pair in flags)
             {
                 if (pair.Value.ValueKind == System.Text.Json.JsonValueKind.Null)
                 {
@@ -97,6 +153,11 @@ public sealed class GameSettings
                     values[pair.Key] = pair.Value;
                 }
             }
+        }
+
+        if (values.Count == 0)
+        {
+            return jsonLayers.Any(json => !string.IsNullOrWhiteSpace(json)) ? "{}" : null;
         }
 
         return System.Text.Json.JsonSerializer.Serialize(values, new System.Text.Json.JsonSerializerOptions

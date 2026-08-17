@@ -94,6 +94,20 @@ public partial class MainWindow : Window
             // file may contain explicit nulls. Keep those files usable with the
             // new optional fields and use a case-insensitive URL map.
             _settings.GameSettings ??= new GameSettings();
+            var menuRecoveryCompleted = await _robloxMenuSettingsService.RecoverPendingAsync(Log);
+            await _robloxClientSettingsService.RecoverPendingAsync(Log);
+            if (menuRecoveryCompleted && !_settings.MasterVolumeMigrationCompleted)
+            {
+                if (!_settings.GameSettings.MasterVolumeLevel.HasValue &&
+                    _robloxMenuSettingsService.TryReadMasterVolumeLevel(out var masterVolumeLevel))
+                {
+                    _settings.GameSettings.MasterVolumeLevel = masterVolumeLevel;
+                    Log($"Imported Roblox's current master volume as the global {masterVolumeLevel * 10}% default.");
+                }
+
+                _settings.MasterVolumeMigrationCompleted = true;
+                await _settingsStore.SaveAsync(_settings);
+            }
             var normalizedOverrides = new Dictionary<string, GameSettings>(StringComparer.OrdinalIgnoreCase);
             foreach (var pair in _settings.GameOverrides ?? [])
             {
@@ -106,7 +120,6 @@ public partial class MainWindow : Window
             }
 
             _settings.GameOverrides = normalizedOverrides;
-            await _robloxClientSettingsService.RecoverPendingAsync(Log);
             await ApplyPendingDataCleanupAsync();
             ApplySettingsToControls();
             if (_settings.UpdateChecksEnabled)
@@ -535,10 +548,21 @@ public partial class MainWindow : Window
 
     private async void Settings_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new SettingsDialog(_settings) { Owner = this };
+        var dialog = new SettingsDialog(_settings, _games, _accounts) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
+        }
+
+        _settings = dialog.Settings;
+        foreach (var stagedProfile in dialog.Profiles)
+        {
+            var account = _accounts.FirstOrDefault(candidate =>
+                string.Equals(candidate.Id, stagedProfile.Id, StringComparison.Ordinal));
+            if (account is not null)
+            {
+                account.GameSettings = stagedProfile.GameSettings?.Clone();
+            }
         }
 
         if (dialog.ClearToolsRequested)
@@ -558,10 +582,11 @@ public partial class MainWindow : Window
         }
 
         ApplySettingsToControls();
+        await _accountStore.SaveAsync(_accounts);
+        await SaveCustomGamePresetsAsync();
         await SaveRememberedStateAsync();
         await _robloxMenuSettingsService.ApplyAsync(
             _settings.GameSettings,
-            null,
             message => Log($"Game settings: {message}"));
         Log("Launcher settings saved.");
     }
@@ -762,6 +787,14 @@ public partial class MainWindow : Window
     {
         item.State = LaunchQueueState.Preparing;
         item.Detail = "Opening session";
+        var gameOverride = GetGameOverrideForLaunch(gameUrl);
+        var profileOverride = item.Account.GameSettings;
+        if (!GameSettings.TryResolve(_settings.GameSettings, gameOverride, profileOverride, out var resolvedSettings, out var settingsError))
+        {
+            Log($"Could not prepare {item.Label}: {settingsError}");
+            return (false, "Invalid settings");
+        }
+
         await OpenAccountAsync(item.Account);
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -771,8 +804,8 @@ public partial class MainWindow : Window
             return (false, "Session unavailable");
         }
 
-        var previousProcessCount = Process.GetProcessesByName("RobloxPlayerBeta").Length;
-        if (previousProcessCount > 0)
+        var previousProcessIds = GetRobloxProcessIds();
+        if (previousProcessIds.Count > 0)
         {
             item.Detail = "Releasing singleton";
             var result = await ReleaseSingletonAsync(item.Label, cancellationToken);
@@ -795,15 +828,12 @@ public partial class MainWindow : Window
 
         item.State = LaunchQueueState.Launching;
         item.Detail = "Requesting Roblox";
-        var gameOverride = GetGameOverrideForLaunch(gameUrl);
-        await _robloxMenuSettingsService.ApplyAsync(
-            _settings.GameSettings,
-            gameOverride,
+        await using var menuSettingsTransaction = await _robloxMenuSettingsService.ApplyForLaunchAsync(
+            resolvedSettings,
             message => Log($"Game settings: {message}"));
         var engineSettingsStartedUtc = DateTime.UtcNow;
         await using var engineSettingsTransaction = await _robloxClientSettingsService.ApplyAsync(
-            _settings.GameSettings,
-            gameOverride,
+            resolvedSettings,
             _settings.PreferredLauncher,
             message => Log($"Engine settings: {message}"));
         if (RobloxLauncherService.UsesBloxstrap(_settings.PreferredLauncher))
@@ -818,7 +848,8 @@ public partial class MainWindow : Window
         }
 
         item.Detail = "Waiting for process";
-        if (!await WaitForAdditionalRobloxProcessAsync(previousProcessCount, processTimeout, cancellationToken))
+        using var newRobloxProcess = await WaitForAdditionalRobloxProcessAsync(previousProcessIds, processTimeout, cancellationToken);
+        if (newRobloxProcess is null)
         {
             Log($"No new Roblox process appeared for {item.Label} within {processTimeout.TotalSeconds:0} seconds.");
             return (false, "Process timed out");
@@ -831,6 +862,13 @@ public partial class MainWindow : Window
                 TimeSpan.FromSeconds(6),
                 cancellationToken,
                 message => Log($"Engine settings: {message}"));
+        }
+        else if (menuSettingsTransaction.IsActive)
+        {
+            // The process can exist before it has consumed UserGameSettings.
+            // Wait for its window/readiness signal, with a bounded warm-up
+            // fallback for clients that do not expose a window immediately.
+            await WaitForRobloxStartupReadyAsync(newRobloxProcess, cancellationToken);
         }
 
         Log($"{item.Label} is running.");
@@ -878,7 +916,6 @@ public partial class MainWindow : Window
         RemoveGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         EditGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         DuplicateGamePresetButton.IsEnabled = GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
-        ConfigureGameSettingsButton.IsEnabled = GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
         if (!isCustom && GamePicker.SelectedItem is GamePreset selectedGame)
         {
             PresetHintText.Text = $"Ready to launch {selectedGame.Name}";
@@ -967,38 +1004,6 @@ public partial class MainWindow : Window
         await _settingsStore.SaveAsync(_settings);
         GamePicker.SelectedItem = updated;
         Log($"Updated game preset: {updated.Name}.");
-    }
-
-    private async void ConfigureGameSettings_Click(object sender, RoutedEventArgs e)
-    {
-        if (GamePicker.SelectedItem is not GamePreset { Url.Length: > 0 } preset)
-        {
-            return;
-        }
-
-        var key = NormalizeGameUrl(preset.Url);
-        _settings.GameOverrides.TryGetValue(key, out var existing);
-        var dialog = new GameSettingsDialog(preset.Name, existing) { Owner = this };
-        if (dialog.ShowDialog() != true)
-        {
-            return;
-        }
-
-        if (dialog.Settings is null)
-        {
-            _settings.GameOverrides.Remove(key);
-            preset.Settings = null;
-            Log($"Cleared game settings override for {preset.Name}.");
-        }
-        else
-        {
-            _settings.GameOverrides[key] = dialog.Settings.Clone();
-            preset.Settings = dialog.Settings.Clone();
-            Log($"Saved game settings override for {preset.Name}.");
-        }
-
-        await SaveCustomGamePresetsAsync();
-        await _settingsStore.SaveAsync(_settings);
     }
 
     private async void DuplicateGamePreset_Click(object sender, RoutedEventArgs e)
@@ -1175,7 +1180,7 @@ public partial class MainWindow : Window
 
     private Task SaveCustomGamePresetsAsync()
     {
-        foreach (var preset in _games.Where(game => !game.IsBuiltIn && game.Url.Length > 0))
+        foreach (var preset in _games.Where(game => game.Url.Length > 0))
         {
             preset.Settings = _settings.GameOverrides.TryGetValue(NormalizeGameUrl(preset.Url), out var settings)
                 ? settings.Clone()
@@ -1284,8 +1289,8 @@ public partial class MainWindow : Window
         }
     }
 
-    private static async Task<bool> WaitForAdditionalRobloxProcessAsync(
-        int previousCount,
+    private static async Task<Process?> WaitForAdditionalRobloxProcessAsync(
+        IReadOnlySet<int> previousProcessIds,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
@@ -1293,13 +1298,74 @@ public partial class MainWindow : Window
         while (DateTime.UtcNow < deadline)
         {
             await Task.Delay(500, cancellationToken);
-            if (Process.GetProcessesByName("RobloxPlayerBeta").Length > previousCount)
+            var processes = Process.GetProcessesByName("RobloxPlayerBeta");
+            var newProcess = processes.FirstOrDefault(process => !previousProcessIds.Contains(process.Id));
+            if (newProcess is not null)
             {
-                return true;
+                foreach (var process in processes.Where(process => process.Id != newProcess.Id))
+                {
+                    process.Dispose();
+                }
+
+                return newProcess;
+            }
+
+            foreach (var process in processes)
+            {
+                process.Dispose();
             }
         }
 
-        return false;
+        return null;
+    }
+
+    private static HashSet<int> GetRobloxProcessIds()
+    {
+        var processIds = new HashSet<int>();
+        foreach (var process in Process.GetProcessesByName("RobloxPlayerBeta"))
+        {
+            try
+            {
+                processIds.Add(process.Id);
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
+        return processIds;
+    }
+
+    private static async Task WaitForRobloxStartupReadyAsync(Process process, CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(6);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                process.Refresh();
+                if (process.HasExited)
+                {
+                    return;
+                }
+
+                if (process.MainWindowHandle != IntPtr.Zero)
+                {
+                    await Task.Delay(750, cancellationToken);
+                    return;
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                return;
+            }
+
+            await Task.Delay(250, cancellationToken);
+        }
+
+        await Task.Delay(1500, cancellationToken);
     }
 
     private void Browser_LaunchingExternalUriScheme(object? sender, CoreWebView2LaunchingExternalUriSchemeEventArgs args)
@@ -1362,7 +1428,6 @@ public partial class MainWindow : Window
         RemoveGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         EditGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { IsBuiltIn: false };
         DuplicateGamePresetButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
-        ConfigureGameSettingsButton.IsEnabled = enabled && GamePicker.SelectedItem is GamePreset { Url.Length: > 0 };
         PresetSearchBox.IsEnabled = enabled;
         AddAccountButton.IsEnabled = enabled;
         RemoveAccountButton.IsEnabled = enabled;

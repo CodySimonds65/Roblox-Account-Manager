@@ -2,7 +2,6 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Roblox Account Manager" Height="860" Width="1380" MinHeight="700" MinWidth="1080"
-        Icon="Assets/RobloxAccountManager.ico"
         Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
         WindowStartupLocation="CenterScreen">
     <Grid Margin="18">
@@ -198,7 +197,6 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <ComboBox x:Name="GamePicker" SelectionChanged="GamePicker_SelectionChanged" />
                             <Button x:Name="AddGamePresetButton" Grid.Column="1" Content="＋" ToolTip="Add game preset"
@@ -213,13 +211,10 @@
                             <Button x:Name="DuplicateGamePresetButton" Grid.Column="4" Content="⧉" ToolTip="Duplicate selected preset"
                                     Click="DuplicateGamePreset_Click" Style="{StaticResource CompactButton}"
                                     Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
-                            <Button x:Name="ConfigureGameSettingsButton" Grid.Column="5" Content="⚙" ToolTip="Configure game settings"
-                                    Click="ConfigureGameSettings_Click" Style="{StaticResource CompactButton}"
-                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" IsEnabled="False" />
-                            <Button Grid.Column="6" Content="⇩" ToolTip="Import presets"
+                            <Button Grid.Column="5" Content="⇩" ToolTip="Import presets"
                                     Click="ImportGamePresets_Click" Style="{StaticResource CompactButton}"
                                     Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
-                            <Button Grid.Column="7" Content="⇧" ToolTip="Export presets"
+                            <Button Grid.Column="6" Content="⇧" ToolTip="Export presets"
                                     Click="ExportGamePresets_Click" Style="{StaticResource CompactButton}"
                                     Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
                         </Grid>
