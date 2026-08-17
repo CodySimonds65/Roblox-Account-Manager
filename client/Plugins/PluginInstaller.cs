@@ -42,7 +42,16 @@ public sealed class PluginInstaller
         }
 
         var normalized = baseUri.AbsoluteUri.EndsWith('/') ? baseUri.AbsoluteUri : baseUri.AbsoluteUri + "/";
-        var manifestJson = await DownloadStringAsync(new Uri(normalized + "plugin.json"), cancellationToken);
+        string manifestJson;
+        try
+        {
+            manifestJson = await DownloadStringAsync(new Uri(normalized + "plugin.json"), cancellationToken);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            throw new InvalidOperationException(
+                $"No plugin release assets were found at '{normalized}'. Publish plugin.json, plugin.zip, plugin.sha256, and plugin.sig before installing.", ex);
+        }
         var manifest = PluginManifestReader.Parse(manifestJson);
         if (expectedPluginId is not null && !string.Equals(manifest.Id, expectedPluginId, StringComparison.Ordinal) ||
             expectedPublisher is not null && !string.Equals(manifest.Publisher, expectedPublisher, StringComparison.Ordinal))
