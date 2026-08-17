@@ -1,5 +1,8 @@
 using System.IO.Compression;
+using System.ComponentModel;
+using Microsoft.Win32.SafeHandles;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -14,7 +17,10 @@ public sealed class PluginInstaller
     // does not disable zip-bomb protection.
     internal const long MaxArchiveEntryBytes = 256L * 1024 * 1024;
     internal const long MaxArchiveExtractedBytes = 500L * 1024 * 1024;
-    private const FileOptions OpenReparsePoint = (FileOptions)0x00200000;
+    private const uint GenericWrite = 0x40000000;
+    private const uint CreateNew = 1;
+    private const uint FileAttributeNormal = 0x00000080;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
 
     private readonly PluginPaths _paths;
     private readonly PluginConsentStore _consent;
@@ -102,11 +108,14 @@ public sealed class PluginInstaller
         }
 
         var installDirectory = _paths.GetInstallDirectory(manifest.Id);
+        EnsureNoReparsePointsInPath(_paths.InstallRoot);
+        EnsureNoReparsePointsInPath(installDirectory);
         await _stopPluginAsync(manifest.Id);
         var stagingDirectory = installDirectory + ".staging-" + Guid.NewGuid().ToString("N");
         Directory.CreateDirectory(stagingDirectory);
         try
         {
+            EnsureNoReparsePointsInPath(stagingDirectory);
             ExtractSafely(packageBytes, stagingDirectory);
             var embeddedManifestPath = Path.Combine(stagingDirectory, "plugin.json");
             if (!File.Exists(embeddedManifestPath))
@@ -209,7 +218,7 @@ public sealed class PluginInstaller
         return hash?.ToLowerInvariant() ?? throw new InvalidDataException("plugin.sha256 is invalid.");
     }
 
-    private static void ExtractSafely(byte[] bytes, string root)
+    internal static void ExtractSafely(byte[] bytes, string root)
     {
         using var archive = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read, leaveOpen: false);
         var fullRoot = Path.GetFullPath(root);
@@ -234,14 +243,7 @@ public sealed class PluginInstaller
             EnsureNoReparsePoints(fullRoot, parent);
             EnsureNoReparsePoints(fullRoot, destination);
             using var input = entry.Open();
-            using var output = new FileStream(destination, new FileStreamOptions
-            {
-                Mode = FileMode.CreateNew,
-                Access = FileAccess.Write,
-                Share = FileShare.None,
-                BufferSize = 64 * 1024,
-                Options = FileOptions.SequentialScan | OpenReparsePoint
-            });
+            using var output = CreateNoFollowFile(destination);
             input.CopyTo(output);
             EnsureNoReparsePoints(fullRoot, destination);
         }
@@ -308,6 +310,21 @@ public sealed class PluginInstaller
         }
     }
 
+    private static void EnsureNoReparsePointsInPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var filesystemRoot = Path.GetPathRoot(fullPath)
+            ?? throw new InvalidDataException("Plugin staging path has no filesystem root.");
+        CheckReparsePoint(filesystemRoot);
+        var relative = Path.GetRelativePath(filesystemRoot, fullPath);
+        var current = filesystemRoot;
+        foreach (var segment in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            CheckReparsePoint(current);
+        }
+    }
+
     private static void CheckReparsePoint(string path)
     {
         try
@@ -324,6 +341,44 @@ public sealed class PluginInstaller
             // A not-yet-created directory is checked again after creation.
         }
     }
+
+    private static FileStream CreateNoFollowFile(string path)
+    {
+        var handle = CreateFile(
+            path,
+            GenericWrite,
+            0,
+            IntPtr.Zero,
+            CreateNew,
+            FileAttributeNormal | FileFlagOpenReparsePoint,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new IOException($"Could not create plugin file without following reparse points: {new Win32Exception(error).Message}", error);
+        }
+
+        try
+        {
+            return new FileStream(handle, FileAccess.Write, 64 * 1024, isAsync: false);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "CreateFileW", SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
 
     private async Task<string> DownloadStringAsync(Uri uri, CancellationToken cancellationToken)
     {
