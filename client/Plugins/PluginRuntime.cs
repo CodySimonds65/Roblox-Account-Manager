@@ -259,7 +259,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         // This value is the release trust anchor. Rotate it only as part of a
         // signed launcher release; user/environment configuration is intentionally
         // not consulted for official package verification.
-        const string pinnedPublicKey = "nHHGpVihLHHzE/R2MgWKb8YO291k+M7VMxKsLSVghGE=";
+        const string pinnedPublicKey = "kHdvM/oqWovIr54z9a8xLitNemH9J+zIMwUalm0cTmw=";
         return new PinnedEd25519PackageSignatureVerifier(Convert.FromBase64String(pinnedPublicKey));
     }
 

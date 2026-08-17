@@ -17,3 +17,7 @@ Official catalog URLs require a pinned Ed25519 signature and an embedded manifes
 The host, SDK, installer, broker, action bridge, lifecycle supervision, and the three standalone plugin cores are implemented and covered by local build, test, and static gates. The official catalog points at future signed release assets; those assets are not published until the pinned signing key is provisioned and the live Roblox acceptance run passes. RAM OCR currently exposes the capture/matching boundary and trigger engine; the Windows Graphics Capture and Windows OCR runtime adapter remains a release task rather than an assumption.
 
 The remaining non-blocking polish is restoring minimized/maximized state on RESET and distributing GRID across multiple work areas. Neither item may introduce activation or a foreground-input fallback.
+
+## Release publishing
+
+Launcher releases are published after a merged PR whose title starts with `release:` or whose labels include `release` (the existing `fix`, `feat`, `chore`, `minor`, and `major` conventions remain supported). Each RAM plugin repository has an independent tag/manual-dispatch workflow that builds `plugin.json`, `plugin.zip`, `plugin.sha256`, and `plugin.sig`; it fails closed unless the Ed25519 private/public signing secrets are configured and the public key matches the launcher trust anchor.
