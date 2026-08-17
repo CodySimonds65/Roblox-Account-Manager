@@ -24,6 +24,8 @@ Profiles support groups, favorites, drag ordering, and multi-select launch queue
 
 The Windows x64 EXE includes .NET. Microsoft WebView2 Runtime is required. Updates are downloaded from GitHub, checksum-verified, and installed after you approve a restart.
 
+Windows requests administrator approval once when the client starts. The approved security context is reused to release Roblox's single-instance handles, so launching additional accounts does not produce more UAC prompts.
+
 ## Privacy
 
 - Credentials and `.ROBLOSECURITY` tokens are never collected or sent to the developer.
@@ -50,8 +52,10 @@ The **Game settings** tab stores global defaults and optional per-game overrides
 ## Notes
 
 - The first multi-launch downloads Sysinternals Handle to `%LOCALAPPDATA%\RobloxAltClient\Tools`.
-- Multi-launch requests administrator approval once, then reuses the hidden unlock helper until that launch queue finishes.
-- The original PowerShell launcher remains available through `launch.cmd`.
+- Multi-launch reuses the client's existing elevated security context for the queue.
+- The C# client is the sole supported launcher; account launching does not invoke PowerShell.
 - The Activity log can be selected or copied with **Copy all**.
 
 Roblox updates may change or disable multi-instance behavior. Use the project only where permitted by Roblox and the applicable game rules.
+
+Roblox processes launched by the elevated client may also run elevated. Launching the game unelevated would require a separate privilege-boundary design and is not attempted here.

@@ -18,14 +18,13 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
     <DebugType>embedded</DebugType>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <AllowedReferenceRelatedFileExtensions></AllowedReferenceRelatedFileExtensions>
   </PropertyGroup>
 
   <ItemGroup>
     <Resource Include="Assets\RobloxAccountManager.ico" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
-    <EmbeddedResource Include="Unlock-Roblox.ps1"
-                      LogicalName="RobloxAltClient.Resources.Unlock-Roblox.ps1" />
   </ItemGroup>
 
   <Target Name="RemoveWebViewDocumentationFromPublish" AfterTargets="Publish">
