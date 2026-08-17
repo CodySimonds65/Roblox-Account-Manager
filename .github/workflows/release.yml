@@ -32,11 +32,14 @@ jobs:
         shell: pwsh
         run: |
           $signals = "$env:PR_TITLE $env:PR_LABELS"
+          $hasReleaseLabel = $env:PR_LABELS -match '(?i)"release"'
           $bump = if ($signals -match '(?i)\b(BREAKING|major)\b') {
               'major'
           } elseif ($signals -match '(?i)\b(feat|feature|minor)\b') {
               'minor'
           } elseif ($signals -match '(?i)\b(fix|chore)\b') {
+              'patch'
+          } elseif ($hasReleaseLabel -or $env:PR_TITLE -match '(?i)^\s*release(?:[: ]|$)') {
               'patch'
           } else {
               ''
@@ -44,7 +47,7 @@ jobs:
 
           if (-not $bump) {
               'release=false' >> $env:GITHUB_OUTPUT
-              'No release keyword or label was found.' >> $env:GITHUB_STEP_SUMMARY
+              'No release keyword, release-prefixed title, or `release` label was found; no version was published.' >> $env:GITHUB_STEP_SUMMARY
               exit 0
           }
 
