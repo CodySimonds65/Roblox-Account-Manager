@@ -18,8 +18,14 @@ public sealed class PluginInstaller
     internal const long MaxArchiveEntryBytes = 256L * 1024 * 1024;
     internal const long MaxArchiveExtractedBytes = 500L * 1024 * 1024;
     private const uint GenericWrite = 0x40000000;
+    private const uint GenericRead = 0x80000000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
     private const uint CreateNew = 1;
+    private const uint OpenExisting = 3;
+    private const uint FileAttributeDirectory = 0x00000010;
     private const uint FileAttributeNormal = 0x00000080;
+    private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint FileFlagOpenReparsePoint = 0x00200000;
 
     private readonly PluginPaths _paths;
@@ -108,6 +114,7 @@ public sealed class PluginInstaller
         }
 
         var installDirectory = _paths.GetInstallDirectory(manifest.Id);
+        using var installRootLock = OpenDirectoryChain(_paths.InstallRoot);
         EnsureNoReparsePointsInPath(_paths.InstallRoot);
         EnsureNoReparsePointsInPath(installDirectory);
         await _stopPluginAsync(manifest.Id);
@@ -222,6 +229,7 @@ public sealed class PluginInstaller
     {
         using var archive = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read, leaveOpen: false);
         var fullRoot = Path.GetFullPath(root);
+        using var rootLock = OpenDirectoryChain(fullRoot);
         EnsureNoReparsePoints(fullRoot, fullRoot);
         ValidateArchiveEntries(archive, fullRoot);
         foreach (var entry in archive.Entries)
@@ -234,12 +242,14 @@ public sealed class PluginInstaller
             if (string.IsNullOrEmpty(entry.Name))
             {
                 Directory.CreateDirectory(destination);
+                using var directoryLock = OpenDirectoryChain(destination);
                 EnsureNoReparsePoints(fullRoot, destination);
                 continue;
             }
 
             var parent = Path.GetDirectoryName(destination)!;
             Directory.CreateDirectory(parent);
+            using var parentLock = OpenDirectoryChain(parent);
             EnsureNoReparsePoints(fullRoot, parent);
             EnsureNoReparsePoints(fullRoot, destination);
             using var input = entry.Open();
@@ -367,6 +377,75 @@ public sealed class PluginInstaller
         {
             handle.Dispose();
             throw;
+        }
+    }
+
+    private static DirectoryHandleChain OpenDirectoryChain(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var filesystemRoot = Path.GetPathRoot(fullPath)
+            ?? throw new InvalidDataException("Plugin staging path has no filesystem root.");
+        var handles = new List<SafeFileHandle>();
+        try
+        {
+            handles.Add(OpenDirectoryNoFollow(filesystemRoot));
+            var relative = Path.GetRelativePath(filesystemRoot, fullPath);
+            var current = filesystemRoot;
+            foreach (var segment in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+            {
+                current = Path.Combine(current, segment);
+                if (!Directory.Exists(current)) break;
+                handles.Add(OpenDirectoryNoFollow(current));
+            }
+            return new DirectoryHandleChain(handles);
+        }
+        catch
+        {
+            foreach (var handle in handles) handle.Dispose();
+            throw;
+        }
+    }
+
+    private static SafeFileHandle OpenDirectoryNoFollow(string path)
+    {
+        CheckReparsePoint(path);
+        var handle = CreateFile(
+            path,
+            GenericRead,
+            FileShareRead | FileShareWrite,
+            IntPtr.Zero,
+            OpenExisting,
+            FileAttributeDirectory | FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new IOException($"Could not lock plugin staging directory: {new Win32Exception(error).Message}", error);
+        }
+
+        try
+        {
+            CheckReparsePoint(path);
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    private sealed class DirectoryHandleChain : IDisposable
+    {
+        private readonly List<SafeFileHandle> _handles;
+
+        public DirectoryHandleChain(List<SafeFileHandle> handles) => _handles = handles;
+
+        public void Dispose()
+        {
+            for (var index = _handles.Count - 1; index >= 0; index--)
+                _handles[index].Dispose();
         }
     }
 

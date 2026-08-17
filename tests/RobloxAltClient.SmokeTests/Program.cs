@@ -617,9 +617,28 @@ try
         PluginInstaller.ValidateArchiveEntries(archive, Path.Combine(testDirectory, "staging"));
     }
     var extractedPluginDirectory = Path.Combine(testDirectory, "extracted-plugin");
-    PluginInstaller.ExtractSafely(await File.ReadAllBytesAsync(largePluginArchivePath), extractedPluginDirectory);
+    var largePluginArchiveBytes = await File.ReadAllBytesAsync(largePluginArchivePath);
+    PluginInstaller.ExtractSafely(largePluginArchiveBytes, extractedPluginDirectory);
     Require(new FileInfo(Path.Combine(extractedPluginDirectory, "ram-macros.exe")).Length == 154L * 1024 * 1024,
         "A valid self-contained-sized plugin entry was not extracted intact.");
+    var outsideDirectory = Path.Combine(testDirectory, "outside");
+    var reparseRoot = Path.Combine(testDirectory, "reparse-root");
+    Directory.CreateDirectory(outsideDirectory);
+    try
+    {
+        Directory.CreateSymbolicLink(reparseRoot, outsideDirectory);
+        RequireInvalidData(
+            () => PluginInstaller.ExtractSafely(largePluginArchiveBytes, reparseRoot),
+            "A reparse-point staging root was accepted.");
+    }
+    catch (UnauthorizedAccessException)
+    {
+        Console.WriteLine("Reparse-point smoke test skipped: symbolic-link creation is not permitted.");
+    }
+    catch (IOException)
+    {
+        Console.WriteLine("Reparse-point smoke test skipped: symbolic-link creation is unavailable.");
+    }
     Require(PluginInstaller.MaxArchiveEntryBytes >= 154L * 1024 * 1024,
         "The archive entry limit is smaller than the published self-contained plugin.");
     RequireInvalidData(
