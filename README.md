@@ -53,7 +53,7 @@ The top-right **Settings** window manages launcher options and Roblox engine/gam
 - **Game** overrides
 - **Per profile** overrides
 
-Profile settings override game settings, and game settings override global settings. Available controls include graphics quality, FPS, volume, MSAA, texture quality, scaling, and advanced flags.
+Profile settings override game settings, and game settings override global settings. Selecting **Default** uses the next available lower-level value. Available controls include graphics quality, FPS, volume, MSAA, texture quality, scaling, and advanced flags.
 
 ## Notes
 
