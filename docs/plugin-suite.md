@@ -11,3 +11,9 @@ The automated gate is `build/verify-focus-safety.ps1`. A live acceptance run sti
 ## Installation trust
 
 Official catalog URLs require a pinned Ed25519 signature and an embedded manifest identity match. HTTPS sideloads require an explicit warning confirmation and per-capability consent. Packages are streamed with hard limits, checked for SHA-256, safe paths, symlinks, and manifest/package consistency, staged atomically, and retain one rollback version.
+
+## Release gate status
+
+The host, SDK, installer, broker, action bridge, lifecycle supervision, and the three standalone plugin cores are implemented and covered by local build, test, and static gates. The official catalog points at future signed release assets; those assets are not published until the pinned signing key is provisioned and the live Roblox acceptance run passes. RAM OCR currently exposes the capture/matching boundary and trigger engine; the Windows Graphics Capture and Windows OCR runtime adapter remains a release task rather than an assumption.
+
+The remaining non-blocking polish is restoring minimized/maximized state on RESET and distributing GRID across multiple work areas. Neither item may introduce activation or a foreground-input fallback.
