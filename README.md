@@ -2,18 +2,9 @@
 
 An open-source Windows launcher for running multiple Roblox accounts with separate local login sessions.
 
-```mermaid
-flowchart LR
-    A["Select one or more profiles"] --> B["Sign in on Roblox"]
-    B --> C["Choose a game"]
-    C --> D["Release singleton handles"]
-    D --> E["Activate Roblox Play"]
-    E --> F["Additional Roblox client"]
-```
-
 ## Download and use
 
-[Download the latest `RobloxAccountManager.exe`](https://github.com/CodySimonds65/roblox-account-manager/releases/latest/download/RobloxAccountManager.exe)
+[Download the latest `RobloxAccountManager.exe`](https://github.com/CodySimonds65/Roblox-Account-Manager/releases/latest/download/RobloxAccountManager.exe)
 
 1. Add a profile and sign in on Roblox.
 2. Select one or more profiles.
@@ -22,9 +13,9 @@ flowchart LR
 
 Profiles support groups, favorites, drag ordering, and multi-select launch queues. Game presets can be searched, edited, duplicated, imported, or exported; private-server links are supported.
 
-The Windows x64 EXE includes .NET. Microsoft WebView2 Runtime is required. Updates are downloaded from GitHub, checksum-verified, and installed after you approve a restart.
+The Windows x64 EXE includes .NET; Microsoft WebView2 Runtime is required. Updates are checksum-verified and installed after restart approval.
 
-Windows requests administrator approval once when the client starts. The approved security context is reused to release Roblox's single-instance handles, so launching additional accounts does not produce more UAC prompts.
+The client requests administrator approval once at startup; additional account launches do not trigger more UAC prompts.
 
 ## Privacy
 
@@ -43,8 +34,6 @@ build-client.cmd
 
 Output: `release\RobloxAccountManager.exe`. The source is under `client\` and licensed under MIT.
 
-Release signing is optional. Configure a base64-encoded PFX as `WINDOWS_SIGNING_CERTIFICATE_BASE64` and its password as `WINDOWS_SIGNING_CERTIFICATE_PASSWORD` in GitHub repository secrets. Releases are signed before checksums are generated.
-
 ## Settings
 
 The top-right **Settings** window manages launcher options and Roblox engine/game settings across three scopes:
@@ -55,13 +44,4 @@ The top-right **Settings** window manages launcher options and Roblox engine/gam
 
 Profile settings override game settings, and game settings override global settings. Selecting **Default** uses the next available lower-level value. Available controls include graphics quality, FPS, volume, MSAA, texture quality, scaling, and advanced flags.
 
-## Notes
-
-- The first multi-launch downloads Sysinternals Handle to `%LOCALAPPDATA%\RobloxAltClient\Tools`.
-- Multi-launch reuses the client's existing elevated security context for the queue.
-- The C# client is the sole supported launcher; account launching does not invoke PowerShell.
-- The Activity log can be selected or copied with **Copy all**.
-
 Roblox updates may change or disable multi-instance behavior. Use the project only where permitted by Roblox and the applicable game rules.
-
-Roblox processes launched by the elevated client may also run elevated. Launching the game unelevated would require a separate privilege-boundary design and is not attempted here.
