@@ -1,0 +1,16 @@
+name: publish-plugin-sdk
+on:
+  push:
+    tags: [ 'sdk-v*' ]
+jobs:
+  pack-and-publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+      - name: Pack SDK
+        run: dotnet pack sdk/RobloxAccountManager.PluginSdk/RobloxAccountManager.PluginSdk.csproj -c Release -o artifacts
+      - name: Publish to NuGet
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
