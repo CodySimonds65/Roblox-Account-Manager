@@ -270,7 +270,9 @@ public sealed class PluginHostService : IAsyncDisposable
             }
             else if (input.Kind is PluginInputKind.MouseButtonDown or PluginInputKind.MouseButtonUp)
             {
-                if (input.Button is < 1 or > 5)
+                // RAM's stable wire encoding is 0=left, 1=right, 2=middle;
+                // this matches FocusSafeInputBroker's WM_* mapping.
+                if (input.Button is < 0 or > 2)
                     throw new InvalidDataException("input.post mouse button is invalid.");
             }
             else if (input.Kind == PluginInputKind.MouseWheel && Math.Abs(input.WheelDelta) > 120_000)

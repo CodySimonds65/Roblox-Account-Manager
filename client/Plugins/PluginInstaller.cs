@@ -141,6 +141,15 @@ public sealed class PluginInstaller
         var installDirectory = _paths.GetInstallDirectory(pluginId);
         var backupDirectory = installDirectory + ".previous";
         if (!Directory.Exists(backupDirectory)) return false;
+        var backupManifestPath = Path.Combine(backupDirectory, "plugin.json");
+        if (!File.Exists(backupManifestPath)) throw new InvalidDataException("The rollback package has no manifest.");
+        var backupManifest = PluginManifestReader.Parse(await File.ReadAllTextAsync(backupManifestPath, cancellationToken));
+        if (!string.Equals(backupManifest.Id, pluginId, StringComparison.Ordinal))
+            throw new InvalidDataException("The rollback package identity does not match the requested plugin.");
+        var backupEntrypoint = Path.GetFullPath(Path.Combine(backupDirectory, backupManifest.EntryPoint));
+        var backupRoot = Path.GetFullPath(backupDirectory) + Path.DirectorySeparatorChar;
+        if (!backupEntrypoint.StartsWith(backupRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(backupEntrypoint))
+            throw new InvalidDataException("The rollback package entrypoint is invalid or missing.");
         await _stopPluginAsync(pluginId).ConfigureAwait(false);
         var failedDirectory = installDirectory + ".failed-" + Guid.NewGuid().ToString("N");
         try

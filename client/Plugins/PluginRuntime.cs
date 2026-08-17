@@ -185,11 +185,13 @@ public sealed class PluginRuntime : IAsyncDisposable
     public async Task<bool> RollbackAsync(string pluginId, CancellationToken cancellationToken = default)
     {
         await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        bool result;
-        try { result = await _installer.RollbackAsync(pluginId, cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            var result = await _installer.RollbackAsync(pluginId, cancellationToken).ConfigureAwait(false);
+            if (result) { RefreshInstalled(); Changed?.Invoke(this, EventArgs.Empty); }
+            return result;
+        }
         finally { _lifecycleGate.Release(); }
-        if (result) { RefreshInstalled(); Changed?.Invoke(this, EventArgs.Empty); }
-        return result;
     }
 
     public async Task RemoveAsync(string pluginId)
@@ -263,7 +265,9 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await _supervisor.StopAllAsync().ConfigureAwait(false);
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try { await _supervisor.StopAllAsync().ConfigureAwait(false); }
+        finally { _lifecycleGate.Release(); }
         _supervisor.Exited -= Supervisor_Exited;
         _supervisor.Dispose();
         await _actions.DisposeAsync().ConfigureAwait(false);
