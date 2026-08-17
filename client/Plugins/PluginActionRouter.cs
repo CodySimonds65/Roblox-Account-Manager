@@ -12,7 +12,7 @@ public sealed class PluginActionRouter : IAsyncDisposable
 {
     private readonly PluginHostService _host;
     private readonly ConcurrentDictionary<string, RegisteredAction> _actions = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<ActionResult>> _pending = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PendingAction> _pending = new(StringComparer.Ordinal);
 
     public PluginActionRouter(PluginHostService host)
     {
@@ -29,7 +29,8 @@ public sealed class PluginActionRouter : IAsyncDisposable
             return ActionInvocationResult.Fail("missing-action", $"Action '{invocation.ActionId}' is not registered.");
         var requestId = string.IsNullOrWhiteSpace(invocation.RequestId) ? Guid.NewGuid().ToString("N") : invocation.RequestId;
         var waiter = new TaskCompletionSource<ActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_pending.TryAdd(requestId, waiter)) return ActionInvocationResult.Fail("duplicate-request", "The action request id is already in use.");
+        var pending = new PendingAction(action.Connection, waiter);
+        if (!_pending.TryAdd(requestId, pending)) return ActionInvocationResult.Fail("duplicate-request", "The action request id is already in use.");
         try
         {
             await action.Connection.SendAsync("action.invoke", invocation with { RequestId = requestId }, requestId, cancellationToken).ConfigureAwait(false);
@@ -67,7 +68,9 @@ public sealed class PluginActionRouter : IAsyncDisposable
             else if (message.Envelope.Type == "action.result")
             {
                 var result = message.Envelope.Payload.Deserialize<ActionResult>(PluginJson.Options);
-                if (result is not null && _pending.TryGetValue(message.Envelope.RequestId, out var waiter)) waiter.TrySetResult(result);
+                if (result is not null && _pending.TryGetValue(message.Envelope.RequestId, out var pending) &&
+                    ReferenceEquals(pending.Provider, message.Connection))
+                    pending.Waiter.TrySetResult(result);
             }
             else if (message.Envelope.Type == "action.invoke")
             {
@@ -86,7 +89,11 @@ public sealed class PluginActionRouter : IAsyncDisposable
     private void Host_Disconnected(object? sender, PluginConnection connection)
     {
         foreach (var item in _actions.Where(pair => ReferenceEquals(pair.Value.Connection, connection)).ToArray()) _actions.TryRemove(item.Key, out _);
-        foreach (var waiter in _pending.Values) waiter.TrySetResult(ActionResult.Fail("disconnected", "The action provider disconnected."));
+        foreach (var item in _pending.Where(pair => ReferenceEquals(pair.Value.Provider, connection)).ToArray())
+        {
+            if (_pending.TryRemove(item.Key, out var pending))
+                pending.Waiter.TrySetResult(ActionResult.Fail("disconnected", "The action provider disconnected."));
+        }
     }
 
     public ValueTask DisposeAsync()
@@ -94,10 +101,11 @@ public sealed class PluginActionRouter : IAsyncDisposable
         _host.MessageReceived -= Host_MessageReceived;
         _host.Disconnected -= Host_Disconnected;
         _actions.Clear();
-        foreach (var waiter in _pending.Values) waiter.TrySetCanceled();
+        foreach (var pending in _pending.Values) pending.Waiter.TrySetCanceled();
         _pending.Clear();
         return ValueTask.CompletedTask;
     }
 
     private sealed record RegisteredAction(ActionDescriptor Descriptor, PluginConnection Connection);
+    private sealed record PendingAction(PluginConnection Provider, TaskCompletionSource<ActionResult> Waiter);
 }

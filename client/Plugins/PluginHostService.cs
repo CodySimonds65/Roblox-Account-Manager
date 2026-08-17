@@ -17,6 +17,7 @@ public sealed class PluginHostService : IAsyncDisposable
     private readonly SemaphoreSlim _unauthenticatedLimit = new(8, 8);
     private readonly ConcurrentDictionary<Guid, Task> _connectionTasks = new();
     private readonly Task _acceptLoop;
+    private readonly Task _heartbeatLoop;
 
     public string SessionId { get; } = Guid.NewGuid().ToString("N");
     public string PipeName => PluginProtocol.PipePrefix + SessionId;
@@ -29,6 +30,7 @@ public sealed class PluginHostService : IAsyncDisposable
     public PluginHostService()
     {
         _acceptLoop = Task.Run(AcceptLoopAsync);
+        _heartbeatLoop = Task.Run(HeartbeatLoopAsync);
     }
 
     public string CreateLaunchToken(string pluginId, string manifestHash, IReadOnlyCollection<string> capabilities)
@@ -118,6 +120,7 @@ public sealed class PluginHostService : IAsyncDisposable
             if (!_expected.TryGetValue(handshake.Token, out var expected) ||
                 !string.Equals(expected.PluginId, handshake.PluginId, StringComparison.Ordinal) ||
                 handshake.ProtocolMajor != PluginProtocol.CurrentMajor ||
+                handshake.ProtocolMinor > PluginProtocol.CurrentMinor ||
                 !CryptographicOperations.FixedTimeEquals(
                     Encoding.UTF8.GetBytes(expected.ManifestHash),
                     Encoding.UTF8.GetBytes(handshake.ManifestSha256)) ||
@@ -149,10 +152,20 @@ public sealed class PluginHostService : IAsyncDisposable
             {
                 var envelope = await PluginWire.ReadAsync(pipe, _shutdown.Token).ConfigureAwait(false);
                 if (envelope is null) break;
+                if (envelope.ProtocolMajor != PluginProtocol.CurrentMajor || envelope.ProtocolMinor > PluginProtocol.CurrentMinor)
+                {
+                    await connection.SendAsync("host.reject", new { reason = "protocol-version-unsupported" }, envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
+                    break;
+                }
                 if (!connection.IsAuthorized(envelope.Type))
                 {
                     await connection.SendAsync("host.reject", new { reason = "capability-denied", messageType = envelope.Type },
                         envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
+                    continue;
+                }
+                if (string.Equals(envelope.Type, "plugin.heartbeat", StringComparison.Ordinal))
+                {
+                    connection.TouchHeartbeat();
                     continue;
                 }
                 if (string.Equals(envelope.Type, "input.post", StringComparison.Ordinal))
@@ -186,12 +199,32 @@ public sealed class PluginHostService : IAsyncDisposable
         }
     }
 
+    private async Task HeartbeatLoopAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+            while (await timer.WaitForNextTickAsync(_shutdown.Token).ConfigureAwait(false))
+            {
+                foreach (var connection in _connections.Values)
+                {
+                    if (connection.HeartbeatSeen && DateTime.UtcNow - connection.LastHeartbeatUtc > TimeSpan.FromSeconds(45))
+                    {
+                        await connection.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
+    }
+
     private async Task DispatchInputAsync(PluginConnection connection, PluginEnvelope envelope)
     {
         try
         {
             var request = envelope.Payload.Deserialize<InputPostRequest>(PluginJson.Options)
                           ?? throw new InvalidDataException("input.post payload is invalid.");
+            ValidateInputRequest(request);
             var lease = await InputLeases.TryAcquireAsync(request.AccountId, connection.PluginId,
                 PriorityForPlugin(connection.PluginId), TimeSpan.FromSeconds(2), _shutdown.Token).ConfigureAwait(false);
             if (lease is null)
@@ -213,6 +246,38 @@ public sealed class PluginHostService : IAsyncDisposable
         }
     }
 
+    private static void ValidateInputRequest(InputPostRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.AccountId) || request.AccountId.Length > 200)
+            throw new InvalidDataException("input.post account id is invalid.");
+        if (request.Events is null || request.Events.Count == 0 || request.Events.Count > 10_000)
+            throw new InvalidDataException("input.post event count is outside the permitted range.");
+        long previousOffset = -1;
+        foreach (var input in request.Events)
+        {
+            if (!double.IsFinite(input.NormalizedX) || !double.IsFinite(input.NormalizedY) ||
+                input.NormalizedX < 0 || input.NormalizedX > 1 || input.NormalizedY < 0 || input.NormalizedY > 1)
+                throw new InvalidDataException("input.post coordinates must be finite normalized values.");
+            if (input.OffsetMicroseconds < 0 || input.OffsetMicroseconds > TimeSpan.FromHours(1).Ticks / 10)
+                throw new InvalidDataException("input.post timing is outside the permitted range.");
+            if (input.OffsetMicroseconds < previousOffset)
+                throw new InvalidDataException("input.post events must be ordered by offset.");
+            previousOffset = input.OffsetMicroseconds;
+            if (input.Kind is PluginInputKind.KeyDown or PluginInputKind.KeyUp)
+            {
+                if (input.VirtualKey is < 1 or > 255 || input.ScanCode is < 0 or > 255)
+                    throw new InvalidDataException("input.post key metadata is invalid.");
+            }
+            else if (input.Kind is PluginInputKind.MouseButtonDown or PluginInputKind.MouseButtonUp)
+            {
+                if (input.Button is < 1 or > 5)
+                    throw new InvalidDataException("input.post mouse button is invalid.");
+            }
+            else if (input.Kind == PluginInputKind.MouseWheel && Math.Abs(input.WheelDelta) > 120_000)
+                throw new InvalidDataException("input.post wheel delta is invalid.");
+        }
+    }
+
     private static int PriorityForPlugin(string pluginId) => pluginId switch
     {
         "io.github.codysimonds65.ram.macros" => 300,
@@ -227,6 +292,7 @@ public sealed class PluginHostService : IAsyncDisposable
     {
         _shutdown.Cancel();
         try { await _acceptLoop.ConfigureAwait(false); } catch (OperationCanceledException) { }
+        try { await _heartbeatLoop.ConfigureAwait(false); } catch (OperationCanceledException) { }
         try { await Task.WhenAll(_connectionTasks.Values).ConfigureAwait(false); } catch { }
         foreach (var connection in _connections.Values) await connection.DisposeAsync().ConfigureAwait(false);
         _unauthenticatedLimit.Dispose();
@@ -258,6 +324,7 @@ public sealed class PluginConnection : IAsyncDisposable
     private readonly Stream _stream;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private int _disposed;
+    private long _lastHeartbeatUtcTicks = DateTime.UtcNow.Ticks;
 
     internal PluginConnection(string pluginId, Stream stream, IReadOnlyList<string> declaredCapabilities, IReadOnlySet<string> grantedCapabilities)
     {
@@ -270,6 +337,14 @@ public sealed class PluginConnection : IAsyncDisposable
     public string PluginId { get; }
     public IReadOnlyList<string> DeclaredCapabilities { get; }
     public IReadOnlySet<string> GrantedCapabilities { get; }
+    internal bool HeartbeatSeen { get; private set; }
+    internal DateTime LastHeartbeatUtc => new(Interlocked.Read(ref _lastHeartbeatUtcTicks), DateTimeKind.Utc);
+
+    internal void TouchHeartbeat()
+    {
+        HeartbeatSeen = true;
+        Interlocked.Exchange(ref _lastHeartbeatUtcTicks, DateTime.UtcNow.Ticks);
+    }
 
     internal bool IsAuthorized(string type)
     {
