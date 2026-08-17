@@ -14,6 +14,7 @@ public sealed class PluginInstaller
     // does not disable zip-bomb protection.
     internal const long MaxArchiveEntryBytes = 256L * 1024 * 1024;
     internal const long MaxArchiveExtractedBytes = 500L * 1024 * 1024;
+    private const FileOptions OpenReparsePoint = (FileOptions)0x00200000;
 
     private readonly PluginPaths _paths;
     private readonly PluginConsentStore _consent;
@@ -211,22 +212,38 @@ public sealed class PluginInstaller
     private static void ExtractSafely(byte[] bytes, string root)
     {
         using var archive = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read, leaveOpen: false);
-        ValidateArchiveEntries(archive, root);
+        var fullRoot = Path.GetFullPath(root);
+        EnsureNoReparsePoints(fullRoot, fullRoot);
+        ValidateArchiveEntries(archive, fullRoot);
         foreach (var entry in archive.Entries)
         {
             var normalized = entry.FullName.Replace('\\', '/');
-            var destination = Path.GetFullPath(Path.Combine(root, normalized));
+            var destination = Path.GetFullPath(Path.Combine(fullRoot, normalized));
             // ValidateArchiveEntries has already checked this prefix. Keeping
             // the extraction loop focused on writing prevents checks from
             // drifting between the validation and extraction paths.
             if (string.IsNullOrEmpty(entry.Name))
             {
                 Directory.CreateDirectory(destination);
+                EnsureNoReparsePoints(fullRoot, destination);
                 continue;
             }
 
-            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            entry.ExtractToFile(destination, overwrite: false);
+            var parent = Path.GetDirectoryName(destination)!;
+            Directory.CreateDirectory(parent);
+            EnsureNoReparsePoints(fullRoot, parent);
+            EnsureNoReparsePoints(fullRoot, destination);
+            using var input = entry.Open();
+            using var output = new FileStream(destination, new FileStreamOptions
+            {
+                Mode = FileMode.CreateNew,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                BufferSize = 64 * 1024,
+                Options = FileOptions.SequentialScan | OpenReparsePoint
+            });
+            input.CopyTo(output);
+            EnsureNoReparsePoints(fullRoot, destination);
         }
     }
 
@@ -235,10 +252,25 @@ public sealed class PluginInstaller
     /// </summary>
     internal static void ValidateArchiveEntries(ZipArchive archive, string root)
     {
-        if (archive.Entries.Count > 20_000) throw new InvalidDataException("Plugin package contains too many entries.");
+        ValidateArchiveMetadata(
+            archive.Entries.Select(entry =>
+                (FullName: entry.FullName, Length: entry.Length, ExternalAttributes: entry.ExternalAttributes)),
+            root);
+    }
+
+    /// <summary>
+    /// Validates archive metadata without opening entry streams. The metadata
+    /// overload keeps boundary and malicious-path checks directly testable.
+    /// </summary>
+    internal static void ValidateArchiveMetadata(
+        IEnumerable<(string FullName, long Length, int ExternalAttributes)> entries,
+        string root)
+    {
+        var metadata = entries.ToArray();
+        if (metadata.Length > 20_000) throw new InvalidDataException("Plugin package contains too many entries.");
         var rootPrefix = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
         long totalBytes = 0;
-        foreach (var entry in archive.Entries)
+        foreach (var entry in metadata)
         {
             if (entry.FullName.Length > 260 || entry.FullName.Contains('\0'))
                 throw new InvalidDataException("Plugin archive contains an invalid path.");
@@ -254,6 +286,42 @@ public sealed class PluginInstaller
             var destination = Path.GetFullPath(Path.Combine(root, normalized));
             if (!destination.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Plugin archive escapes its install directory.");
+        }
+    }
+
+    private static void EnsureNoReparsePoints(string root, string target)
+    {
+        var fullRoot = Path.GetFullPath(root);
+        var fullTarget = Path.GetFullPath(target);
+        var relative = Path.GetRelativePath(fullRoot, fullTarget);
+        if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(relative))
+            throw new InvalidDataException("Plugin archive escapes its install directory.");
+
+        CheckReparsePoint(fullRoot);
+        if (relative == ".") return;
+
+        var current = fullRoot;
+        foreach (var segment in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            CheckReparsePoint(current);
+        }
+    }
+
+    private static void CheckReparsePoint(string path)
+    {
+        try
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("Plugin staging paths cannot contain reparse points.");
+        }
+        catch (FileNotFoundException)
+        {
+            // A file destination is expected not to exist before extraction.
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // A not-yet-created directory is checked again after creation.
         }
     }
 

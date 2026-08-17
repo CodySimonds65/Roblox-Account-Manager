@@ -12,6 +12,19 @@ static void Require(bool condition, string message)
     }
 }
 
+static void RequireInvalidData(Action action, string message)
+{
+    try
+    {
+        action();
+        throw new InvalidOperationException(message);
+    }
+    catch (InvalidDataException)
+    {
+        // Expected rejection.
+    }
+}
+
 Require(
     GamePreset.TryNormalizeRobloxGameUrl(
         "https://www.roblox.com/games/77649408247578/Dungeon-Quest-Reborn",
@@ -604,6 +617,32 @@ try
     }
     Require(PluginInstaller.MaxArchiveEntryBytes >= 154L * 1024 * 1024,
         "The archive entry limit is smaller than the published self-contained plugin.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("oversized.exe", PluginInstaller.MaxArchiveEntryBytes + 1, 0)],
+            Path.Combine(testDirectory, "staging")),
+        "An oversized plugin entry was accepted.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("first.bin", PluginInstaller.MaxArchiveEntryBytes, 0),
+             ("second.bin", PluginInstaller.MaxArchiveExtractedBytes - PluginInstaller.MaxArchiveEntryBytes + 1, 0)],
+            Path.Combine(testDirectory, "staging")),
+        "An archive over the aggregate extraction limit was accepted.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("../escape.exe", 1, 0)],
+            Path.Combine(testDirectory, "staging")),
+        "A traversal entry was accepted.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("payload:stream", 1, 0)],
+            Path.Combine(testDirectory, "staging")),
+        "An alternate-data-stream entry was accepted.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("link.exe", 1, unchecked((int)(0xA000u << 16)))],
+            Path.Combine(testDirectory, "staging")),
+        "A symlink entry was accepted.");
     try
     {
         _ = PluginManifestReader.Parse("{\"schemaVersion\":1,\"id\":\"bad\",\"name\":\"x\",\"version\":\"1\",\"contractVersion\":\"1\",\"publisher\":\"x\",\"description\":\"x\",\"capabilities\":[],\"entryPoint\":\"../bad.exe\"}");
