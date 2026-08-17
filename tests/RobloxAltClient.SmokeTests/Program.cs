@@ -1,6 +1,7 @@
 using RobloxAltClient.Models;
 using RobloxAltClient.Plugins;
 using RobloxAltClient.Services;
+using System.IO.Compression;
 using System.Text.Json;
 
 static void Require(bool condition, string message)
@@ -584,6 +585,25 @@ try
     Require(pluginManifest.EntryPoint == "ram-macros.exe", "Plugin entrypoint did not parse.");
     Require(PluginInstaller.ParseHash("abc123  plugin.zip".PadLeft(64 + 2 + 10, '0')).Length == 64,
         "A valid plugin checksum was not parsed.");
+
+    // Self-contained plugin entrypoints are currently about 154 MiB. Keep a
+    // regression check so the installer cannot accidentally restore the old
+    // 100 MiB per-entry limit while retaining a bounded expanded package.
+    var largePluginArchivePath = Path.Combine(testDirectory, "large-plugin.zip");
+    using (var archive = ZipFile.Open(largePluginArchivePath, ZipArchiveMode.Create))
+    {
+        var entry = archive.CreateEntry("ram-macros.exe", CompressionLevel.Fastest);
+        using var output = entry.Open();
+        var zeroes = new byte[1024 * 1024];
+        for (var index = 0; index <= 100; index++)
+            output.Write(zeroes, 0, zeroes.Length);
+    }
+    using (var archive = ZipFile.OpenRead(largePluginArchivePath))
+    {
+        PluginInstaller.ValidateArchiveEntries(archive, Path.Combine(testDirectory, "staging"));
+    }
+    Require(PluginInstaller.MaxArchiveEntryBytes >= 154L * 1024 * 1024,
+        "The archive entry limit is smaller than the published self-contained plugin.");
     try
     {
         _ = PluginManifestReader.Parse("{\"schemaVersion\":1,\"id\":\"bad\",\"name\":\"x\",\"version\":\"1\",\"contractVersion\":\"1\",\"publisher\":\"x\",\"description\":\"x\",\"capabilities\":[],\"entryPoint\":\"../bad.exe\"}");

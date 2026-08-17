@@ -7,6 +7,14 @@ namespace RobloxAltClient.Plugins;
 
 public sealed class PluginInstaller
 {
+    // Official plugins are published as self-contained single-file Windows
+    // applications. Those binaries are larger than the old 100 MiB per-entry
+    // guard even though the complete package remains modest. Keep the archive
+    // and expanded-package caps independent so a larger legitimate executable
+    // does not disable zip-bomb protection.
+    internal const long MaxArchiveEntryBytes = 256L * 1024 * 1024;
+    internal const long MaxArchiveExtractedBytes = 500L * 1024 * 1024;
+
     private readonly PluginPaths _paths;
     private readonly PluginConsentStore _consent;
     private readonly HttpClient _http;
@@ -203,6 +211,30 @@ public sealed class PluginInstaller
     private static void ExtractSafely(byte[] bytes, string root)
     {
         using var archive = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read, leaveOpen: false);
+        ValidateArchiveEntries(archive, root);
+        foreach (var entry in archive.Entries)
+        {
+            var normalized = entry.FullName.Replace('\\', '/');
+            var destination = Path.GetFullPath(Path.Combine(root, normalized));
+            // ValidateArchiveEntries has already checked this prefix. Keeping
+            // the extraction loop focused on writing prevents checks from
+            // drifting between the validation and extraction paths.
+            if (string.IsNullOrEmpty(entry.Name))
+            {
+                Directory.CreateDirectory(destination);
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            entry.ExtractToFile(destination, overwrite: false);
+        }
+    }
+
+    /// <summary>
+    /// Validates archive metadata before any filesystem writes occur.
+    /// </summary>
+    internal static void ValidateArchiveEntries(ZipArchive archive, string root)
+    {
         if (archive.Entries.Count > 20_000) throw new InvalidDataException("Plugin package contains too many entries.");
         var rootPrefix = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
         long totalBytes = 0;
@@ -216,20 +248,12 @@ public sealed class PluginInstaller
                 throw new InvalidDataException("Plugin archive symlinks are not allowed.");
             if (normalized.Split('/').Any(part => part is "" or "." or "..") || Path.IsPathRooted(normalized) || normalized.Contains(':'))
                 throw new InvalidDataException("Plugin archive contains a path traversal entry.");
-            if (entry.Length > 100 * 1024 * 1024 || (totalBytes += entry.Length) > 500 * 1024 * 1024)
+            if (entry.Length > MaxArchiveEntryBytes || (totalBytes += entry.Length) > MaxArchiveExtractedBytes)
                 throw new InvalidDataException("Plugin archive is too large after extraction.");
 
             var destination = Path.GetFullPath(Path.Combine(root, normalized));
             if (!destination.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Plugin archive escapes its install directory.");
-            if (string.IsNullOrEmpty(entry.Name))
-            {
-                Directory.CreateDirectory(destination);
-                continue;
-            }
-
-            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            entry.ExtractToFile(destination, overwrite: false);
         }
     }
 
