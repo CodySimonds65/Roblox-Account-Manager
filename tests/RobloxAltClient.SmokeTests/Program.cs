@@ -600,15 +600,16 @@ try
         "A valid plugin checksum was not parsed.");
 
     // Self-contained plugin entrypoints are currently about 154 MiB. Keep a
-    // regression check so the installer cannot accidentally restore the old
-    // 100 MiB per-entry limit while retaining a bounded expanded package.
+    // regression check at that size so the installer cannot accidentally
+    // restore the old 100 MiB per-entry limit while retaining a bounded
+    // expanded package.
     var largePluginArchivePath = Path.Combine(testDirectory, "large-plugin.zip");
     using (var archive = ZipFile.Open(largePluginArchivePath, ZipArchiveMode.Create))
     {
         var entry = archive.CreateEntry("ram-macros.exe", CompressionLevel.Fastest);
         using var output = entry.Open();
         var zeroes = new byte[1024 * 1024];
-        for (var index = 0; index <= 100; index++)
+        for (var index = 0; index < 154; index++)
             output.Write(zeroes, 0, zeroes.Length);
     }
     using (var archive = ZipFile.OpenRead(largePluginArchivePath))
@@ -617,7 +618,7 @@ try
     }
     var extractedPluginDirectory = Path.Combine(testDirectory, "extracted-plugin");
     PluginInstaller.ExtractSafely(await File.ReadAllBytesAsync(largePluginArchivePath), extractedPluginDirectory);
-    Require(new FileInfo(Path.Combine(extractedPluginDirectory, "ram-macros.exe")).Length == 101L * 1024 * 1024,
+    Require(new FileInfo(Path.Combine(extractedPluginDirectory, "ram-macros.exe")).Length == 154L * 1024 * 1024,
         "A valid self-contained-sized plugin entry was not extracted intact.");
     Require(PluginInstaller.MaxArchiveEntryBytes >= 154L * 1024 * 1024,
         "The archive entry limit is smaller than the published self-contained plugin.");
