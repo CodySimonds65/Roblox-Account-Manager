@@ -13,7 +13,7 @@ public sealed class PluginProcessSupervisor : IDisposable
     private readonly Dictionary<string, nint> _suspendedThreads = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _tokenFiles = new(StringComparer.Ordinal);
 
-    public event EventHandler<(string PluginId, int ProcessId)>? Exited;
+    public event EventHandler<(string PluginId, int ProcessId, long ProcessStartTimeUtcTicks)>? Exited;
 
     public int Start(PluginManifest manifest, string executablePath, string pipeName, string token, string dataDirectory)
     {
@@ -107,19 +107,23 @@ public sealed class PluginProcessSupervisor : IDisposable
     private void OnExited(string pluginId, Process process)
     {
         nint suspendedThread = nint.Zero;
+        var notify = false;
+        long startTicks = 0;
         lock (_gate)
         {
             if (_processes.TryGetValue(pluginId, out var current) && ReferenceEquals(current, process))
             {
+                try { startTicks = process.StartTime.ToUniversalTime().Ticks; } catch { }
                 _processes.Remove(pluginId);
                 if (_jobs.Remove(pluginId, out var job) && job != nint.Zero) CloseHandle(job);
                 _suspendedThreads.Remove(pluginId, out suspendedThread);
                 _tokenFiles.Remove(pluginId, out var tokenFile);
                 if (tokenFile is not null) try { File.Delete(tokenFile); } catch { }
+                notify = true;
             }
         }
         if (suspendedThread != nint.Zero) CloseHandle(suspendedThread);
-        Exited?.Invoke(this, (pluginId, process.Id));
+        if (notify) Exited?.Invoke(this, (pluginId, process.Id, startTicks));
         process.Dispose();
     }
 

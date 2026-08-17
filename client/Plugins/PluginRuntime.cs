@@ -16,7 +16,7 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly PluginActionRouter _actions;
     private readonly Dictionary<string, InstalledPlugin> _installed = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _launchGates = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, string> _launchTokens = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (string Token, int ProcessId, long StartTicks)> _launchTokens = new(StringComparer.Ordinal);
 
     public PluginRuntime()
     {
@@ -106,13 +106,17 @@ public sealed class PluginRuntime : IAsyncDisposable
         var manifestPath = Path.Combine(installed.InstallDirectory, "plugin.json");
         var manifestHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(manifestPath))).ToLowerInvariant();
         var token = _host.CreateLaunchToken(installed.Manifest.Id, manifestHash, effectiveCapabilities);
-        _launchTokens[pluginId] = token;
         int? pid = null;
+        long startTicks = 0;
         try
         {
             pid = _supervisor.Start(installed.Manifest, installed.EntryPointPath, _host.PipeName, token, _paths.GetDataDirectory(pluginId));
             using (var process = Process.GetProcessById(pid.Value))
-                _host.BindLaunchProcess(token, pid.Value, process.StartTime.ToUniversalTime().Ticks);
+            {
+                startTicks = process.StartTime.ToUniversalTime().Ticks;
+                _host.BindLaunchProcess(token, pid.Value, startTicks);
+            }
+            _launchTokens[pluginId] = (token, pid.Value, startTicks);
             _supervisor.Resume(pluginId);
         }
         catch
@@ -205,9 +209,12 @@ public sealed class PluginRuntime : IAsyncDisposable
         }
     }
 
-    private void Supervisor_Exited(object? sender, (string PluginId, int ProcessId) e)
+    private void Supervisor_Exited(object? sender, (string PluginId, int ProcessId, long ProcessStartTimeUtcTicks) e)
     {
-        if (_launchTokens.TryRemove(e.PluginId, out var token)) _host.RevokeLaunchToken(token);
+        if (_launchTokens.TryGetValue(e.PluginId, out var launch) && launch.ProcessId == e.ProcessId &&
+            (e.ProcessStartTimeUtcTicks == 0 || launch.StartTicks == e.ProcessStartTimeUtcTicks) &&
+            _launchTokens.TryRemove(new KeyValuePair<string, (string Token, int ProcessId, long StartTicks)>(e.PluginId, launch)))
+            _host.RevokeLaunchToken(launch.Token);
         lock (_gate)
         {
             if (_installed.TryGetValue(e.PluginId, out var installed) && installed.ProcessId == e.ProcessId)
