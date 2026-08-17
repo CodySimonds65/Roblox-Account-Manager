@@ -17,6 +17,7 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly Dictionary<string, InstalledPlugin> _installed = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _launchGates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string Token, int ProcessId, long StartTicks)> _launchTokens = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
 
     public PluginRuntime()
     {
@@ -62,6 +63,9 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     public async Task<InstalledPlugin> InstallAsync(string url, bool allowUnsignedSideload = false, CancellationToken cancellationToken = default)
     {
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
         var official = IsOfficialUrl(url);
         if (!official && !allowUnsignedSideload)
             throw new InvalidOperationException("This URL is not in the official catalog. Confirm the unsigned sideload warning before continuing.");
@@ -77,6 +81,8 @@ public sealed class PluginRuntime : IAsyncDisposable
         lock (_gate) _installed[installed.Manifest.Id] = installed;
         Changed?.Invoke(this, EventArgs.Empty);
         return installed;
+        }
+        finally { _lifecycleGate.Release(); }
     }
 
     public async Task<bool> LaunchAsync(string pluginId)
@@ -85,7 +91,9 @@ public sealed class PluginRuntime : IAsyncDisposable
         await launchGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            return await LaunchCoreAsync(pluginId).ConfigureAwait(false);
+            await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+            try { return await LaunchCoreAsync(pluginId).ConfigureAwait(false); }
+            finally { _lifecycleGate.Release(); }
         }
         finally { launchGate.Release(); }
     }
@@ -136,6 +144,13 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     public async Task StopAsync(string pluginId)
     {
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try { await StopCoreAsync(pluginId).ConfigureAwait(false); }
+        finally { _lifecycleGate.Release(); }
+    }
+
+    private async Task StopCoreAsync(string pluginId)
+    {
         await _supervisor.StopAsync(pluginId).ConfigureAwait(false);
         lock (_gate)
         {
@@ -169,14 +184,20 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     public async Task<bool> RollbackAsync(string pluginId, CancellationToken cancellationToken = default)
     {
-        var result = await _installer.RollbackAsync(pluginId, cancellationToken).ConfigureAwait(false);
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        bool result;
+        try { result = await _installer.RollbackAsync(pluginId, cancellationToken).ConfigureAwait(false); }
+        finally { _lifecycleGate.Release(); }
         if (result) { RefreshInstalled(); Changed?.Invoke(this, EventArgs.Empty); }
         return result;
     }
 
     public async Task RemoveAsync(string pluginId)
     {
-        await StopAsync(pluginId).ConfigureAwait(false);
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+        await StopCoreAsync(pluginId).ConfigureAwait(false);
         if (!_installed.TryGetValue(pluginId, out var installed)) return;
         var directory = Path.GetFullPath(installed.InstallDirectory);
         var root = Path.GetFullPath(_paths.InstallRoot) + Path.DirectorySeparatorChar;
@@ -185,6 +206,8 @@ public sealed class PluginRuntime : IAsyncDisposable
         _consent.Remove(pluginId);
         lock (_gate) _installed.Remove(pluginId);
         Changed?.Invoke(this, EventArgs.Empty);
+        }
+        finally { _lifecycleGate.Release(); }
     }
 
     private void RefreshInstalled()
@@ -246,6 +269,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         await _actions.DisposeAsync().ConfigureAwait(false);
         await _host.DisposeAsync().ConfigureAwait(false);
         Accounts.Dispose();
+        _lifecycleGate.Dispose();
     }
 }
 

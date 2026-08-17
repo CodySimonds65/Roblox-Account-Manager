@@ -53,6 +53,20 @@ public partial class PluginsWindow : Window
             var permissions = new Button { Content = "Permissions", Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(8, 0, 0, 0) };
             permissions.Click += (_, _) => EditPermissions(plugin);
             actions.Children.Add(permissions);
+            var catalogEntry = PluginRuntime.OfficialCatalog.FirstOrDefault(entry => string.Equals(entry.Id, plugin.Manifest.Id, StringComparison.Ordinal));
+            if (catalogEntry is not null)
+            {
+                var update = new Button { Content = "Update", Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(8, 0, 0, 0) };
+                update.Click += async (_, _) => await InstallAsync(catalogEntry.InstallUrl);
+                actions.Children.Add(update);
+            }
+            var rollback = new Button { Content = "Rollback", Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(8, 0, 0, 0) };
+            rollback.Click += async (_, _) => await RunSafeAsync(async () =>
+            {
+                if (!await Runtime.RollbackAsync(plugin.Manifest.Id))
+                    throw new InvalidOperationException("No previous verified version is available for rollback.");
+            });
+            actions.Children.Add(rollback);
             var remove = new Button { Content = "Remove", Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(8, 0, 0, 0) };
             remove.Click += async (_, _) =>
             {
