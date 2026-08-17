@@ -30,6 +30,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         _installer = new PluginInstaller(_paths, _consent, stopPluginAsync: _supervisor.StopAsync,
             signatureVerifier: TryLoadPinnedSignatureVerifier());
         _supervisor.Exited += Supervisor_Exited;
+        _host.MessageReceived += Host_MessageReceived;
         _host.InputDispatcher = DispatchInputAsync;
         RefreshInstalled();
     }
@@ -248,6 +249,36 @@ public sealed class PluginRuntime : IAsyncDisposable
         Changed?.Invoke(this, EventArgs.Empty);
     }
 
+    private void Host_MessageReceived(object? sender, (PluginConnection Connection, PluginEnvelope Envelope) message)
+    {
+        if (message.Envelope.Type is "accounts.list" or "account.snapshot")
+            _ = RespondToAccountQueryAsync(message.Connection, message.Envelope);
+    }
+
+    private async Task RespondToAccountQueryAsync(PluginConnection connection, PluginEnvelope envelope)
+    {
+        try
+        {
+            IReadOnlyList<ManagedAccountSnapshot> accounts;
+            if (envelope.Type == "accounts.list")
+            {
+                accounts = Accounts.Snapshot();
+            }
+            else
+            {
+                var accountId = envelope.Payload.TryGetProperty("accountId", out var id) ? id.GetString() : null;
+                accounts = string.IsNullOrWhiteSpace(accountId)
+                    ? []
+                    : Accounts.Snapshot().Where(account => string.Equals(account.AccountId, accountId, StringComparison.Ordinal)).ToArray();
+            }
+            await connection.SendAsync("accounts.result", new { accounts }, envelope.RequestId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            // Disconnects are expected during shutdown; there is no response to send.
+        }
+    }
+
     private static string NormalizeBaseUrl(string value)
     {
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return value.TrimEnd('/');
@@ -269,6 +300,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         try { await _supervisor.StopAllAsync().ConfigureAwait(false); }
         finally { _lifecycleGate.Release(); }
         _supervisor.Exited -= Supervisor_Exited;
+        _host.MessageReceived -= Host_MessageReceived;
         _supervisor.Dispose();
         await _actions.DisposeAsync().ConfigureAwait(false);
         await _host.DisposeAsync().ConfigureAwait(false);
