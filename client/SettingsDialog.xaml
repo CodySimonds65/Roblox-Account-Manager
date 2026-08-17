@@ -50,7 +50,7 @@
             <TextBlock Text="Stored locally on this PC." Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,0" />
             <Border Background="#17152B" BorderBrush="{StaticResource SelectionBorderBrush}" BorderThickness="1"
                     CornerRadius="8" Padding="10,7" Margin="0,10,0,0">
-                <TextBlock Text="Priority: Profile overrides Game, and Game overrides Global. ‘Inherit lower level’ uses the next available value."
+                <TextBlock Text="Priority: Profile overrides Game, and Game overrides Global. ‘Default’ uses the next available value."
                            Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
             </Border>
         </StackPanel>

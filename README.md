@@ -47,9 +47,13 @@ Release signing is optional. Configure a base64-encoded PFX as `WINDOWS_SIGNING_
 
 ## Settings
 
-The top-right **Settings** window is the single place to manage launcher options and scoped Roblox settings. Its tabs cover launcher behavior, global defaults, saved games, and account profiles. Profile values override game values, and game values override global defaults; choosing **Inherit lower level** leaves that scope unchanged. The same window edits graphics quality, maximum frame rate, volume, MSAA, texture quality, scaling, and advanced flags.
+The top-right **Settings** window manages launcher options and Roblox engine/game settings across three scopes:
 
-Graphics quality, volume, and maximum frame rate update Roblox's native in-game preferences for the next launch. MSAA, texture quality, scaling, and advanced flags are temporarily merged into `ClientAppSettings.json`, then the original file is restored. Roblox or Bloxstrap can ignore or reject engine flags after an update; the Activity log reports detected rejections.
+- **Global** defaults
+- **Game** overrides
+- **Per profile** overrides
+
+Profile settings override game settings, and game settings override global settings. Selecting **Default** uses the next available lower-level value. Available controls include graphics quality, FPS, volume, MSAA, texture quality, scaling, and advanced flags.
 
 ## Notes
 

@@ -63,7 +63,7 @@ public partial class GameSettingsEditor : UserControl
             if (IsOverrideMode)
             {
                 ClientScalingBox.Items.Clear();
-                ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Inherit lower level", Tag = "Inherit" });
+                ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Default", Tag = "Inherit" });
                 ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Disabled", Tag = "Disabled" });
                 ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Preserve quality", Tag = "Preserve" });
                 SelectByTag(ClientScalingBox, value.PreserveRenderingQuality switch
@@ -161,21 +161,21 @@ public partial class GameSettingsEditor : UserControl
         _loading = true;
         try
         {
-            var inheritedLabel = IsOverrideMode ? "Inherit lower level" : "Automatic";
+            var inheritedLabel = IsOverrideMode ? "Default" : "Automatic";
             SetFirstItemLabel(MsaaBox, inheritedLabel);
             SetFirstItemLabel(GraphicsQualityBox, inheritedLabel);
             SetFirstItemLabel(TextureQualityBox, inheritedLabel);
             SetFirstItemLabel(FpsBox, inheritedLabel);
             SetFirstItemLabel(VolumeBox, inheritedLabel);
             TipText.Text = IsOverrideMode
-                ? "Tip: Inherit lower level leaves this scope unchanged. Curated controls take priority over duplicate advanced flags."
+                ? "Tip: Default leaves this scope unchanged. Curated controls take priority over duplicate advanced flags."
                 : "Tip: Automatic removes only that override. Curated controls take priority over duplicate advanced flags.";
 
             var current = ReadTag(ClientScalingBox);
             ClientScalingBox.Items.Clear();
             if (IsOverrideMode)
             {
-                ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Inherit lower level", Tag = "Inherit" });
+                ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Default", Tag = "Inherit" });
                 ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Disabled", Tag = "Disabled" });
                 ClientScalingBox.Items.Add(new ComboBoxItem { Content = "Preserve quality", Tag = "Preserve" });
                 SelectByTag(ClientScalingBox, current is "Preserve" or "Disabled" ? current : "Inherit");
