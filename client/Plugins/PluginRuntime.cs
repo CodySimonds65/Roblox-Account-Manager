@@ -20,10 +20,13 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly object _diagnosticGate = new();
     private readonly Dictionary<string, DiagnosticRateLimit> _diagnosticLimits = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    private readonly ConcurrentDictionary<string, (PluginConnection Connection, string? AccountId)> _accountEventSubscribers = new(StringComparer.Ordinal);
+    private int _queuedAccountUpdates;
+    private const int MaxQueuedAccountUpdates = 64;
 
-    public PluginRuntime()
+    public PluginRuntime(string? appDataDirectory = null)
     {
-        _paths = new PluginPaths();
+        _paths = new PluginPaths(appDataDirectory);
         Accounts = new RunningAccountRegistry(_paths.Root);
         _consent = new PluginConsentStore(_paths);
         _host = new PluginHostService();
@@ -33,8 +36,11 @@ public sealed class PluginRuntime : IAsyncDisposable
             signatureVerifier: TryLoadPinnedSignatureVerifier());
         _supervisor.Exited += Supervisor_Exited;
         _host.MessageReceived += Host_MessageReceived;
+        _host.Disconnected += Host_Disconnected;
         _host.InputDispatcher = DispatchInputAsync;
         Accounts.Diagnostic += Accounts_Diagnostic;
+        Accounts.AccountChanged += Accounts_AccountChanged;
+        Accounts.AccountExited += Accounts_AccountExited;
         RefreshInstalled();
     }
 
@@ -263,8 +269,91 @@ public sealed class PluginRuntime : IAsyncDisposable
     {
         if (message.Envelope.Type is "accounts.list" or "account.snapshot")
             _ = RespondToAccountQueryAsync(message.Connection, message.Envelope);
+        else if (message.Envelope.Type == "account.events.subscribe")
+            HandleAccountEventsSubscribe(message.Connection, message.Envelope);
         else if (message.Envelope.Type == "diagnostic.log")
             HandlePluginDiagnostic(message.Connection, message.Envelope);
+    }
+
+    private void HandleAccountEventsSubscribe(PluginConnection connection, PluginEnvelope envelope)
+    {
+        string? accountId = null;
+        try
+        {
+            if (envelope.Payload.TryGetProperty("accountId", out var accountIdElement))
+            {
+                if (accountIdElement.ValueKind != JsonValueKind.String)
+                    throw new InvalidDataException("account.events.subscribe account id must be a string.");
+                accountId = accountIdElement.GetString();
+            }
+            if (accountId is not null && accountId.Length > 200)
+                throw new InvalidDataException("account.events.subscribe account id is invalid.");
+            _accountEventSubscribers[connection.PluginId] = (connection, accountId);
+            _ = SendSubscribeReplyAsync(connection, "account.events.subscribed", new { }, envelope.RequestId);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException)
+        {
+            _ = SendSubscribeReplyAsync(connection, "host.reject",
+                new { reason = "invalid-request", messageType = "account.events.subscribe", detail = ex.Message },
+                envelope.RequestId);
+        }
+    }
+
+    private async Task SendSubscribeReplyAsync(PluginConnection connection, string type, object payload, string requestId)
+    {
+        try
+        {
+            await connection.SendAsync(type, payload, requestId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException or JsonException)
+        {
+            // Disconnects are expected during shutdown; there is no response to send.
+        }
+    }
+
+    private void Host_Disconnected(object? sender, PluginConnection connection) =>
+        _accountEventSubscribers.TryRemove(connection.PluginId, out _);
+
+    private void Accounts_AccountChanged(object? sender, ManagedAccountSnapshot snapshot) =>
+        BroadcastAccountEvent("account.updated", snapshot);
+
+    private void Accounts_AccountExited(object? sender, ManagedAccountSnapshot snapshot) =>
+        BroadcastAccountEvent("account.exited", snapshot);
+
+    private void BroadcastAccountEvent(string type, ManagedAccountSnapshot snapshot)
+    {
+        if (_accountEventSubscribers.IsEmpty) return;
+        bool isUpdate = type == "account.updated";
+        if (isUpdate && Volatile.Read(ref _queuedAccountUpdates) > MaxQueuedAccountUpdates)
+            return;
+        foreach (var subscriber in _accountEventSubscribers.Values.ToArray())
+        {
+            if (subscriber.AccountId is not null &&
+                !string.Equals(subscriber.AccountId, snapshot.AccountId, StringComparison.Ordinal))
+                continue;
+            if (isUpdate)
+                Interlocked.Increment(ref _queuedAccountUpdates);
+            _ = SendAccountEventAsync(subscriber.Connection, type, snapshot, isUpdate);
+        }
+    }
+
+    private async Task SendAccountEventAsync(PluginConnection connection, string type, ManagedAccountSnapshot snapshot, bool isUpdate)
+    {
+        try
+        {
+            await connection.SendAsync(type, new { account = snapshot }, "", CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            if (_accountEventSubscribers.TryGetValue(connection.PluginId, out var current) &&
+                ReferenceEquals(current.Connection, connection))
+                _accountEventSubscribers.TryRemove(connection.PluginId, out _);
+        }
+        finally
+        {
+            if (isUpdate)
+                Interlocked.Decrement(ref _queuedAccountUpdates);
+        }
     }
 
     private void HandlePluginDiagnostic(PluginConnection connection, PluginEnvelope envelope)
@@ -387,7 +476,10 @@ public sealed class PluginRuntime : IAsyncDisposable
         finally { _lifecycleGate.Release(); }
         _supervisor.Exited -= Supervisor_Exited;
         _host.MessageReceived -= Host_MessageReceived;
+        _host.Disconnected -= Host_Disconnected;
         Accounts.Diagnostic -= Accounts_Diagnostic;
+        Accounts.AccountChanged -= Accounts_AccountChanged;
+        Accounts.AccountExited -= Accounts_AccountExited;
         _supervisor.Dispose();
         await _actions.DisposeAsync().ConfigureAwait(false);
         await _host.DisposeAsync().ConfigureAwait(false);

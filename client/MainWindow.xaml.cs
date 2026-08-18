@@ -56,6 +56,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         WindowAppearance.ApplyModernChrome(this);
         ((App)Application.Current).PluginRuntime.Diagnostic += PluginRuntime_Diagnostic;
+        ((App)Application.Current).PluginRuntime.Accounts.AccountExited += Accounts_AccountExited;
         AccountsList.ItemsSource = _accounts;
         LaunchQueueList.ItemsSource = _launchQueue;
         GamePicker.ItemsSource = _games;
@@ -1511,6 +1512,17 @@ public partial class MainWindow : Window
         { Interlocked.Exchange(ref _pluginDiagnosticDispatchPending, 0); }
     }
 
+    private void Accounts_AccountExited(object? sender, ManagedAccountSnapshot snapshot)
+    {
+        try
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => Log($"{snapshot.Label} exited.")));
+        }
+        catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+        {
+        }
+    }
+
     private void CopyActivity_Click(object sender, RoutedEventArgs e)
     {
         if (!string.IsNullOrWhiteSpace(ActivityLog.Text))
@@ -1523,6 +1535,7 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         ((App)Application.Current).PluginRuntime.Diagnostic -= PluginRuntime_Diagnostic;
+        ((App)Application.Current).PluginRuntime.Accounts.AccountExited -= Accounts_AccountExited;
         lock (_pluginDiagnosticQueueGate) _pendingPluginDiagnostics.Clear();
         _launchCancellation?.Cancel();
         _launchCancellation?.Dispose();

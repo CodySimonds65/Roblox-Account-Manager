@@ -1,8 +1,11 @@
 using RobloxAltClient.Models;
 using RobloxAltClient.Plugins;
 using RobloxAltClient.Services;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Compression;
+using System.IO.Pipes;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 static void Require(bool condition, string message)
@@ -24,6 +27,64 @@ static void RequireInvalidData(Action action, string message)
     {
         // Expected rejection.
     }
+}
+
+static async Task<T> AwaitSignalAsync<T>(Task<T> signal, TimeSpan timeout, string failureMessage)
+{
+    try { return await signal.WaitAsync(timeout); }
+    catch (TimeoutException) { throw new InvalidOperationException(failureMessage); }
+}
+
+static async Task WriteEnvelopeAsync(Stream stream, PluginEnvelope envelope, CancellationToken cancellationToken = default)
+{
+    var bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, PluginJson.Options);
+    var header = new byte[4];
+    BinaryPrimitives.WriteInt32LittleEndian(header, bytes.Length);
+    await stream.WriteAsync(header, cancellationToken);
+    await stream.WriteAsync(bytes, cancellationToken);
+    await stream.FlushAsync(cancellationToken);
+}
+
+static async Task<PluginEnvelope?> ReadEnvelopeAsync(Stream stream, CancellationToken cancellationToken = default)
+{
+    var header = new byte[4];
+    var offset = 0;
+    while (offset < header.Length)
+    {
+        var read = await stream.ReadAsync(header.AsMemory(offset), cancellationToken);
+        if (read == 0) return null;
+        offset += read;
+    }
+    var length = BinaryPrimitives.ReadInt32LittleEndian(header);
+    if (length <= 0 || length > PluginProtocol.MaxMessageBytes) return null;
+    var bytes = new byte[length];
+    offset = 0;
+    while (offset < length)
+    {
+        var read = await stream.ReadAsync(bytes.AsMemory(offset), cancellationToken);
+        if (read == 0) return null;
+        offset += read;
+    }
+    return JsonSerializer.Deserialize<PluginEnvelope>(bytes, PluginJson.Options);
+}
+
+static async Task<PluginEnvelope?> ReadEnvelopeUntilAsync(Stream stream, string type, TimeSpan timeout)
+{
+    using var timeoutSource = new CancellationTokenSource(timeout);
+    while (!timeoutSource.IsCancellationRequested)
+    {
+        try
+        {
+            var envelope = await ReadEnvelopeAsync(stream, timeoutSource.Token);
+            if (envelope is null) return null;
+            if (envelope.Type == type) return envelope;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+    }
+    return null;
 }
 
 Require(
@@ -115,6 +176,54 @@ finally
 }
 Require(!new GameSettings { AdvancedFlagsJson = "{}" }.HasOverrides,
     "An empty advanced-flags object was treated as an active override.");
+
+var exitStateRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-exit-" + Guid.NewGuid().ToString("N"));
+try
+{
+    using var exitRegistry = new RunningAccountRegistry(exitStateRoot);
+    var exitSignals = new TaskCompletionSource<ManagedAccountSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+    EventHandler<ManagedAccountSnapshot> exited = (_, snapshot) => exitSignals.TrySetResult(snapshot);
+    exitRegistry.AccountExited += exited;
+    try
+    {
+        using var shortLived = Process.Start(new ProcessStartInfo("cmd.exe", "/c ping 127.0.0.1 -n 3 > nul")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("The exit-detection helper process did not start.");
+        exitRegistry.Register(new AccountProfile { Id = "exit-test", Label = "Exit test" }, shortLived);
+        var exitedSnapshot = await AwaitSignalAsync(exitSignals.Task, TimeSpan.FromSeconds(10),
+            "The running-account registry did not report the killed client.");
+        Require(exitedSnapshot.AccountId == "exit-test" && exitedSnapshot.ProcessId == shortLived.Id,
+            "The registry exit report carried the wrong client.");
+        Require(!exitedSnapshot.IsRunning, "The registry exit report was not a final snapshot.");
+    }
+    finally
+    {
+        exitRegistry.AccountExited -= exited;
+    }
+
+    var removeSignals = new TaskCompletionSource<ManagedAccountSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+    EventHandler<ManagedAccountSnapshot> removed = (_, snapshot) => removeSignals.TrySetResult(snapshot);
+    exitRegistry.AccountExited += removed;
+    try
+    {
+        exitRegistry.Register(new AccountProfile { Id = "remove-test", Label = "Remove test" }, Process.GetCurrentProcess());
+        Require(exitRegistry.Remove("remove-test"), "The registry did not remove the registered account.");
+        var removedSnapshot = await AwaitSignalAsync(removeSignals.Task, TimeSpan.FromSeconds(5),
+            "The registry did not report the removed account.");
+        Require(removedSnapshot.AccountId == "remove-test" && removedSnapshot.Label == "Remove test" && !removedSnapshot.IsRunning,
+            "The registry removal report carried the wrong snapshot.");
+    }
+    finally
+    {
+        exitRegistry.AccountExited -= removed;
+    }
+}
+finally
+{
+    if (Directory.Exists(exitStateRoot)) Directory.Delete(exitStateRoot, recursive: true);
+}
 
 var legacySettings = JsonSerializer.Deserialize<LauncherSettings>("{}");
 Require(legacySettings?.GameSettings is not null && legacySettings.GameOverrides is not null,
@@ -737,3 +846,50 @@ finally
 }
 
 Console.WriteLine("Custom game preset smoke tests passed.");
+
+var pluginRuntimeRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-runtime-" + Guid.NewGuid().ToString("N"));
+try
+{
+    await using var runtime = new PluginRuntime(pluginRuntimeRoot);
+    var host = runtime.Host;
+    var pluginId = "io.github.codysimonds65.ram.afk";
+    var manifestHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("loopback-manifest"))).ToLowerInvariant();
+    var token = host.CreateLaunchToken(pluginId, manifestHash, [PluginCapabilities.HostAccountEvents]);
+    var startTicks = Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks;
+    host.BindLaunchProcess(token, Environment.ProcessId, startTicks);
+
+    await using var pipe = new NamedPipeClientStream(".", host.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+    await pipe.ConnectAsync(5000);
+
+    await WriteEnvelopeAsync(pipe, new PluginEnvelope("plugin.hello", Guid.NewGuid().ToString("N"),
+        JsonSerializer.SerializeToElement(new PluginHandshake(pluginId, token, PluginProtocol.CurrentMajor,
+            PluginProtocol.CurrentMinor, manifestHash, [PluginCapabilities.HostAccountEvents],
+            Environment.ProcessId, startTicks), PluginJson.Options)));
+    var accepted = await ReadEnvelopeUntilAsync(pipe, "host.accept", TimeSpan.FromSeconds(5));
+    Require(accepted is not null, "The plugin host did not accept the loopback handshake.");
+
+    await WriteEnvelopeAsync(pipe, new PluginEnvelope("account.events.subscribe", "subscribe-1",
+        JsonSerializer.SerializeToElement(new { }, PluginJson.Options)));
+    var subscribed = await ReadEnvelopeUntilAsync(pipe, "account.events.subscribed", TimeSpan.FromSeconds(5));
+    Require(subscribed is not null, "The plugin host did not acknowledge the account-event subscription.");
+    Require(subscribed!.RequestId == "subscribe-1", "The subscription acknowledgment lost the request id.");
+
+    var loopbackAccountId = "loopback-" + Guid.NewGuid().ToString("N");
+    runtime.Accounts.Register(new AccountProfile { Id = loopbackAccountId, Label = "Loopback" }, Process.GetCurrentProcess());
+    var updated = await ReadEnvelopeUntilAsync(pipe, "account.updated", TimeSpan.FromSeconds(5));
+    var updatedSnapshot = updated!.Payload.GetProperty("account").Deserialize<ManagedAccountSnapshot>(PluginJson.Options);
+    Require(updatedSnapshot?.AccountId == loopbackAccountId && updatedSnapshot.Label == "Loopback",
+        "The account.updated push carried the wrong account.");
+
+    Require(runtime.Accounts.Remove(loopbackAccountId), "The loopback account was not removed.");
+    var exited = await ReadEnvelopeUntilAsync(pipe, "account.exited", TimeSpan.FromSeconds(5));
+    var exitedSnapshot = exited!.Payload.GetProperty("account").Deserialize<ManagedAccountSnapshot>(PluginJson.Options);
+    Require(exitedSnapshot?.AccountId == loopbackAccountId && exitedSnapshot.IsRunning == false,
+        "The account.exited push did not carry the final snapshot.");
+}
+finally
+{
+    if (Directory.Exists(pluginRuntimeRoot)) Directory.Delete(pluginRuntimeRoot, recursive: true);
+}
+
+Console.WriteLine("Plugin account-event push smoke tests passed.");

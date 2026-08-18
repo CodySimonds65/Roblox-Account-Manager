@@ -16,7 +16,7 @@ public sealed class RunningAccountRegistry : IDisposable
     private DateTime _lastInputUtc = DateTime.UtcNow;
 
     public event EventHandler<ManagedAccountSnapshot>? AccountChanged;
-    public event EventHandler<string>? AccountExited;
+    public event EventHandler<ManagedAccountSnapshot>? AccountExited;
     public event EventHandler<string>? Diagnostic;
 
     public RunningAccountRegistry(string? appDataDirectory = null)
@@ -50,16 +50,20 @@ public sealed class RunningAccountRegistry : IDisposable
             SaveLocked();
         }
         Refresh();
+        var registered = Snapshot().FirstOrDefault(snapshot => string.Equals(snapshot.AccountId, account.Id, StringComparison.Ordinal));
+        if (registered is not null) AccountChanged?.Invoke(this, registered);
     }
 
     public bool Remove(string accountId)
     {
+        ManagedAccountSnapshot exitedSnapshot;
         lock (_gate)
         {
-            if (!_records.Remove(accountId)) return false;
+            if (!_records.Remove(accountId, out var record)) return false;
+            exitedSnapshot = record.ToSnapshot() with { IsRunning = false };
             SaveLocked();
         }
-        AccountExited?.Invoke(this, accountId);
+        AccountExited?.Invoke(this, exitedSnapshot);
         return true;
     }
 
@@ -74,7 +78,7 @@ public sealed class RunningAccountRegistry : IDisposable
         }
 
         List<ManagedAccountSnapshot> changed = [];
-        List<string> exited = [];
+        List<ManagedAccountSnapshot> exited = [];
         lock (_gate)
         {
             foreach (var record in _records.Values.ToArray())
@@ -87,7 +91,7 @@ public sealed class RunningAccountRegistry : IDisposable
                     if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != record.ProcessStartTimeUtcTicks)
                     {
                         _records.Remove(record.AccountId);
-                        exited.Add(record.AccountId);
+                        exited.Add(record.ToSnapshot() with { IsRunning = false });
                         continue;
                     }
 
@@ -112,17 +116,17 @@ public sealed class RunningAccountRegistry : IDisposable
                 catch (ArgumentException)
                 {
                     _records.Remove(record.AccountId);
-                    exited.Add(record.AccountId);
+                    exited.Add(record.ToSnapshot() with { IsRunning = false });
                 }
                 catch (InvalidOperationException)
                 {
                     _records.Remove(record.AccountId);
-                    exited.Add(record.AccountId);
+                    exited.Add(record.ToSnapshot() with { IsRunning = false });
                 }
                 catch (Win32Exception)
                 {
                     _records.Remove(record.AccountId);
-                    exited.Add(record.AccountId);
+                    exited.Add(record.ToSnapshot() with { IsRunning = false });
                 }
             }
 
@@ -130,7 +134,7 @@ public sealed class RunningAccountRegistry : IDisposable
         }
 
         foreach (var snapshot in changed) AccountChanged?.Invoke(this, snapshot);
-        foreach (var accountId in exited) AccountExited?.Invoke(this, accountId);
+        foreach (var snapshot in exited) AccountExited?.Invoke(this, snapshot);
     }
 
     private static nint FindWindow(int processId)
