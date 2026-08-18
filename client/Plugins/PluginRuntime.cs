@@ -17,6 +17,8 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly Dictionary<string, InstalledPlugin> _installed = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _launchGates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string Token, int ProcessId, long StartTicks)> _launchTokens = new(StringComparer.Ordinal);
+    private readonly object _diagnosticGate = new();
+    private readonly Dictionary<string, DiagnosticRateLimit> _diagnosticLimits = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
 
     public PluginRuntime()
@@ -32,6 +34,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         _supervisor.Exited += Supervisor_Exited;
         _host.MessageReceived += Host_MessageReceived;
         _host.InputDispatcher = DispatchInputAsync;
+        Accounts.Diagnostic += Accounts_Diagnostic;
         RefreshInstalled();
     }
 
@@ -51,6 +54,9 @@ public sealed class PluginRuntime : IAsyncDisposable
     ];
 
     public event EventHandler? Changed;
+    public event EventHandler<PluginDiagnostic>? Diagnostic;
+
+    public sealed record PluginDiagnostic(string PluginId, string Level, string Message, DateTime Utc);
 
     private Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken)
     {
@@ -105,6 +111,8 @@ public sealed class PluginRuntime : IAsyncDisposable
         lock (_gate)
         {
             if (!_installed.TryGetValue(pluginId, out installed!)) return false;
+            if (installed.IsRunning || _launchTokens.ContainsKey(pluginId))
+                throw new InvalidOperationException("This plugin is already running.");
         }
 
         var consent = _consent.Get(pluginId, installed.Manifest.AutostartDefault);
@@ -237,6 +245,8 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     private void Supervisor_Exited(object? sender, (string PluginId, int ProcessId, long ProcessStartTimeUtcTicks) e)
     {
+        PublishDiagnostic(new PluginDiagnostic(e.PluginId, "error",
+            $"Plugin process exited (PID {e.ProcessId}, start {e.ProcessStartTimeUtcTicks}).", DateTime.UtcNow));
         if (_launchTokens.TryGetValue(e.PluginId, out var launch) && launch.ProcessId == e.ProcessId &&
             (e.ProcessStartTimeUtcTicks == 0 || launch.StartTicks == e.ProcessStartTimeUtcTicks) &&
             _launchTokens.TryRemove(new KeyValuePair<string, (string Token, int ProcessId, long StartTicks)>(e.PluginId, launch)))
@@ -253,7 +263,83 @@ public sealed class PluginRuntime : IAsyncDisposable
     {
         if (message.Envelope.Type is "accounts.list" or "account.snapshot")
             _ = RespondToAccountQueryAsync(message.Connection, message.Envelope);
+        else if (message.Envelope.Type == "diagnostic.log")
+            HandlePluginDiagnostic(message.Connection, message.Envelope);
     }
+
+    private void HandlePluginDiagnostic(PluginConnection connection, PluginEnvelope envelope)
+    {
+        try
+        {
+            var request = envelope.Payload.Deserialize<DiagnosticLogRequest>(PluginJson.Options)
+                          ?? throw new InvalidDataException("Diagnostic payload is invalid.");
+            if (request.Message is null || request.Message.Length is < 1 or > 2_000)
+                throw new InvalidDataException("Diagnostic message length is invalid.");
+            var level = request.Level?.Trim().ToLowerInvariant() ?? "info";
+            if (level is not ("trace" or "info" or "warning" or "error")) level = "info";
+            if (!TryAcceptDiagnostic(connection.PluginId, out var emitRateLimitWarning))
+            {
+                if (emitRateLimitWarning)
+                    PublishDiagnostic(new PluginDiagnostic(connection.PluginId, "warning",
+                        "Diagnostic messages are being rate-limited (maximum 30 messages per 10 seconds).", DateTime.UtcNow));
+                return;
+            }
+            PublishDiagnostic(new PluginDiagnostic(connection.PluginId, level, request.Message, request.Utc ?? DateTime.UtcNow));
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException)
+        {
+            if (TryAcceptDiagnostic(connection.PluginId, out var emitRateLimitWarning))
+                PublishDiagnostic(new PluginDiagnostic(connection.PluginId, "warning", $"Rejected diagnostic message: {ex.Message}", DateTime.UtcNow));
+            else if (emitRateLimitWarning)
+                PublishDiagnostic(new PluginDiagnostic(connection.PluginId, "warning",
+                    "Diagnostic messages are being rate-limited (maximum 30 messages per 10 seconds).", DateTime.UtcNow));
+        }
+    }
+
+    private void PublishDiagnostic(PluginDiagnostic diagnostic)
+    {
+        var handlers = Diagnostic?.GetInvocationList();
+        if (handlers is null) return;
+        foreach (EventHandler<PluginDiagnostic> handler in handlers)
+        {
+            try { handler(this, diagnostic); }
+            catch { /* A diagnostic subscriber must never disrupt plugin lifecycle work. */ }
+        }
+    }
+
+    private bool TryAcceptDiagnostic(string pluginId, out bool emitRateLimitWarning)
+    {
+        var now = DateTime.UtcNow;
+        lock (_diagnosticGate)
+        {
+            if (!_diagnosticLimits.TryGetValue(pluginId, out var limit) || now - limit.WindowStart >= TimeSpan.FromSeconds(10))
+            {
+                limit = new DiagnosticRateLimit(now);
+                _diagnosticLimits[pluginId] = limit;
+            }
+
+            if (limit.Count >= 30)
+            {
+                emitRateLimitWarning = !limit.WarningEmitted;
+                limit.WarningEmitted = true;
+                return false;
+            }
+
+            limit.Count++;
+            emitRateLimitWarning = false;
+            return true;
+        }
+    }
+
+    private sealed class DiagnosticRateLimit(DateTime windowStart)
+    {
+        public DateTime WindowStart { get; } = windowStart;
+        public int Count { get; set; }
+        public bool WarningEmitted { get; set; }
+    }
+
+    private void Accounts_Diagnostic(object? sender, string message) =>
+        PublishDiagnostic(new PluginDiagnostic("host.accounts", "error", message, DateTime.UtcNow));
 
     private async Task RespondToAccountQueryAsync(PluginConnection connection, PluginEnvelope envelope)
     {
@@ -301,6 +387,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         finally { _lifecycleGate.Release(); }
         _supervisor.Exited -= Supervisor_Exited;
         _host.MessageReceived -= Host_MessageReceived;
+        Accounts.Diagnostic -= Accounts_Diagnostic;
         _supervisor.Dispose();
         await _actions.DisposeAsync().ConfigureAwait(false);
         await _host.DisposeAsync().ConfigureAwait(false);
@@ -308,5 +395,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         _lifecycleGate.Dispose();
     }
 }
+
+internal sealed record DiagnosticLogRequest(string? Level, string? Message, DateTime? Utc);
 
 public sealed record PluginCatalogEntry(string Id, string Name, string Description, string InstallUrl);

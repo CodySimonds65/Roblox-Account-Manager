@@ -21,6 +21,9 @@ public sealed class PluginProcessSupervisor : IDisposable
         Directory.CreateDirectory(dataDirectory);
         var tokenPath = Path.Combine(dataDirectory, ".launch-token-" + Guid.NewGuid().ToString("N"));
         File.WriteAllText(tokenPath, token, new UTF8Encoding(false));
+        var tokenOwnedBySupervisor = false;
+        try
+        {
         var arguments = $"--ram-plugin --pipe \"{pipeName}\" --token-file \"{tokenPath}\" --plugin-id \"{manifest.Id}\" --data \"{dataDirectory}\"";
         var job = CreateJobObject(nint.Zero, null);
         if (job == nint.Zero)
@@ -39,10 +42,10 @@ public sealed class PluginProcessSupervisor : IDisposable
             var suspended = MediumIntegrityProcessStarter.StartSuspended(executablePath, arguments, Path.GetDirectoryName(executablePath)!, job);
             process = suspended.Process;
             lock (_gate) { _suspendedThreads[manifest.Id] = suspended.ThreadHandle; _tokenFiles[manifest.Id] = tokenPath; }
+            tokenOwnedBySupervisor = true;
         }
         catch
         {
-            try { File.Delete(tokenPath); } catch { }
             CloseHandle(job);
             throw;
         }
@@ -61,6 +64,11 @@ public sealed class PluginProcessSupervisor : IDisposable
             _jobs[manifest.Id] = job;
         }
         return process.Id;
+        }
+        finally
+        {
+            if (!tokenOwnedBySupervisor) try { File.Delete(tokenPath); } catch { }
+        }
     }
 
     public void Resume(string pluginId)
