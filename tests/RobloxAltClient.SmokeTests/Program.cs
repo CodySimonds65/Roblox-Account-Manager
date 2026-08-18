@@ -98,6 +98,16 @@ try
     var inputResultJson = JsonSerializer.Serialize(BackgroundInputResult.Failure("test", "test", (nint)7, (nint)8), PluginJson.Options);
     Require(inputResultJson.Contains("\"foregroundBefore\":7", StringComparison.Ordinal) && inputResultJson.Contains("\"foregroundAfter\":8", StringComparison.Ordinal),
         "Background input HWND wire serialization was not numeric.");
+
+    var sdkSnapshot = new RobloxAccountManager.PluginSdk.ManagedAccountSnapshot(
+        "sdk-test", "SDK test", 2, 3, (nint)0x1234, 1, 2, 300, 200, 144, false, DateTime.UtcNow, true, (nint)0x5678);
+    var sdkSnapshotJson = JsonSerializer.Serialize(sdkSnapshot, RobloxAccountManager.PluginSdk.PluginJson.Options);
+    Require(sdkSnapshotJson.Contains("\"windowHandle\":4660", StringComparison.Ordinal),
+        "Published SDK did not serialize HWNDs as numeric values.");
+    var sdkRoundTrip = JsonSerializer.Deserialize<RobloxAccountManager.PluginSdk.ManagedAccountSnapshot>(sdkSnapshotJson,
+        RobloxAccountManager.PluginSdk.PluginJson.Options);
+    Require(sdkRoundTrip?.WindowHandle == (nint)0x1234 && sdkRoundTrip.RootWindowHandle == (nint)0x5678,
+        "Published SDK did not round-trip numeric HWNDs.");
 }
 finally
 {

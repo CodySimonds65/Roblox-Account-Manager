@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Data;
+using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Win32;
@@ -46,6 +47,9 @@ public partial class MainWindow : Window
     private Point _accountDragStart;
     private bool _startupComplete;
     private bool _isClampingActivityLayout;
+    private readonly object _pluginDiagnosticQueueGate = new();
+    private readonly Queue<string> _pendingPluginDiagnostics = new();
+    private int _pluginDiagnosticDispatchPending;
 
     public MainWindow()
     {
@@ -1464,13 +1468,47 @@ public partial class MainWindow : Window
     private void Log(string message)
     {
         ActivityLog.AppendText($"{DateTime.Now:HH:mm:ss}  {message}{Environment.NewLine}");
+        const int maxActivityLogCharacters = 64_000;
+        if (ActivityLog.Text.Length > maxActivityLogCharacters)
+            ActivityLog.Text = ActivityLog.Text[^maxActivityLogCharacters..];
         ActivityLog.ScrollToEnd();
     }
 
     private void PluginRuntime_Diagnostic(object? sender, PluginRuntime.PluginDiagnostic diagnostic)
     {
-        Dispatcher.BeginInvoke(new Action(() =>
-            Log($"Plugin {diagnostic.PluginId} [{diagnostic.Level}]: {diagnostic.Message}")));
+        lock (_pluginDiagnosticQueueGate)
+        {
+            if (_pendingPluginDiagnostics.Count >= 200) _pendingPluginDiagnostics.Dequeue();
+            _pendingPluginDiagnostics.Enqueue($"Plugin {diagnostic.PluginId} [{diagnostic.Level}]: {diagnostic.Message}");
+        }
+        if (Interlocked.Exchange(ref _pluginDiagnosticDispatchPending, 1) != 0) return;
+        try
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainPluginDiagnostics));
+        }
+        catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+        {
+            Interlocked.Exchange(ref _pluginDiagnosticDispatchPending, 0);
+        }
+    }
+
+    private void DrainPluginDiagnostics()
+    {
+        string[] entries;
+        lock (_pluginDiagnosticQueueGate)
+        {
+            entries = _pendingPluginDiagnostics.ToArray();
+            _pendingPluginDiagnostics.Clear();
+        }
+        foreach (var entry in entries) Log(entry);
+        Interlocked.Exchange(ref _pluginDiagnosticDispatchPending, 0);
+        lock (_pluginDiagnosticQueueGate)
+        {
+            if (_pendingPluginDiagnostics.Count == 0 || Interlocked.Exchange(ref _pluginDiagnosticDispatchPending, 1) != 0) return;
+        }
+        try { Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(DrainPluginDiagnostics)); }
+        catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+        { Interlocked.Exchange(ref _pluginDiagnosticDispatchPending, 0); }
     }
 
     private void CopyActivity_Click(object sender, RoutedEventArgs e)
@@ -1485,6 +1523,7 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         ((App)Application.Current).PluginRuntime.Diagnostic -= PluginRuntime_Diagnostic;
+        lock (_pluginDiagnosticQueueGate) _pendingPluginDiagnostics.Clear();
         _launchCancellation?.Cancel();
         _launchCancellation?.Dispose();
         DisposeBrowser();

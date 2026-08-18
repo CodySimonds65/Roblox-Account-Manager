@@ -17,6 +17,8 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly Dictionary<string, InstalledPlugin> _installed = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _launchGates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string Token, int ProcessId, long StartTicks)> _launchTokens = new(StringComparer.Ordinal);
+    private readonly object _diagnosticGate = new();
+    private readonly Dictionary<string, DiagnosticRateLimit> _diagnosticLimits = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
 
     public PluginRuntime()
@@ -273,12 +275,50 @@ public sealed class PluginRuntime : IAsyncDisposable
                 throw new InvalidDataException("Diagnostic message length is invalid.");
             var level = request.Level?.Trim().ToLowerInvariant() ?? "info";
             if (level is not ("trace" or "info" or "warning" or "error")) level = "info";
+            if (!TryAcceptDiagnostic(connection.PluginId, out var emitRateLimitWarning))
+            {
+                if (emitRateLimitWarning)
+                    Diagnostic?.Invoke(this, new PluginDiagnostic(connection.PluginId, "warning",
+                        "Diagnostic messages are being rate-limited (maximum 30 messages per 10 seconds).", DateTime.UtcNow));
+                return;
+            }
             Diagnostic?.Invoke(this, new PluginDiagnostic(connection.PluginId, level, request.Message, request.Utc ?? DateTime.UtcNow));
         }
         catch (Exception ex) when (ex is InvalidDataException or JsonException)
         {
             Diagnostic?.Invoke(this, new PluginDiagnostic(connection.PluginId, "warning", $"Rejected diagnostic message: {ex.Message}", DateTime.UtcNow));
         }
+    }
+
+    private bool TryAcceptDiagnostic(string pluginId, out bool emitRateLimitWarning)
+    {
+        var now = DateTime.UtcNow;
+        lock (_diagnosticGate)
+        {
+            if (!_diagnosticLimits.TryGetValue(pluginId, out var limit) || now - limit.WindowStart >= TimeSpan.FromSeconds(10))
+            {
+                limit = new DiagnosticRateLimit(now);
+                _diagnosticLimits[pluginId] = limit;
+            }
+
+            if (limit.Count >= 30)
+            {
+                emitRateLimitWarning = !limit.WarningEmitted;
+                limit.WarningEmitted = true;
+                return false;
+            }
+
+            limit.Count++;
+            emitRateLimitWarning = false;
+            return true;
+        }
+    }
+
+    private sealed class DiagnosticRateLimit(DateTime windowStart)
+    {
+        public DateTime WindowStart { get; } = windowStart;
+        public int Count { get; set; }
+        public bool WarningEmitted { get; set; }
     }
 
     private void Accounts_Diagnostic(object? sender, string message) =>
