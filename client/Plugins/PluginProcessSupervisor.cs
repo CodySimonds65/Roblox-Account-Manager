@@ -28,46 +28,46 @@ public sealed class PluginProcessSupervisor : IDisposable
         var tokenOwnedBySupervisor = false;
         try
         {
-        var arguments = $"--ram-plugin --pipe \"{pipeName}\" --token-file \"{tokenPath}\" --plugin-id \"{manifest.Id}\" --data \"{dataDirectory}\"";
-        var job = CreateJobObject(nint.Zero, null);
-        if (job == nint.Zero)
-        {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "The plugin process job could not be created.");
-        }
-        if (!ConfigureKillOnClose(job))
-        {
-            var error = Marshal.GetLastWin32Error();
-            CloseHandle(job);
-            throw new Win32Exception(error, "The plugin process job could not be configured.");
-        }
-        Process process;
-        try
-        {
-            var suspended = MediumIntegrityProcessStarter.StartSuspended(executablePath, arguments, Path.GetDirectoryName(executablePath)!, job);
-            process = suspended.Process;
-            lock (_gate) { _suspendedThreads[manifest.Id] = suspended.ThreadHandle; _tokenFiles[manifest.Id] = tokenPath; }
-            tokenOwnedBySupervisor = true;
-        }
-        catch
-        {
-            CloseHandle(job);
-            throw;
-        }
-        process.EnableRaisingEvents = true;
-        process.Exited += (_, _) => OnExited(manifest.Id, process);
-        lock (_gate)
-        {
-            if (_processes.TryGetValue(manifest.Id, out var old))
+            var arguments = $"--ram-plugin --pipe \"{pipeName}\" --token-file \"{tokenPath}\" --plugin-id \"{manifest.Id}\" --data \"{dataDirectory}\"";
+            var job = CreateJobObject(nint.Zero, null);
+            if (job == nint.Zero)
             {
-                try { if (!old.HasExited) old.Kill(entireProcessTree: true); } catch { }
-                old.Dispose();
-                if (_jobs.Remove(manifest.Id, out var oldJob) && oldJob != nint.Zero) CloseHandle(oldJob);
-                if (_tokenFiles.Remove(manifest.Id, out var oldToken)) try { File.Delete(oldToken); } catch { }
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "The plugin process job could not be created.");
             }
-            _processes[manifest.Id] = process;
-            _jobs[manifest.Id] = job;
-        }
-        return process.Id;
+            if (!ConfigureKillOnClose(job))
+            {
+                var error = Marshal.GetLastWin32Error();
+                CloseHandle(job);
+                throw new Win32Exception(error, "The plugin process job could not be configured.");
+            }
+            Process process;
+            try
+            {
+                var suspended = MediumIntegrityProcessStarter.StartSuspended(executablePath, arguments, Path.GetDirectoryName(executablePath)!, job);
+                process = suspended.Process;
+                lock (_gate) { _suspendedThreads[manifest.Id] = suspended.ThreadHandle; _tokenFiles[manifest.Id] = tokenPath; }
+                tokenOwnedBySupervisor = true;
+            }
+            catch
+            {
+                CloseHandle(job);
+                throw;
+            }
+            process.EnableRaisingEvents = true;
+            process.Exited += (_, _) => OnExited(manifest.Id, process);
+            lock (_gate)
+            {
+                if (_processes.TryGetValue(manifest.Id, out var old))
+                {
+                    try { if (!old.HasExited) old.Kill(entireProcessTree: true); } catch { }
+                    old.Dispose();
+                    if (_jobs.Remove(manifest.Id, out var oldJob) && oldJob != nint.Zero) CloseHandle(oldJob);
+                    if (_tokenFiles.Remove(manifest.Id, out var oldToken)) try { File.Delete(oldToken); } catch { }
+                }
+                _processes[manifest.Id] = process;
+                _jobs[manifest.Id] = job;
+            }
+            return process.Id;
         }
         finally
         {
@@ -185,7 +185,8 @@ public sealed class PluginProcessSupervisor : IDisposable
     private const int JobObjectExtendedLimitInformation = 9;
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
 
-    [StructLayout(LayoutKind.Sequential)] private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
     {
         public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
         public IO_COUNTERS IoInfo;
@@ -195,7 +196,8 @@ public sealed class PluginProcessSupervisor : IDisposable
         public nuint PeakJobMemoryUsed;
     }
 
-    [StructLayout(LayoutKind.Sequential)] private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
     {
         public long PerProcessUserTimeLimit;
         public long PerJobUserTimeLimit;
@@ -208,7 +210,8 @@ public sealed class PluginProcessSupervisor : IDisposable
         public uint SchedulingClass;
     }
 
-    [StructLayout(LayoutKind.Sequential)] private struct IO_COUNTERS
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
     {
         public ulong ReadOperationCount; public ulong WriteOperationCount; public ulong OtherOperationCount;
         public ulong ReadTransferCount; public ulong WriteTransferCount; public ulong OtherTransferCount;

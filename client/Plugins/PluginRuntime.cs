@@ -79,21 +79,21 @@ public sealed class PluginRuntime : IAsyncDisposable
         await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-        var official = IsOfficialUrl(url);
-        if (!official && !allowUnsignedSideload)
-            throw new InvalidOperationException("This URL is not in the official catalog. Confirm the unsigned sideload warning before continuing.");
-        var catalog = official ? OfficialCatalog.First(entry => string.Equals(NormalizeBaseUrl(entry.InstallUrl), NormalizeBaseUrl(url), StringComparison.OrdinalIgnoreCase)) : null;
-        var installed = await _installer.InstallFromUrlAsync(url, requireTrustedSignature: official,
-            allowUnsignedSideload: !official && allowUnsignedSideload,
-            expectedPluginId: catalog?.Id, expectedPublisher: official ? "CodySimonds65" : null, cancellationToken).ConfigureAwait(false);
-        if (official)
-        {
-            if (catalog is null || !string.Equals(installed.Manifest.Id, catalog.Id, StringComparison.Ordinal))
-                throw new InvalidDataException("The official URL returned an unexpected plugin identity.");
-        }
-        lock (_gate) _installed[installed.Manifest.Id] = installed;
-        Changed?.Invoke(this, EventArgs.Empty);
-        return installed;
+            var official = IsOfficialUrl(url);
+            if (!official && !allowUnsignedSideload)
+                throw new InvalidOperationException("This URL is not in the official catalog. Confirm the unsigned sideload warning before continuing.");
+            var catalog = official ? OfficialCatalog.First(entry => string.Equals(NormalizeBaseUrl(entry.InstallUrl), NormalizeBaseUrl(url), StringComparison.OrdinalIgnoreCase)) : null;
+            var installed = await _installer.InstallFromUrlAsync(url, requireTrustedSignature: official,
+                allowUnsignedSideload: !official && allowUnsignedSideload,
+                expectedPluginId: catalog?.Id, expectedPublisher: official ? "CodySimonds65" : null, cancellationToken).ConfigureAwait(false);
+            if (official)
+            {
+                if (catalog is null || !string.Equals(installed.Manifest.Id, catalog.Id, StringComparison.Ordinal))
+                    throw new InvalidDataException("The official URL returned an unexpected plugin identity.");
+            }
+            lock (_gate) _installed[installed.Manifest.Id] = installed;
+            Changed?.Invoke(this, EventArgs.Empty);
+            return installed;
         }
         finally { _lifecycleGate.Release(); }
     }
@@ -214,15 +214,15 @@ public sealed class PluginRuntime : IAsyncDisposable
         await _lifecycleGate.WaitAsync().ConfigureAwait(false);
         try
         {
-        await StopCoreAsync(pluginId).ConfigureAwait(false);
-        if (!_installed.TryGetValue(pluginId, out var installed)) return;
-        var directory = Path.GetFullPath(installed.InstallDirectory);
-        var root = Path.GetFullPath(_paths.InstallRoot) + Path.DirectorySeparatorChar;
-        if (!directory.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Invalid plugin path.");
-        Directory.Delete(directory, recursive: true);
-        _consent.Remove(pluginId);
-        lock (_gate) _installed.Remove(pluginId);
-        Changed?.Invoke(this, EventArgs.Empty);
+            await StopCoreAsync(pluginId).ConfigureAwait(false);
+            if (!_installed.TryGetValue(pluginId, out var installed)) return;
+            var directory = Path.GetFullPath(installed.InstallDirectory);
+            var root = Path.GetFullPath(_paths.InstallRoot) + Path.DirectorySeparatorChar;
+            if (!directory.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Invalid plugin path.");
+            Directory.Delete(directory, recursive: true);
+            _consent.Remove(pluginId);
+            lock (_gate) _installed.Remove(pluginId);
+            Changed?.Invoke(this, EventArgs.Empty);
         }
         finally { _lifecycleGate.Release(); }
     }
