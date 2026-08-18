@@ -95,6 +95,9 @@ try
         "state-test", "State test", 1, 1, (nint)42, 0, 0, 100, 100, 96, false, DateTime.UtcNow, true), PluginJson.Options);
     Require(snapshotJson.Contains("\"windowHandle\":42", StringComparison.Ordinal),
         "Managed-account HWND wire serialization was not numeric.");
+    var inputResultJson = JsonSerializer.Serialize(BackgroundInputResult.Failure("test", "test", (nint)7, (nint)8), PluginJson.Options);
+    Require(inputResultJson.Contains("\"foregroundBefore\":7", StringComparison.Ordinal) && inputResultJson.Contains("\"foregroundAfter\":8", StringComparison.Ordinal),
+        "Background input HWND wire serialization was not numeric.");
 }
 finally
 {

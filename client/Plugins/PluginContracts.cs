@@ -148,7 +148,7 @@ public sealed class PluginJson
     {
         WriteIndented = false,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters = { new JsonStringEnumConverter(), new NativeIntJsonConverter(), new ManagedAccountSnapshotJsonConverter() }
+        Converters = { new JsonStringEnumConverter(), new NativeIntJsonConverter(), new ManagedAccountSnapshotJsonConverter(), new BackgroundInputResultJsonConverter() }
     };
 }
 
@@ -201,6 +201,34 @@ internal sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<Manage
         writer.WriteString("lastActivityUtc", value.LastActivityUtc);
         writer.WriteBoolean("isRunning", value.IsRunning);
         writer.WriteNumber("rootWindowHandle", value.RootWindowHandle.ToInt64());
+        writer.WriteEndObject();
+    }
+}
+
+internal sealed class BackgroundInputResultJsonConverter : JsonConverter<BackgroundInputResult>
+{
+    public override BackgroundInputResult Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        var value = document.RootElement;
+        return new BackgroundInputResult(
+            value.GetProperty("accepted").GetBoolean(),
+            value.GetProperty("code").GetString() ?? string.Empty,
+            value.GetProperty("message").GetString() ?? string.Empty,
+            value.GetProperty("postedCount").GetInt32(),
+            (nint)value.GetProperty("foregroundBefore").GetInt64(),
+            (nint)value.GetProperty("foregroundAfter").GetInt64());
+    }
+
+    public override void Write(Utf8JsonWriter writer, BackgroundInputResult value, JsonSerializerOptions options)
+    {
+        writer.WriteStartObject();
+        writer.WriteBoolean("accepted", value.Accepted);
+        writer.WriteString("code", value.Code);
+        writer.WriteString("message", value.Message);
+        writer.WriteNumber("postedCount", value.PostedCount);
+        writer.WriteNumber("foregroundBefore", value.ForegroundBefore.ToInt64());
+        writer.WriteNumber("foregroundAfter", value.ForegroundAfter.ToInt64());
         writer.WriteEndObject();
     }
 }
