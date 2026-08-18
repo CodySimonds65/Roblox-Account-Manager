@@ -1,11 +1,15 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
+using Microsoft.Win32.SafeHandles;
 
 namespace RobloxAltClient.Plugins;
 
@@ -31,6 +35,65 @@ public sealed class PluginHostService : IAsyncDisposable
     {
         _acceptLoop = Task.Run(AcceptLoopAsync);
         _heartbeatLoop = Task.Run(HeartbeatLoopAsync);
+    }
+
+    internal static RawSecurityDescriptor CreatePipeSecurityDescriptor() => new(PipeSecuritySddl);
+
+    private NamedPipeServerStream CreateHostPipe()
+    {
+        var descriptor = CreatePipeSecurityDescriptor();
+        var binaryForm = new byte[descriptor.BinaryLength];
+        descriptor.GetBinaryForm(binaryForm, 0);
+        var descriptorPointer = Marshal.AllocHGlobal(binaryForm.Length);
+        try
+        {
+            Marshal.Copy(binaryForm, 0, descriptorPointer, binaryForm.Length);
+            var attributes = new SecurityAttributes
+            {
+                Length = Marshal.SizeOf<SecurityAttributes>(),
+                SecurityDescriptor = descriptorPointer,
+                InheritHandle = 0
+            };
+            var attributesPointer = Marshal.AllocHGlobal(Marshal.SizeOf<SecurityAttributes>());
+            try
+            {
+                Marshal.StructureToPtr(attributes, attributesPointer, false);
+                var handle = CreateNamedPipeW(@"\\.\pipe\" + PipeName,
+                    PipeAccessDuplex | FileFlagOverlapped,
+                    PipeTypeByte | PipeReadmodeByte | PipeWait,
+                    8, 4096, 4096, 0, attributesPointer);
+                if (handle == nint.Zero)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "The plugin host pipe could not be created.");
+                return new NamedPipeServerStream(PipeDirection.InOut, isAsync: true, isConnected: false,
+                    new SafePipeHandle(handle, ownsHandle: true));
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(attributesPointer);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(descriptorPointer);
+        }
+    }
+
+    internal const string PipeSecuritySddl = "D:(A;;GRGW;;;WD)S:(ML;;NWNX;;;ME)";
+    private const uint PipeAccessDuplex = 0x3;
+    private const uint FileFlagOverlapped = 0x40000000;
+    private const uint PipeTypeByte = 0x0;
+    private const uint PipeReadmodeByte = 0x0;
+    private const uint PipeWait = 0x0;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern nint CreateNamedPipeW(string pipeName, uint openMode, uint pipeMode, uint maxInstances, uint outBufferSize, uint inBufferSize, uint defaultTimeOut, nint securityAttributes);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        public int Length;
+        public nint SecurityDescriptor;
+        public int InheritHandle;
     }
 
     public string CreateLaunchToken(string pluginId, string manifestHash, IReadOnlyCollection<string> capabilities)
@@ -67,12 +130,7 @@ public sealed class PluginHostService : IAsyncDisposable
             NamedPipeServerStream? pipe = null;
             try
             {
-                pipe = new NamedPipeServerStream(
-                    PipeName,
-                    PipeDirection.InOut,
-                    8,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                pipe = CreateHostPipe();
                 await pipe.WaitForConnectionAsync(_shutdown.Token).ConfigureAwait(false);
                 if (!await _unauthenticatedLimit.WaitAsync(TimeSpan.Zero, _shutdown.Token).ConfigureAwait(false))
                 {
@@ -110,6 +168,11 @@ public sealed class PluginHostService : IAsyncDisposable
         var registered = false;
         try
         {
+            if (!TryGetClientProcessId(pipe, out var connectingProcessId) ||
+                !_expected.Values.Any(expected => expected.ProcessId == connectingProcessId))
+            {
+                return;
+            }
             using var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
             handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(5));
             var handshakeEnvelope = await PluginWire.ReadAsync(pipe, handshakeTimeout.Token).ConfigureAwait(false);

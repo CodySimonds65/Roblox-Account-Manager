@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 
 namespace RobloxAltClient.Plugins;
@@ -19,8 +21,10 @@ public sealed class PluginProcessSupervisor : IDisposable
     {
         if (!File.Exists(executablePath)) throw new FileNotFoundException("Plugin entrypoint is missing.", executablePath);
         Directory.CreateDirectory(dataDirectory);
+        MediumIntegrityLabel.Apply(dataDirectory, isDirectory: true);
         var tokenPath = Path.Combine(dataDirectory, ".launch-token-" + Guid.NewGuid().ToString("N"));
         File.WriteAllText(tokenPath, token, new UTF8Encoding(false));
+        MediumIntegrityLabel.Apply(tokenPath, isDirectory: false);
         var tokenOwnedBySupervisor = false;
         try
         {
@@ -289,4 +293,149 @@ internal static class MediumIntegrityProcessStarter
     private enum TOKEN_TYPE { TokenPrimary = 1, TokenImpersonation = 2 }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct STARTUPINFO { public int cb; public string? lpReserved; public string? lpDesktop; public string? lpTitle; public int dwX; public int dwY; public int dwXSize; public int dwYSize; public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute; public int dwFlags; public short wShowWindow; public short cbReserved2; public nint lpReserved2; public nint hStdInput; public nint hStdOutput; public nint hStdError; }
     [StructLayout(LayoutKind.Sequential)] private struct PROCESS_INFORMATION { public nint ProcessHandle; public nint ThreadHandle; public uint ProcessId; public uint ThreadId; }
+}
+
+internal static class MediumIntegrityLabel
+{
+    private const string LabelSddl = "S:(ML;;NWNX;;;ME)";
+    private const byte MandatoryLabelAceType = 0x11;
+    private static int _securityPrivilegeEnabled;
+
+    public static void Apply(string path, bool isDirectory)
+    {
+        try
+        {
+            if (!TryEnableSecurityPrivilege()) return;
+            FileSystemSecurity accessControl = isDirectory
+                ? new DirectoryInfo(path).GetAccessControl()
+                : new FileInfo(path).GetAccessControl();
+            var labeledSd = AddMediumIntegrityLabel(accessControl.GetSecurityDescriptorBinaryForm());
+            if (!SetFileSecurityW(path, DaclSecurityInformation | SaclSecurityInformation, labeledSd))
+            {
+                // Labeling is best-effort; the token handshake remains the security
+                // boundary. An unlabeled path still works for today's plugins.
+            }
+        }
+        catch
+        {
+            // Best-effort; see Apply. A failed label must not block the launch.
+        }
+    }
+
+    internal static byte[] AddMediumIntegrityLabel(byte[] existingSecurityDescriptorBinaryForm)
+    {
+        var descriptor = new RawSecurityDescriptor(existingSecurityDescriptorBinaryForm, 0);
+        if (descriptor.SystemAcl is not null)
+            foreach (var ace in descriptor.SystemAcl)
+                if ((byte)ace.AceType == MandatoryLabelAceType)
+                    return existingSecurityDescriptorBinaryForm;
+        var labelAce = new RawSecurityDescriptor(LabelSddl).SystemAcl![0];
+        if (descriptor.SystemAcl is null)
+        {
+            descriptor.SystemAcl = new RawAcl(GenericAcl.AclRevision, 1);
+            descriptor.SystemAcl.InsertAce(0, labelAce);
+        }
+        else
+        {
+            descriptor.SystemAcl.InsertAce(descriptor.SystemAcl.Count, labelAce);
+        }
+        return SerializeDescriptor(descriptor);
+    }
+
+    private static byte[] SerializeDescriptor(RawSecurityDescriptor descriptor)
+    {
+        var ownerBytes = descriptor.Owner is null ? null : GetBinary(descriptor.Owner);
+        var groupBytes = descriptor.Group is null ? null : GetBinary(descriptor.Group);
+        var saclBytes = descriptor.SystemAcl is null ? null : GetBinary(descriptor.SystemAcl);
+        var daclBytes = descriptor.DiscretionaryAcl is null ? null : GetBinary(descriptor.DiscretionaryAcl);
+        var buffer = new byte[20 + (ownerBytes?.Length ?? 0) + (groupBytes?.Length ?? 0) + (saclBytes?.Length ?? 0) + (daclBytes?.Length ?? 0)];
+        buffer[0] = 1;
+        WriteUInt16(buffer, 2, (ushort)((ushort)descriptor.ControlFlags | (ushort)ControlFlags.SystemAclPresent));
+        var offset = 20;
+        if (ownerBytes is not null) { WriteInt32(buffer, 4, offset); ownerBytes.CopyTo(buffer, offset); offset += ownerBytes.Length; }
+        if (groupBytes is not null) { WriteInt32(buffer, 8, offset); groupBytes.CopyTo(buffer, offset); offset += groupBytes.Length; }
+        if (saclBytes is not null) { WriteInt32(buffer, 12, offset); saclBytes.CopyTo(buffer, offset); offset += saclBytes.Length; }
+        if (daclBytes is not null) { WriteInt32(buffer, 16, offset); daclBytes.CopyTo(buffer, offset); }
+        return buffer;
+    }
+
+    private static void WriteUInt16(byte[] buffer, int offset, ushort value) =>
+        BitConverter.GetBytes(value).CopyTo(buffer, offset);
+
+    private static void WriteInt32(byte[] buffer, int offset, int value) =>
+        BitConverter.GetBytes(value).CopyTo(buffer, offset);
+
+    private static byte[] GetBinary(SecurityIdentifier sid)
+    {
+        var bytes = new byte[sid.BinaryLength];
+        sid.GetBinaryForm(bytes, 0);
+        return bytes;
+    }
+
+    private static byte[] GetBinary(GenericAcl acl)
+    {
+        var bytes = new byte[acl.BinaryLength];
+        acl.GetBinaryForm(bytes, 0);
+        return bytes;
+    }
+
+    private static bool TryEnableSecurityPrivilege()
+    {
+        if (Volatile.Read(ref _securityPrivilegeEnabled) == 1) return true;
+        try
+        {
+            if (!OpenProcessToken(GetCurrentProcess(), TokenAdjustPrivileges | TokenQuery, out var tokenHandle)) return false;
+            try
+            {
+                if (!LookupPrivilegeValue(null, SeSecurityPrivilegeName, out var luid)) return false;
+                var privileges = new TokenPrivileges { PrivilegeCount = 1, Luid = luid, Attributes = SePrivilegeEnabled };
+                if (!AdjustTokenPrivileges(tokenHandle, false, ref privileges, 0, nint.Zero, nint.Zero)) return false;
+                if (Marshal.GetLastWin32Error() == (int)WinError.NotAllAssigned) return false;
+                Volatile.Write(ref _securityPrivilegeEnabled, 1);
+                return true;
+            }
+            finally
+            {
+                CloseHandle(tokenHandle);
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private const string SeSecurityPrivilegeName = "SeSecurityPrivilege";
+    private const uint TokenAdjustPrivileges = 0x20;
+    private const uint TokenQuery = 0x8;
+    private const uint SePrivilegeEnabled = 0x2;
+    private const uint DaclSecurityInformation = 0x4;
+    private const uint SaclSecurityInformation = 0x8;
+
+    private enum WinError
+    {
+        NotAllAssigned = 0x514
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Luid
+    {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenPrivileges
+    {
+        public uint PrivilegeCount;
+        public Luid Luid;
+        public uint Attributes;
+    }
+
+    [DllImport("kernel32.dll")] private static extern nint GetCurrentProcess();
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(nint processHandle, uint desiredAccess, out nint tokenHandle);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool LookupPrivilegeValue(string? systemName, string name, out Luid luid);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool AdjustTokenPrivileges(nint tokenHandle, bool disableAllPrivileges, ref TokenPrivileges newState, uint bufferLength, nint previousState, nint returnLength);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool SetFileSecurityW(string fileName, uint securityInformation, byte[] securityDescriptor);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(nint handle);
 }
