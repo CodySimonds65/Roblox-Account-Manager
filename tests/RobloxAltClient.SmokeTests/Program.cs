@@ -966,6 +966,98 @@ finally
 
 Console.WriteLine("Plugin consent persistence smoke tests passed.");
 
+var inputPostRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-inputpost-" + Guid.NewGuid().ToString("N"));
+try
+{
+    await using var inputRuntime = new PluginRuntime(inputPostRoot);
+    var inputHost = inputRuntime.Host;
+    var inputPluginId = "io.github.codysimonds65.ram.macros";
+    var inputManifestHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("loopback-input-manifest"))).ToLowerInvariant();
+    var inputToken = inputHost.CreateLaunchToken(inputPluginId, inputManifestHash, [PluginCapabilities.HostInputBackground]);
+    var inputStartTicks = Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks;
+    inputHost.BindLaunchProcess(inputToken, Environment.ProcessId, inputStartTicks);
+
+    await using var inputPipe = new NamedPipeClientStream(".", inputHost.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+    await inputPipe.ConnectAsync(5000);
+
+    await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("plugin.hello", Guid.NewGuid().ToString("N"),
+        JsonSerializer.SerializeToElement(new PluginHandshake(inputPluginId, inputToken, PluginProtocol.CurrentMajor,
+            PluginProtocol.CurrentMinor, inputManifestHash, [PluginCapabilities.HostInputBackground],
+            Environment.ProcessId, inputStartTicks), PluginJson.Options)));
+    var inputAccepted = await ReadEnvelopeUntilAsync(inputPipe, "host.accept", TimeSpan.FromSeconds(5));
+    Require(inputAccepted is not null, "The plugin host did not accept the input-post loopback handshake.");
+
+    var inputAccountId = "input-" + Guid.NewGuid().ToString("N");
+    // The smoke-test process is a console application whose windows belong to the
+    // console host, so its registered account usually carries no window handle and
+    // the broker answers "unavailable" before any posting. The assertions below
+    // accept that path and still verify request-id correlation and validation order.
+    inputRuntime.Accounts.Register(new AccountProfile { Id = inputAccountId, Label = "Input post" }, Process.GetCurrentProcess());
+
+    var inputPostRequestId = "input-post-" + Guid.NewGuid().ToString("N");
+    await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("input.post", inputPostRequestId,
+        JsonSerializer.SerializeToElement(new
+        {
+            accountId = inputAccountId,
+            events = new[]
+            {
+                new PluginInputEvent(Kind: PluginInputKind.KeyDown, VirtualKey: 0x41, ScanCode: 0x1E, Extended: false, Button: 0, WheelDelta: 0, NormalizedX: 0, NormalizedY: 0, OffsetMicroseconds: 0),
+                new PluginInputEvent(Kind: PluginInputKind.KeyUp, VirtualKey: 0x41, ScanCode: 0x1E, Extended: false, Button: 0, WheelDelta: 0, NormalizedX: 0, NormalizedY: 0, OffsetMicroseconds: 300_000)
+            }
+        }, PluginJson.Options)));
+    var inputPosted = await ReadEnvelopeUntilAsync(inputPipe, "input.result", TimeSpan.FromSeconds(5));
+    Require(inputPosted is not null, "The plugin host did not answer the valid input.post.");
+    Require(inputPosted!.RequestId == inputPostRequestId, "The input.post response lost the request id.");
+    var inputResult = inputPosted.Payload.Deserialize<BackgroundInputResult>(PluginJson.Options);
+    Require(inputResult is not null, "The input.post response did not carry an input.result payload.");
+    var acceptedInputResult = inputResult!;
+    Require(acceptedInputResult.Accepted || acceptedInputResult.Code is "unavailable" or "stale-window",
+        $"The valid input.post was rejected with an unexpected code: {acceptedInputResult.Code}");
+    if (acceptedInputResult.Accepted)
+        Require(acceptedInputResult.PostedCount == 2, "The broker did not post both paced key events.");
+
+    var invalidPostRequestId = "input-post-invalid-" + Guid.NewGuid().ToString("N");
+    await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("input.post", invalidPostRequestId,
+        JsonSerializer.SerializeToElement(new
+        {
+            accountId = inputAccountId,
+            events = new[]
+            {
+                new PluginInputEvent(Kind: PluginInputKind.KeyDown, VirtualKey: 0x41, ScanCode: 0x1E, Extended: false, Button: 0, WheelDelta: 0, NormalizedX: 0, NormalizedY: 0, OffsetMicroseconds: 200_000),
+                new PluginInputEvent(Kind: PluginInputKind.KeyUp, VirtualKey: 0x41, ScanCode: 0x1E, Extended: false, Button: 0, WheelDelta: 0, NormalizedX: 0, NormalizedY: 0, OffsetMicroseconds: 0)
+            }
+        }, PluginJson.Options)));
+    var invalidPosted = await ReadEnvelopeUntilAsync(inputPipe, "input.result", TimeSpan.FromSeconds(5));
+    Require(invalidPosted is not null, "The plugin host did not answer the invalid input.post.");
+    Require(invalidPosted!.RequestId == invalidPostRequestId, "The invalid input.post response lost the request id.");
+    var invalidResult = invalidPosted.Payload.Deserialize<BackgroundInputResult>(PluginJson.Options);
+    Require(invalidResult?.Code == "invalid-request",
+        "The input.post with descending offsets was not rejected before posting.");
+
+    var unknownPostRequestId = "input-post-unknown-" + Guid.NewGuid().ToString("N");
+    await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("input.post", unknownPostRequestId,
+        JsonSerializer.SerializeToElement(new
+        {
+            accountId = "input-unknown-" + Guid.NewGuid().ToString("N"),
+            events = new[]
+            {
+                new PluginInputEvent(Kind: PluginInputKind.KeyDown, VirtualKey: 0x41, ScanCode: 0x1E, Extended: false, Button: 0, WheelDelta: 0, NormalizedX: 0, NormalizedY: 0, OffsetMicroseconds: 0)
+            }
+        }, PluginJson.Options)));
+    var unknownPosted = await ReadEnvelopeUntilAsync(inputPipe, "input.result", TimeSpan.FromSeconds(5));
+    Require(unknownPosted is not null, "The plugin host did not answer the unknown-account input.post.");
+    Require(unknownPosted!.RequestId == unknownPostRequestId, "The unknown-account input.post response lost the request id.");
+    var unknownResult = unknownPosted.Payload.Deserialize<BackgroundInputResult>(PluginJson.Options);
+    Require(unknownResult?.Code == "unknown-account",
+        "The input.post for an unknown account was not rejected.");
+}
+finally
+{
+    if (Directory.Exists(inputPostRoot)) Directory.Delete(inputPostRoot, recursive: true);
+}
+
+Console.WriteLine("Plugin input post smoke tests passed.");
+
 static SecurityIdentifier? GetMandatoryLabelSid(GenericAce ace)
 {
     var binary = new byte[ace.BinaryLength];

@@ -64,11 +64,11 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     public sealed record PluginDiagnostic(string PluginId, string Level, string Message, DateTime Utc);
 
-    private Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken)
+    private async Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken)
     {
         var account = Accounts.Snapshot().FirstOrDefault(snapshot => string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
-        if (account is null) return Task.FromResult(BackgroundInputResult.Failure("unknown-account", "The managed account is not running.", nint.Zero, nint.Zero));
-        return Task.FromResult(_inputBroker.Post(account, events));
+        if (account is null) return BackgroundInputResult.Failure("unknown-account", "The managed account is not running.", nint.Zero, nint.Zero);
+        return await _inputBroker.PostAsync(account, events, cancellationToken).ConfigureAwait(false);
     }
 
     public bool IsOfficialUrl(string url) => OfficialCatalog.Any(entry =>

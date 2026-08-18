@@ -24,6 +24,15 @@ public sealed class FocusSafeInputBroker
         IReadOnlyList<PluginInputEvent> events,
         Func<nint, bool>? windowValidator = null)
     {
+        return PostAsync(account, events, CancellationToken.None, windowValidator).GetAwaiter().GetResult();
+    }
+
+    public async Task<BackgroundInputResult> PostAsync(
+        ManagedAccountSnapshot account,
+        IReadOnlyList<PluginInputEvent> events,
+        CancellationToken cancellationToken,
+        Func<nint, bool>? windowValidator = null)
+    {
         if (account.WindowHandle == nint.Zero || account.IsMinimized || events.Count == 0)
         {
             return BackgroundInputResult.Failure("unavailable", "The target window is unavailable or minimized.", GetForegroundWindow(), GetForegroundWindow());
@@ -37,8 +46,20 @@ public sealed class FocusSafeInputBroker
 
         var foregroundBefore = GetForegroundWindow();
         var posted = 0;
+        long previousOffset = 0;
         foreach (var input in events.OrderBy(item => item.OffsetMicroseconds))
         {
+            // Macro timing must be honored: pace from time zero to the first event's
+            // offset, then from event to event. 1 microsecond equals 10 ticks.
+            var gapMicroseconds = input.OffsetMicroseconds - previousOffset;
+            if (gapMicroseconds > 0)
+            {
+                await Task.Delay(TimeSpan.FromTicks(gapMicroseconds * 10), cancellationToken).ConfigureAwait(false);
+            }
+            previousOffset = input.OffsetMicroseconds;
+
+            cancellationToken.ThrowIfCancellationRequested();
+
             // Revalidate immediately before every post: HWND values are reusable and
             // a Roblox process can recreate its render window while a macro is running.
             if (!ValidateWindowIdentity(account, account.WindowHandle))
