@@ -11,12 +11,15 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <TextBlock Text="Account label" FontWeight="SemiBold" Margin="0,0,0,8" />
         <TextBox x:Name="LabelBox" Grid.Row="1" />
         <TextBlock Grid.Row="2" Text="Group (optional)" FontWeight="SemiBold" Margin="0,12,0,8" />
         <TextBox x:Name="GroupBox" Grid.Row="3" />
-        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+        <CheckBox x:Name="EmbedBox" Grid.Row="4" Content="Embed this client in the Managed Clients tabs"
+                  Foreground="{StaticResource TextBrush}" Margin="0,12,0,0" />
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
             <Button Content="Cancel" Width="90" Margin="0,12,8,0" Click="Cancel_Click" Background="#3C4054" />
             <Button x:Name="SaveButton" Content="Save" Width="90" Margin="0,12,0,0" Click="Add_Click" />
         </StackPanel>

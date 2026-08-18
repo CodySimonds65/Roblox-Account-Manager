@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Managed Clients" Height="620" Width="980" MinHeight="320" MinWidth="560"
         Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
-        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" SizeChanged="Window_SizeChanged">
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -44,6 +44,11 @@
                         </Setter>
                     </Style>
                 </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" />
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
             </ListBox>
             <TextBlock Grid.Column="1" x:Name="HintText" Text="Clients are embedded; use the tabs to switch, and play macros while a tab is selected." 
                        Foreground="{StaticResource MutedTextBrush}" FontSize="11" VerticalAlignment="Center" Margin="10,0,2,0" />
