@@ -21,6 +21,7 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly Dictionary<string, DiagnosticRateLimit> _diagnosticLimits = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly ConcurrentDictionary<string, (PluginConnection Connection, string? AccountId)> _accountEventSubscribers = new(StringComparer.Ordinal);
+    private readonly GlobalHotkeyMonitor _hotkeyMonitor = new();
     private int _queuedAccountUpdates;
     private const int MaxQueuedAccountUpdates = 64;
 
@@ -38,6 +39,9 @@ public sealed class PluginRuntime : IAsyncDisposable
         _host.MessageReceived += Host_MessageReceived;
         _host.Disconnected += Host_Disconnected;
         _host.InputDispatcher = DispatchInputAsync;
+        _hotkeyMonitor.KeyDown += (_, vk) => _host.BroadcastHotkey("hotkey.pressed", vk);
+        _hotkeyMonitor.KeyUp += (_, vk) => _host.BroadcastHotkey("hotkey.released", vk);
+        _hotkeyMonitor.Start();
         Accounts.Diagnostic += Accounts_Diagnostic;
         Accounts.AccountChanged += Accounts_AccountChanged;
         Accounts.AccountExited += Accounts_AccountExited;
@@ -481,6 +485,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         Accounts.AccountChanged -= Accounts_AccountChanged;
         Accounts.AccountExited -= Accounts_AccountExited;
         _supervisor.Dispose();
+        _hotkeyMonitor.Dispose();
         await _actions.DisposeAsync().ConfigureAwait(false);
         await _host.DisposeAsync().ConfigureAwait(false);
         Accounts.Dispose();

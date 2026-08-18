@@ -1050,6 +1050,16 @@ try
     var unknownResult = unknownPosted.Payload.Deserialize<BackgroundInputResult>(PluginJson.Options);
     Require(unknownResult?.Code == "unknown-account",
         "The input.post for an unknown account was not rejected.");
+
+    var subscribeRequestId = "hotkey-subscribe-" + Guid.NewGuid().ToString("N");
+    await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("hotkey.subscribe", subscribeRequestId,
+        JsonSerializer.SerializeToElement(new { virtualKeys = new[] { 0x78, 0x77 } }, PluginJson.Options)));
+    await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("hotkey.subscribe", subscribeRequestId + "-invalid",
+        JsonSerializer.SerializeToElement(new { virtualKeys = new[] { 0, 999 } }, PluginJson.Options)));
+    var subscribeRejected = await ReadEnvelopeUntilAsync(inputPipe, "host.reject", TimeSpan.FromSeconds(5));
+    Require(subscribeRejected is not null, "The plugin host did not reject an invalid hotkey subscription.");
+    var rejectReason = subscribeRejected!.Payload.TryGetProperty("reason", out var reasonElement) ? reasonElement.GetString() : null;
+    Require(rejectReason == "invalid-request", "The invalid hotkey subscription was not rejected as invalid-request.");
 }
 finally
 {
