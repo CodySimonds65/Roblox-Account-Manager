@@ -241,6 +241,8 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     private void Supervisor_Exited(object? sender, (string PluginId, int ProcessId, long ProcessStartTimeUtcTicks) e)
     {
+        Diagnostic?.Invoke(this, new PluginDiagnostic(e.PluginId, "error",
+            $"Plugin process exited (PID {e.ProcessId}, start {e.ProcessStartTimeUtcTicks}).", DateTime.UtcNow));
         if (_launchTokens.TryGetValue(e.PluginId, out var launch) && launch.ProcessId == e.ProcessId &&
             (e.ProcessStartTimeUtcTicks == 0 || launch.StartTicks == e.ProcessStartTimeUtcTicks) &&
             _launchTokens.TryRemove(new KeyValuePair<string, (string Token, int ProcessId, long StartTicks)>(e.PluginId, launch)))
