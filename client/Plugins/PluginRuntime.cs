@@ -111,6 +111,8 @@ public sealed class PluginRuntime : IAsyncDisposable
         lock (_gate)
         {
             if (!_installed.TryGetValue(pluginId, out installed!)) return false;
+            if (installed.IsRunning || _launchTokens.ContainsKey(pluginId))
+                throw new InvalidOperationException("This plugin is already running.");
         }
 
         var consent = _consent.Get(pluginId, installed.Manifest.AutostartDefault);
@@ -243,7 +245,7 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     private void Supervisor_Exited(object? sender, (string PluginId, int ProcessId, long ProcessStartTimeUtcTicks) e)
     {
-        Diagnostic?.Invoke(this, new PluginDiagnostic(e.PluginId, "error",
+        PublishDiagnostic(new PluginDiagnostic(e.PluginId, "error",
             $"Plugin process exited (PID {e.ProcessId}, start {e.ProcessStartTimeUtcTicks}).", DateTime.UtcNow));
         if (_launchTokens.TryGetValue(e.PluginId, out var launch) && launch.ProcessId == e.ProcessId &&
             (e.ProcessStartTimeUtcTicks == 0 || launch.StartTicks == e.ProcessStartTimeUtcTicks) &&
@@ -278,15 +280,30 @@ public sealed class PluginRuntime : IAsyncDisposable
             if (!TryAcceptDiagnostic(connection.PluginId, out var emitRateLimitWarning))
             {
                 if (emitRateLimitWarning)
-                    Diagnostic?.Invoke(this, new PluginDiagnostic(connection.PluginId, "warning",
+                    PublishDiagnostic(new PluginDiagnostic(connection.PluginId, "warning",
                         "Diagnostic messages are being rate-limited (maximum 30 messages per 10 seconds).", DateTime.UtcNow));
                 return;
             }
-            Diagnostic?.Invoke(this, new PluginDiagnostic(connection.PluginId, level, request.Message, request.Utc ?? DateTime.UtcNow));
+            PublishDiagnostic(new PluginDiagnostic(connection.PluginId, level, request.Message, request.Utc ?? DateTime.UtcNow));
         }
         catch (Exception ex) when (ex is InvalidDataException or JsonException)
         {
-            Diagnostic?.Invoke(this, new PluginDiagnostic(connection.PluginId, "warning", $"Rejected diagnostic message: {ex.Message}", DateTime.UtcNow));
+            if (TryAcceptDiagnostic(connection.PluginId, out var emitRateLimitWarning))
+                PublishDiagnostic(new PluginDiagnostic(connection.PluginId, "warning", $"Rejected diagnostic message: {ex.Message}", DateTime.UtcNow));
+            else if (emitRateLimitWarning)
+                PublishDiagnostic(new PluginDiagnostic(connection.PluginId, "warning",
+                    "Diagnostic messages are being rate-limited (maximum 30 messages per 10 seconds).", DateTime.UtcNow));
+        }
+    }
+
+    private void PublishDiagnostic(PluginDiagnostic diagnostic)
+    {
+        var handlers = Diagnostic?.GetInvocationList();
+        if (handlers is null) return;
+        foreach (EventHandler<PluginDiagnostic> handler in handlers)
+        {
+            try { handler(this, diagnostic); }
+            catch { /* A diagnostic subscriber must never disrupt plugin lifecycle work. */ }
         }
     }
 
@@ -322,7 +339,7 @@ public sealed class PluginRuntime : IAsyncDisposable
     }
 
     private void Accounts_Diagnostic(object? sender, string message) =>
-        Diagnostic?.Invoke(this, new PluginDiagnostic("host.accounts", "error", message, DateTime.UtcNow));
+        PublishDiagnostic(new PluginDiagnostic("host.accounts", "error", message, DateTime.UtcNow));
 
     private async Task RespondToAccountQueryAsync(PluginConnection connection, PluginEnvelope envelope)
     {
