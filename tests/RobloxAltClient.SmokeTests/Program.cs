@@ -5,7 +5,9 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.IO.Pipes;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text.Json;
 
 static void Require(bool condition, string message)
@@ -893,3 +895,57 @@ finally
 }
 
 Console.WriteLine("Plugin account-event push smoke tests passed.");
+
+var pipeDescriptor = PluginHostService.CreatePipeSecurityDescriptor();
+var everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+var mediumSid = new SecurityIdentifier("S-1-16-8192");
+Require(pipeDescriptor.DiscretionaryAcl?.Count == 1, "The plugin pipe DACL must grant exactly one ACE.");
+var pipeDaclAce = pipeDescriptor.DiscretionaryAcl![0] as CommonAce
+    ?? throw new InvalidOperationException("The plugin pipe DACL ACE is not an allow ACE.");
+Require(pipeDaclAce.AceQualifier == AceQualifier.AccessAllowed && pipeDaclAce.SecurityIdentifier.Equals(everyoneSid),
+    "The plugin pipe DACL must allow Everyone.");
+Require((pipeDaclAce.AccessMask & (uint)0xC0000000) == (uint)0xC0000000,
+    "The plugin pipe DACL must grant generic read and write.");
+Require(pipeDescriptor.SystemAcl?.Count == 1, "The plugin pipe SACL must carry exactly one ACE.");
+var pipeLabelAce = pipeDescriptor.SystemAcl![0];
+Require((byte)pipeLabelAce.AceType == 0x11, "The plugin pipe SACL must carry a mandatory label ACE.");
+Require(GetMandatoryLabelSid(pipeLabelAce)?.Equals(mediumSid) == true,
+    "The plugin pipe mandatory label must be medium integrity.");
+
+var labelTestRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-label-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var labelDirectory = Path.Combine(labelTestRoot, "data");
+    Directory.CreateDirectory(labelDirectory);
+    var labelFile = Path.Combine(labelDirectory, ".launch-token-test");
+    File.WriteAllText(labelFile, "token");
+    var originalFileSd = new FileInfo(labelFile).GetAccessControl().GetSecurityDescriptorBinaryForm();
+    var labeledFileSd = MediumIntegrityLabel.AddMediumIntegrityLabel(originalFileSd);
+    var fileDescriptor = new RawSecurityDescriptor(labeledFileSd, 0);
+    Require(GetMandatoryLabelSid(fileDescriptor.SystemAcl?[0] ?? throw new InvalidOperationException("The labeled file has no SACL."))?.Equals(mediumSid) == true,
+        "The launch-token file did not receive the medium integrity label.");
+    Require(fileDescriptor.DiscretionaryAcl?.Count == new RawSecurityDescriptor(originalFileSd, 0).DiscretionaryAcl?.Count,
+        "Labeling must not alter the file DACL.");
+    Require(System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(labeledFileSd, MediumIntegrityLabel.AddMediumIntegrityLabel(labeledFileSd)),
+        "Reapplying the medium integrity label duplicated the label ACE.");
+    var originalDirectorySd = new DirectoryInfo(labelDirectory).GetAccessControl().GetSecurityDescriptorBinaryForm();
+    var labeledDirectorySd = MediumIntegrityLabel.AddMediumIntegrityLabel(originalDirectorySd);
+    var directoryDescriptor = new RawSecurityDescriptor(labeledDirectorySd, 0);
+    Require(GetMandatoryLabelSid(directoryDescriptor.SystemAcl?[0] ?? throw new InvalidOperationException("The labeled directory has no SACL."))?.Equals(mediumSid) == true,
+        "The plugin data directory did not receive the medium integrity label.");
+    MediumIntegrityLabel.Apply(labelDirectory, isDirectory: true);
+    MediumIntegrityLabel.Apply(labelFile, isDirectory: false);
+}
+finally
+{
+    if (Directory.Exists(labelTestRoot)) Directory.Delete(labelTestRoot, recursive: true);
+}
+
+Console.WriteLine("Plugin host security smoke tests passed.");
+
+static SecurityIdentifier? GetMandatoryLabelSid(GenericAce ace)
+{
+    var binary = new byte[ace.BinaryLength];
+    ace.GetBinaryForm(binary, 0);
+    return new SecurityIdentifier(binary, 8);
+}
