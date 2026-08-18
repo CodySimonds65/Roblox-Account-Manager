@@ -5,7 +5,7 @@ namespace RobloxAltClient.Plugins;
 public sealed record PluginConsentRecord(
     string PluginId,
     bool Autostart,
-    IReadOnlySet<string> GrantedCapabilities,
+    HashSet<string> GrantedCapabilities,
     DateTime UpdatedUtc);
 
 public sealed class PluginConsentStore
