@@ -295,17 +295,53 @@ public sealed class PluginHostService : IAsyncDisposable
                 await connection.SendAsync("input.result", BackgroundInputResult.Failure("busy", "The account input lease is busy.", nint.Zero, nint.Zero), envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
                 return;
             }
-            await using (lease)
-            {
-                var result = InputDispatcher is null
-                    ? BackgroundInputResult.Failure("unavailable", "The host input broker is unavailable.", nint.Zero, nint.Zero)
-                    : await InputDispatcher(request.AccountId, request.Events, _shutdown.Token).ConfigureAwait(false);
-                await connection.SendAsync("input.result", result, envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
-            }
+            // The paced dispatch runs detached from the read loop so heartbeats and
+            // other messages keep flowing during a long macro. The lease is held
+            // across the whole paced run, and pacing is cancelled if the plugin
+            // disconnects or the host shuts down.
+            _ = RunPacedDispatchAsync(connection, envelope.RequestId, request, lease);
         }
         catch (Exception ex) when (ex is InvalidDataException or JsonException)
         {
             await connection.SendAsync("input.result", BackgroundInputResult.Failure("invalid-request", ex.Message, nint.Zero, nint.Zero), envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
+        }
+    }
+
+    private async Task RunPacedDispatchAsync(PluginConnection connection, string requestId, InputPostRequest request, IAsyncDisposable lease)
+    {
+        await using (lease)
+        {
+            try
+            {
+                using var pacingSource = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+                var monitor = Task.Run(async () =>
+                {
+                    try
+                    {
+                        while (!connection.IsDisposed && !pacingSource.IsCancellationRequested)
+                            await Task.Delay(250, pacingSource.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) { }
+                    pacingSource.Cancel();
+                });
+                try
+                {
+                    var result = InputDispatcher is null
+                        ? BackgroundInputResult.Failure("unavailable", "The host input broker is unavailable.", nint.Zero, nint.Zero)
+                        : await InputDispatcher(request.AccountId, request.Events, pacingSource.Token).ConfigureAwait(false);
+                    await connection.SendAsync("input.result", result, requestId, _shutdown.Token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    pacingSource.Cancel();
+                    try { await monitor.ConfigureAwait(false); } catch { }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+            {
+                // The plugin disconnected or the host is shutting down; there is
+                // no response to send, and the lease releases with the run.
+            }
         }
     }
 
@@ -402,6 +438,7 @@ public sealed class PluginConnection : IAsyncDisposable
     public string PluginId { get; }
     public IReadOnlyList<string> DeclaredCapabilities { get; }
     public IReadOnlySet<string> GrantedCapabilities { get; }
+    internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
     internal bool HeartbeatSeen { get; private set; }
     internal DateTime LastHeartbeatUtc => new(Interlocked.Read(ref _lastHeartbeatUtcTicks), DateTimeKind.Utc);
 
