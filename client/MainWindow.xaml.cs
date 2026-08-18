@@ -10,6 +10,7 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Win32;
 using RobloxAltClient.Models;
+using RobloxAltClient.Plugins;
 using RobloxAltClient.Services;
 
 namespace RobloxAltClient;
@@ -50,6 +51,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         WindowAppearance.ApplyModernChrome(this);
+        ((App)Application.Current).PluginRuntime.Diagnostic += PluginRuntime_Diagnostic;
         AccountsList.ItemsSource = _accounts;
         LaunchQueueList.ItemsSource = _launchQueue;
         GamePicker.ItemsSource = _games;
@@ -1465,6 +1467,12 @@ public partial class MainWindow : Window
         ActivityLog.ScrollToEnd();
     }
 
+    private void PluginRuntime_Diagnostic(object? sender, PluginRuntime.PluginDiagnostic diagnostic)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+            Log($"Plugin {diagnostic.PluginId} [{diagnostic.Level}]: {diagnostic.Message}")));
+    }
+
     private void CopyActivity_Click(object sender, RoutedEventArgs e)
     {
         if (!string.IsNullOrWhiteSpace(ActivityLog.Text))
@@ -1476,6 +1484,7 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        ((App)Application.Current).PluginRuntime.Diagnostic -= PluginRuntime_Diagnostic;
         _launchCancellation?.Cancel();
         _launchCancellation?.Dispose();
         DisposeBrowser();

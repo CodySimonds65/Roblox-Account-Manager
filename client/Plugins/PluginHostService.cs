@@ -361,7 +361,7 @@ public sealed class PluginConnection : IAsyncDisposable
             "action.invoke" => PluginCapabilities.HostActionsInvoke,
             "screen.capture" => PluginCapabilities.SystemReadScreen,
             "global-input.subscribe" => PluginCapabilities.SystemWatchGlobalInput,
-            "action.result" or "action.progress" or "plugin.heartbeat" or "plugin.shutdown" => "",
+            "action.result" or "action.progress" or "plugin.heartbeat" or "plugin.shutdown" or "diagnostic.log" => "",
             _ => null
         };
         return required is not null && (required.Length == 0 || GrantedCapabilities.Contains(required));

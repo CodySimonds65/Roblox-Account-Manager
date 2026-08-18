@@ -1,6 +1,7 @@
 using RobloxAltClient.Models;
 using RobloxAltClient.Plugins;
 using RobloxAltClient.Services;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Text.Json;
 
@@ -78,6 +79,27 @@ Require(
 Require(
     !RobloxClientSettingsService.TryValidateSettings(new GameSettings { MasterVolumeLevel = 11 }, out _),
     "An invalid master volume level was accepted.");
+
+var runningAccountStateRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-smoke-" + Guid.NewGuid().ToString("N"));
+try
+{
+    using var runningAccounts = new RunningAccountRegistry(runningAccountStateRoot);
+    runningAccounts.Register(new AccountProfile { Id = "state-test", Label = "State test" }, Process.GetCurrentProcess());
+    var statePath = Path.Combine(runningAccountStateRoot, "running-accounts.json");
+    Require(File.Exists(statePath), "Running-account state was not persisted.");
+    using var stateDocument = JsonDocument.Parse(File.ReadAllText(statePath));
+    Require(stateDocument.RootElement.GetArrayLength() == 1, "Running-account state contained an unexpected number of records.");
+    Require(stateDocument.RootElement[0].GetProperty("windowHandle").ValueKind == JsonValueKind.Number,
+        "Running-account HWND persistence was not written as a numeric value.");
+    var snapshotJson = JsonSerializer.Serialize(new ManagedAccountSnapshot(
+        "state-test", "State test", 1, 1, (nint)42, 0, 0, 100, 100, 96, false, DateTime.UtcNow, true), PluginJson.Options);
+    Require(snapshotJson.Contains("\"windowHandle\":42", StringComparison.Ordinal),
+        "Managed-account HWND wire serialization was not numeric.");
+}
+finally
+{
+    if (Directory.Exists(runningAccountStateRoot)) Directory.Delete(runningAccountStateRoot, recursive: true);
+}
 Require(!new GameSettings { AdvancedFlagsJson = "{}" }.HasOverrides,
     "An empty advanced-flags object was treated as an active override.");
 

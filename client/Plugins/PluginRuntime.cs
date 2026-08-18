@@ -32,6 +32,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         _supervisor.Exited += Supervisor_Exited;
         _host.MessageReceived += Host_MessageReceived;
         _host.InputDispatcher = DispatchInputAsync;
+        Accounts.Diagnostic += Accounts_Diagnostic;
         RefreshInstalled();
     }
 
@@ -51,6 +52,9 @@ public sealed class PluginRuntime : IAsyncDisposable
     ];
 
     public event EventHandler? Changed;
+    public event EventHandler<PluginDiagnostic>? Diagnostic;
+
+    public sealed record PluginDiagnostic(string PluginId, string Level, string Message, DateTime Utc);
 
     private Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken)
     {
@@ -253,7 +257,30 @@ public sealed class PluginRuntime : IAsyncDisposable
     {
         if (message.Envelope.Type is "accounts.list" or "account.snapshot")
             _ = RespondToAccountQueryAsync(message.Connection, message.Envelope);
+        else if (message.Envelope.Type == "diagnostic.log")
+            HandlePluginDiagnostic(message.Connection, message.Envelope);
     }
+
+    private void HandlePluginDiagnostic(PluginConnection connection, PluginEnvelope envelope)
+    {
+        try
+        {
+            var request = envelope.Payload.Deserialize<DiagnosticLogRequest>(PluginJson.Options)
+                          ?? throw new InvalidDataException("Diagnostic payload is invalid.");
+            if (request.Message is null || request.Message.Length is < 1 or > 2_000)
+                throw new InvalidDataException("Diagnostic message length is invalid.");
+            var level = request.Level?.Trim().ToLowerInvariant() ?? "info";
+            if (level is not ("trace" or "info" or "warning" or "error")) level = "info";
+            Diagnostic?.Invoke(this, new PluginDiagnostic(connection.PluginId, level, request.Message, request.Utc ?? DateTime.UtcNow));
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException)
+        {
+            Diagnostic?.Invoke(this, new PluginDiagnostic(connection.PluginId, "warning", $"Rejected diagnostic message: {ex.Message}", DateTime.UtcNow));
+        }
+    }
+
+    private void Accounts_Diagnostic(object? sender, string message) =>
+        Diagnostic?.Invoke(this, new PluginDiagnostic("host.accounts", "error", message, DateTime.UtcNow));
 
     private async Task RespondToAccountQueryAsync(PluginConnection connection, PluginEnvelope envelope)
     {
@@ -301,6 +328,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         finally { _lifecycleGate.Release(); }
         _supervisor.Exited -= Supervisor_Exited;
         _host.MessageReceived -= Host_MessageReceived;
+        Accounts.Diagnostic -= Accounts_Diagnostic;
         _supervisor.Dispose();
         await _actions.DisposeAsync().ConfigureAwait(false);
         await _host.DisposeAsync().ConfigureAwait(false);
@@ -308,5 +336,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         _lifecycleGate.Dispose();
     }
 }
+
+internal sealed record DiagnosticLogRequest(string? Level, string? Message, DateTime? Utc);
 
 public sealed record PluginCatalogEntry(string Id, string Name, string Description, string InstallUrl);

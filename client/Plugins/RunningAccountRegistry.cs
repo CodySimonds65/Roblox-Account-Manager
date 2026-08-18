@@ -17,6 +17,7 @@ public sealed class RunningAccountRegistry : IDisposable
 
     public event EventHandler<ManagedAccountSnapshot>? AccountChanged;
     public event EventHandler<string>? AccountExited;
+    public event EventHandler<string>? Diagnostic;
 
     public RunningAccountRegistry(string? appDataDirectory = null)
     {
@@ -93,7 +94,7 @@ public sealed class RunningAccountRegistry : IDisposable
                     var hwnd = FindWindow(process.Id);
                     var snapshot = record with
                     {
-                        WindowHandle = hwnd,
+                        WindowHandle = hwnd.ToInt64(),
                         LastActivityUtc = hwnd != nint.Zero && (foreground == hwnd || GetAncestor(foreground, GA_ROOT) == GetAncestor(hwnd, GA_ROOT)) ? _lastInputUtc : record.LastActivityUtc
                     };
                     if (snapshot != record)
@@ -183,8 +184,19 @@ public sealed class RunningAccountRegistry : IDisposable
     private void SaveLocked()
     {
         var temporaryPath = _path + ".tmp";
-        File.WriteAllText(temporaryPath, JsonSerializer.Serialize(_records.Values.OrderBy(record => record.AccountId), PluginJson.Options));
-        File.Move(temporaryPath, _path, overwrite: true);
+        try
+        {
+            // Persist HWNDs as Int64 values. System.Text.Json's reflection
+            // metadata cannot reliably construct records with nint parameters
+            // on all supported .NET 8 Windows runtimes.
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(_records.Values.OrderBy(record => record.AccountId), PluginJson.Options));
+            File.Move(temporaryPath, _path, overwrite: true);
+        }
+        catch (Exception ex) when (ex is InvalidCastException or JsonException or IOException or UnauthorizedAccessException)
+        {
+            try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); } catch { }
+            Diagnostic?.Invoke(this, $"Running-account state was not persisted: {ex.Message}");
+        }
     }
 
     public void Dispose() => _timer.Dispose();
@@ -195,26 +207,27 @@ public sealed class RunningAccountRegistry : IDisposable
         int ProcessId,
         long ProcessStartTimeUtcTicks,
         DateTime LastActivityUtc,
-        nint WindowHandle = 0)
+        long WindowHandle = 0)
     {
         public ManagedAccountSnapshot ToSnapshot()
         {
-            var rect = GetClientMetrics(WindowHandle);
+            var windowHandle = (nint)WindowHandle;
+            var rect = GetClientMetrics(windowHandle);
             return new ManagedAccountSnapshot(
                 AccountId,
                 Label,
                 ProcessId,
                 ProcessStartTimeUtcTicks,
-                WindowHandle,
+                windowHandle,
                 rect.X,
                 rect.Y,
                 rect.Width,
                 rect.Height,
-                WindowHandle == nint.Zero ? 96u : GetDpiForWindow(WindowHandle),
-                WindowHandle != nint.Zero && IsIconic(GetAncestor(WindowHandle, GA_ROOT)),
+                windowHandle == nint.Zero ? 96u : GetDpiForWindow(windowHandle),
+                windowHandle != nint.Zero && IsIconic(GetAncestor(windowHandle, GA_ROOT)),
                 LastActivityUtc,
-                WindowHandle != nint.Zero,
-                WindowHandle == nint.Zero ? nint.Zero : GetAncestor(WindowHandle, GA_ROOT));
+                windowHandle != nint.Zero,
+                windowHandle == nint.Zero ? nint.Zero : GetAncestor(windowHandle, GA_ROOT));
         }
     }
 
