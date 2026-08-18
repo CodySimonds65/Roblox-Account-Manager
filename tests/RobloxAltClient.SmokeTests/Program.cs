@@ -943,6 +943,29 @@ finally
 
 Console.WriteLine("Plugin host security smoke tests passed.");
 
+var consentRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-consent-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var consentPaths = new PluginPaths(consentRoot);
+    var consentPluginId = "io.github.codysimonds65.ram.macros";
+    var consentCapabilities = new[] { PluginCapabilities.HostAccountsRead, PluginCapabilities.HostInputBackground };
+    var firstStore = new PluginConsentStore(consentPaths);
+    firstStore.Set(consentPluginId, autostart: true, consentCapabilities);
+    var reloadedStore = new PluginConsentStore(consentPaths);
+    var reloaded = reloadedStore.Get(consentPluginId);
+    Require(reloaded.Autostart, "Plugin autostart consent did not survive a store reload.");
+    Require(reloaded.GrantedCapabilities.Count == 2 &&
+        reloaded.GrantedCapabilities.Contains(PluginCapabilities.HostAccountsRead) &&
+        reloaded.GrantedCapabilities.Contains(PluginCapabilities.HostInputBackground),
+        "Plugin capability grants did not survive a store reload.");
+}
+finally
+{
+    if (Directory.Exists(consentRoot)) Directory.Delete(consentRoot, recursive: true);
+}
+
+Console.WriteLine("Plugin consent persistence smoke tests passed.");
+
 static SecurityIdentifier? GetMandatoryLabelSid(GenericAce ace)
 {
     var binary = new byte[ace.BinaryLength];
