@@ -604,6 +604,12 @@ public partial class MainWindow : Window
         window.ShowDialog();
     }
 
+    private void Clients_Click(object sender, RoutedEventArgs e)
+    {
+        var window = new ClientsWindow { Owner = this };
+        window.Show();
+    }
+
     private async Task ApplyPendingDataCleanupAsync()
     {
         if (!_settings.ClearBrowserDataOnNextStart)

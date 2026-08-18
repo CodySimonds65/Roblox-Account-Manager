@@ -1068,6 +1068,20 @@ finally
 
 Console.WriteLine("Plugin input post smoke tests passed.");
 
+Require((InputSendInjector.KeyboardFlags(keyUp: false, extended: false) & 0x000B) == 0x0008,
+    "A plain key down must use scan-code injection.");
+Require((InputSendInjector.KeyboardFlags(keyUp: true, extended: true) & 0x000B) == 0x000B,
+    "An extended key up must set extended and key-up flags.");
+Require(InputSendInjector.ButtonFlag(0, down: true) == 0x0002 && InputSendInjector.ButtonFlag(0, down: false) == 0x0004,
+    "Left button flags are wrong.");
+Require(InputSendInjector.ButtonFlag(1, down: true) == 0x0008 && InputSendInjector.ButtonFlag(2, down: false) == 0x0040,
+    "Right/middle button flags are wrong.");
+Require(InputSendInjector.ButtonFlag(4, down: true) == 0, "An unsupported button must map to no flag.");
+Require(unchecked((short)InputSendInjector.WheelData(120)) == 120 && unchecked((short)InputSendInjector.WheelData(-120)) == -120,
+    "Wheel delta mapping is wrong.");
+
+Console.WriteLine("Plugin input injector mapping smoke tests passed.");
+
 static SecurityIdentifier? GetMandatoryLabelSid(GenericAce ace)
 {
     var binary = new byte[ace.BinaryLength];

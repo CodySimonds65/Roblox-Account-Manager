@@ -159,6 +159,8 @@
                                Foreground="{StaticResource MutedTextBrush}" FontSize="13" Margin="0,3,0,0" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button Content="Clients" Click="Clients_Click" Style="{StaticResource SecondaryButton}"
+                            Padding="12,6" Margin="0,0,8,0" ToolTip="Embed running clients as tabs for macro playback"/>
                     <Button Content="Plugins" Click="Plugins_Click" Style="{StaticResource SecondaryButton}"
                             Padding="12,6" Margin="0,0,8,0" />
                     <Button Content="Settings" Click="Settings_Click" Style="{StaticResource SecondaryButton}"

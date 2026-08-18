@@ -22,6 +22,8 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly ConcurrentDictionary<string, (PluginConnection Connection, string? AccountId)> _accountEventSubscribers = new(StringComparer.Ordinal);
     private readonly GlobalHotkeyMonitor _hotkeyMonitor = new();
+    private readonly InputSendInjector _sendInjector = new();
+    public ClientEmbeddingService ClientEmbeddings { get; } = new();
     private int _queuedAccountUpdates;
     private const int MaxQueuedAccountUpdates = 64;
 
@@ -72,7 +74,22 @@ public sealed class PluginRuntime : IAsyncDisposable
     {
         var account = Accounts.Snapshot().FirstOrDefault(snapshot => string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
         if (account is null) return BackgroundInputResult.Failure("unknown-account", "The managed account is not running.", nint.Zero, nint.Zero);
-        return await _inputBroker.PostAsync(account, events, cancellationToken).ConfigureAwait(false);
+        // Embedded clients (inside the launcher's Clients window) receive REAL input
+        // via SendInput — raw-input consumers such as Roblox ignore posted messages.
+        var embeddedRoot = ClientEmbeddings.EmbeddedRootResolver?.Invoke(accountId);
+        if (embeddedRoot is not null && embeddedRoot != nint.Zero)
+        {
+            var activate = ClientEmbeddings.EmbeddedActivate is null
+                ? null
+                : new Action(() => ClientEmbeddings.EmbeddedActivate!.Invoke(accountId));
+            return await _sendInjector.PostAsync(embeddedRoot.Value, events, cancellationToken, activate).ConfigureAwait(false);
+        }
+        var result = await _inputBroker.PostAsync(account, events, cancellationToken).ConfigureAwait(false);
+        if (result.Accepted && ClientEmbeddings.EmbeddedRootResolver is not null)
+        {
+            return result with { Message = result.Message + " Hint: open the Clients window and select this account for real input injection." };
+        }
+        return result;
     }
 
     public bool IsOfficialUrl(string url) => OfficialCatalog.Any(entry =>
