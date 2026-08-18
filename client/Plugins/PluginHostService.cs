@@ -17,6 +17,7 @@ public sealed class PluginHostService : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, ExpectedConnection> _expected = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PluginConnection> _connections = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, HashSet<int>> _hotkeySubscriptions = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _unauthenticatedLimit = new(8, 8);
     private readonly ConcurrentDictionary<Guid, Task> _connectionTasks = new();
@@ -115,6 +116,29 @@ public sealed class PluginHostService : IAsyncDisposable
     public void RevokeLaunchToken(string token) => _expected.TryRemove(token, out _);
 
     public IReadOnlyList<string> ConnectedPluginIds => _connections.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray();
+
+    public void BroadcastHotkey(string type, int virtualKey)
+    {
+        if (_hotkeySubscriptions.IsEmpty) return;
+        foreach (var (pluginId, keys) in _hotkeySubscriptions)
+        {
+            if (!keys.Contains(virtualKey) || !_connections.TryGetValue(pluginId, out var connection)) continue;
+            try
+            {
+                _ = connection.SendAsync(type, new { virtualKey }, "", _shutdown.Token);
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+            {
+                _hotkeySubscriptions.TryRemove(pluginId, out _);
+            }
+        }
+    }
+
+    internal void SetHotkeySubscription(string pluginId, IReadOnlyCollection<int> virtualKeys)
+    {
+        if (virtualKeys.Count == 0) { _hotkeySubscriptions.TryRemove(pluginId, out _); return; }
+        _hotkeySubscriptions[pluginId] = new HashSet<int>(virtualKeys);
+    }
 
     public async Task SendAsync(string pluginId, string type, object payload, string requestId = "", CancellationToken cancellationToken = default)
     {
@@ -236,6 +260,11 @@ public sealed class PluginHostService : IAsyncDisposable
                     await DispatchInputAsync(connection, envelope).ConfigureAwait(false);
                     continue;
                 }
+                if (string.Equals(envelope.Type, "hotkey.subscribe", StringComparison.Ordinal))
+                {
+                    HandleHotkeySubscribe(connection, envelope);
+                    continue;
+                }
                 MessageReceived?.Invoke(this, (connection, envelope));
             }
         }
@@ -252,6 +281,7 @@ public sealed class PluginHostService : IAsyncDisposable
             if (connection is not null && registered)
             {
                 _connections.TryRemove(connection.PluginId, out _);
+                _hotkeySubscriptions.TryRemove(connection.PluginId, out _);
                 Disconnected?.Invoke(this, connection);
                 await connection.DisposeAsync().ConfigureAwait(false);
             }
@@ -342,6 +372,33 @@ public sealed class PluginHostService : IAsyncDisposable
                 // The plugin disconnected or the host is shutting down; there is
                 // no response to send, and the lease releases with the run.
             }
+        }
+    }
+
+    private void HandleHotkeySubscribe(PluginConnection connection, PluginEnvelope envelope)
+    {
+        try
+        {
+            if (envelope.Payload.TryGetProperty("virtualKeys", out var keysElement) &&
+                keysElement.ValueKind == JsonValueKind.Array &&
+                keysElement.GetArrayLength() is >= 1 and <= 32)
+            {
+                var keys = new List<int>(keysElement.GetArrayLength());
+                foreach (var keyElement in keysElement.EnumerateArray())
+                {
+                    if (!keyElement.TryGetInt32(out var vk) || vk is < 1 or > 255)
+                        throw new InvalidDataException("hotkey.subscribe virtual keys are invalid.");
+                    keys.Add(vk);
+                }
+                SetHotkeySubscription(connection.PluginId, keys);
+                return;
+            }
+            throw new InvalidDataException("hotkey.subscribe payload is invalid.");
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException)
+        {
+            _ = connection.SendAsync("host.reject", new { reason = "invalid-request", messageType = "hotkey.subscribe", detail = ex.Message },
+                envelope.RequestId, _shutdown.Token);
         }
     }
 
@@ -461,7 +518,7 @@ public sealed class PluginConnection : IAsyncDisposable
             "action.invoke" => PluginCapabilities.HostActionsInvoke,
             "screen.capture" => PluginCapabilities.SystemReadScreen,
             "global-input.subscribe" => PluginCapabilities.SystemWatchGlobalInput,
-            "action.result" or "action.progress" or "plugin.heartbeat" or "plugin.shutdown" or "diagnostic.log" => "",
+            "action.result" or "action.progress" or "plugin.heartbeat" or "plugin.shutdown" or "diagnostic.log" or "hotkey.subscribe" => "",
             _ => null
         };
         return required is not null && (required.Length == 0 || GrantedCapabilities.Contains(required));

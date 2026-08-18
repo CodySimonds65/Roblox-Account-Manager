@@ -109,6 +109,10 @@ public sealed class FocusSafeInputBroker
     private static bool TryPost(nint hwnd, ManagedAccountSnapshot account, PluginInputEvent input, out (string Code, string Message) error)
     {
         error = default;
+        // Key events are delivered to the window's top-level HWND: Chromium-style
+        // clients (Roblox) process keyboard at the browser window, not the render child.
+        if (input.Kind is PluginInputKind.KeyDown or PluginInputKind.KeyUp && account.RootWindowHandle != nint.Zero)
+            hwnd = account.RootWindowHandle;
         var message = 0u;
         nuint wParam = 0;
         nint lParam = 0;
