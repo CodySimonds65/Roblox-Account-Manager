@@ -1,0 +1,54 @@
+<Window x:Class="RobloxAltClient.ClientsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Managed Clients" Height="620" Width="980" MinHeight="320" MinWidth="560"
+        Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <ListBox x:Name="ClientTabs" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                     ScrollViewer.VerticalScrollBarVisibility="Disabled" SelectionChanged="ClientTabs_SelectionChanged">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="Margin" Value="0,0,6,0" />
+                        <Setter Property="Padding" Value="14,7" />
+                        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ListBoxItem">
+                                    <Border x:Name="Tab" Background="{StaticResource ElevatedBrush}" BorderBrush="{StaticResource BorderBrush}"
+                                            BorderThickness="1" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                                        <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}" />
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsSelected" Value="True">
+                                            <Setter TargetName="Tab" Property="Background" Value="{StaticResource AccentBrush}" />
+                                            <Setter Property="Foreground" Value="White" />
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+            </ListBox>
+            <TextBlock Grid.Column="1" x:Name="HintText" Text="Clients are embedded; use the tabs to switch, and play macros while a tab is selected." 
+                       Foreground="{StaticResource MutedTextBrush}" FontSize="11" VerticalAlignment="Center" Margin="10,0,2,0" />
+        </Grid>
+        <Border Grid.Row="1" x:Name="HostArea" Background="#101318" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                CornerRadius="12" Margin="0,8,0,0" SizeChanged="HostArea_SizeChanged" />
+    </Grid>
+</Window>
