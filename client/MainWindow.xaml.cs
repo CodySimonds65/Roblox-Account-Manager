@@ -57,6 +57,8 @@ public partial class MainWindow : Window
         WindowAppearance.ApplyModernChrome(this);
         ((App)Application.Current).PluginRuntime.Diagnostic += PluginRuntime_Diagnostic;
         ((App)Application.Current).PluginRuntime.Accounts.AccountExited += Accounts_AccountExited;
+        ((App)Application.Current).PluginRuntime.ClientEmbeddings.EmbedFilter =
+            accountId => _accounts.FirstOrDefault(profile => profile.Id == accountId)?.EmbedInClients ?? false;
         AccountsList.ItemsSource = _accounts;
         LaunchQueueList.ItemsSource = _launchQueue;
         GamePicker.ItemsSource = _games;
@@ -241,7 +243,7 @@ public partial class MainWindow : Window
 
     private async void AddAccount_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new InputDialog { Owner = this };
+        var dialog = new InputDialog(embedInClients: false) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -251,6 +253,7 @@ public partial class MainWindow : Window
         {
             Label = dialog.AccountLabel,
             Group = dialog.AccountGroup,
+            EmbedInClients = dialog.EmbedInClients,
             SortOrder = _accounts.Count
         };
         _accounts.Add(account);
@@ -267,7 +270,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var dialog = new InputDialog(account.Label, account.Group) { Owner = this };
+        var dialog = new InputDialog(account.Label, account.Group, account.EmbedInClients) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -275,7 +278,9 @@ public partial class MainWindow : Window
 
         account.Label = dialog.AccountLabel;
         account.Group = dialog.AccountGroup;
+        account.EmbedInClients = dialog.EmbedInClients;
         await _accountStore.SaveAsync(_accounts);
+        ((App)Application.Current).PluginRuntime.ClientEmbeddings.NotifyFilterChanged();
         AccountsList.Items.Refresh();
         if (_activeAccount?.Id == account.Id)
         {
@@ -604,10 +609,17 @@ public partial class MainWindow : Window
         window.ShowDialog();
     }
 
+    private ClientsWindow? _clientsWindow;
+
     private void Clients_Click(object sender, RoutedEventArgs e)
     {
-        var window = new ClientsWindow { Owner = this };
-        window.Show();
+        if (_clientsWindow is null)
+        {
+            _clientsWindow = new ClientsWindow { Owner = this };
+            _clientsWindow.Closed += (_, _) => _clientsWindow = null;
+        }
+        _clientsWindow.Show();
+        _clientsWindow.Activate();
     }
 
     private async Task ApplyPendingDataCleanupAsync()

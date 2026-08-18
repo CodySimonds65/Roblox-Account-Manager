@@ -19,6 +19,14 @@ public sealed class ClientEmbeddingService
     /// <summary>Brings an embedded account to the foreground tab and focuses its window.</summary>
     public Action<string>? EmbeddedActivate { get; set; }
 
+    /// <summary>Decides whether an account is eligible for embedding/tab display; accounts returning false are unembedded.</summary>
+    public Func<string, bool>? EmbedFilter { get; set; }
+
+    /// <summary>Raised when the embedding eligibility of accounts may have changed.</summary>
+    public event Action? FilterChanged;
+
+    public void NotifyFilterChanged() => FilterChanged?.Invoke();
+
     private const long WsPopup = 0x80000000L;
     private const long WsChild = 0x40000000L;
     private const long WsVisible = 0x10000000L;
@@ -40,7 +48,7 @@ public sealed class ClientEmbeddingService
 
     public bool TryEmbed(string accountId, nint rootWindow)
     {
-        if (rootWindow == nint.Zero || _hostWindow == nint.Zero) return false;
+        if (rootWindow == nint.Zero || _hostWindow == nint.Zero || !IsWindow(_hostWindow)) return false;
         lock (_gate)
         {
             if (_embedded.TryGetValue(accountId, out var existing) && existing == rootWindow) return true;
@@ -77,17 +85,17 @@ public sealed class ClientEmbeddingService
         foreach (var id in ids) TryUnembed(id);
     }
 
-    public void Layout(nint hostClientAreaHandle, int stripHeight)
+    public void Layout(int hostLeft, int hostTop, int hostWidth, int hostHeight)
     {
-        if (_hostWindow == nint.Zero || !GetClientRect(hostClientAreaHandle, out var rect)) return;
+        if (_hostWindow == nint.Zero || hostWidth <= 0 || hostHeight <= 0) return;
         nint[] roots;
         lock (_gate) roots = _embedded.Values.ToArray();
-        var width = Math.Max(1, rect.Right - rect.Left);
-        var height = Math.Max(1, rect.Bottom - rect.Top - stripHeight);
+        var width = Math.Max(1, hostWidth);
+        var height = Math.Max(1, hostHeight);
         foreach (var root in roots)
         {
             if (root == nint.Zero) continue;
-            MoveWindow(root, 0, stripHeight, width, height, true);
+            MoveWindow(root, hostLeft, hostTop, width, height, true);
         }
     }
 
@@ -105,11 +113,24 @@ public sealed class ClientEmbeddingService
 
     public void Focus(string accountId)
     {
+        nint root;
         lock (_gate)
         {
-            if (!_embedded.TryGetValue(accountId, out var root) || root == nint.Zero) return;
+            if (!_embedded.TryGetValue(accountId, out root) || root == nint.Zero) return;
             ShowWindow(root, SwShow);
+        }
+        // SetFocus requires the target window's thread to be attached to ours.
+        var ourThread = GetCurrentThreadId();
+        GetWindowThreadProcessId(root, out var gameThread);
+        var attached = gameThread != 0 && gameThread != ourThread &&
+                       AttachThreadInput(ourThread, gameThread, true);
+        try
+        {
             SetFocus(root);
+        }
+        finally
+        {
+            if (attached) AttachThreadInput(ourThread, gameThread, false);
         }
     }
 
@@ -125,6 +146,7 @@ public sealed class ClientEmbeddingService
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint window, int command);
     [DllImport("user32.dll")] private static extern nint SetFocus(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
-    [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
-    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
+    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
 }
