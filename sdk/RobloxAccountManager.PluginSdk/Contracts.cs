@@ -11,7 +11,7 @@ public static class PluginProtocol
 
 public sealed record ManagedAccountSnapshot(string AccountId, string Label, int ProcessId, long ProcessStartTimeUtcTicks,
     nint WindowHandle, int ClientX, int ClientY, int ClientWidth, int ClientHeight, uint Dpi,
-    bool IsMinimized, DateTime LastActivityUtc, bool IsRunning);
+    bool IsMinimized, DateTime LastActivityUtc, bool IsRunning, nint RootWindowHandle = 0);
 
 public sealed record ThemePalette(string Background, string Surface, string Elevated, string Hover, string Border,
     string Text, string MutedText, string Accent, string AccentHover, string AccentPressed, string Danger,

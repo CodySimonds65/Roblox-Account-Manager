@@ -213,7 +213,8 @@ public sealed class RunningAccountRegistry : IDisposable
                 WindowHandle == nint.Zero ? 96u : GetDpiForWindow(WindowHandle),
                 WindowHandle != nint.Zero && IsIconic(GetAncestor(WindowHandle, GA_ROOT)),
                 LastActivityUtc,
-                WindowHandle != nint.Zero);
+                WindowHandle != nint.Zero,
+                WindowHandle == nint.Zero ? nint.Zero : GetAncestor(WindowHandle, GA_ROOT));
         }
     }
 

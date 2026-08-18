@@ -44,5 +44,11 @@ public partial class PluginConsentWindow : Window
     };
 
     private void Save_Click(object sender, RoutedEventArgs e) { DialogResult = true; Close(); }
+    private void EnableAll_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var check in _checks.Values) check.IsChecked = true;
+        DialogResult = true;
+        Close();
+    }
     private void Cancel_Click(object sender, RoutedEventArgs e) { DialogResult = false; Close(); }
 }

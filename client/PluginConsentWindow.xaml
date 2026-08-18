@@ -16,6 +16,8 @@
         </ScrollViewer>
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
             <Button Content="Cancel" Click="Cancel_Click" Style="{StaticResource SecondaryButton}" Padding="18,7" Margin="0,0,8,0" />
+            <Button Content="Accept &amp; enable all" Click="EnableAll_Click" Padding="18,7" Margin="0,0,8,0"
+                    ToolTip="Grant every permission declared by this plugin and continue." />
             <Button Content="Save permissions" Click="Save_Click" Padding="18,7" />
         </StackPanel>
     </Grid>

@@ -23,10 +23,15 @@ public sealed class PluginProcessSupervisor : IDisposable
         File.WriteAllText(tokenPath, token, new UTF8Encoding(false));
         var arguments = $"--ram-plugin --pipe \"{pipeName}\" --token-file \"{tokenPath}\" --plugin-id \"{manifest.Id}\" --data \"{dataDirectory}\"";
         var job = CreateJobObject(nint.Zero, null);
-        if (job == nint.Zero || !ConfigureKillOnClose(job))
+        if (job == nint.Zero)
         {
-            if (job != nint.Zero) CloseHandle(job);
-            throw new InvalidOperationException("The plugin process job could not be created.");
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "The plugin process job could not be created.");
+        }
+        if (!ConfigureKillOnClose(job))
+        {
+            var error = Marshal.GetLastWin32Error();
+            CloseHandle(job);
+            throw new Win32Exception(error, "The plugin process job could not be configured.");
         }
         Process process;
         try
@@ -172,6 +177,10 @@ public sealed class PluginProcessSupervisor : IDisposable
     {
         public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
         public IO_COUNTERS IoInfo;
+        public nuint ProcessMemoryLimit;
+        public nuint JobMemoryLimit;
+        public nuint PeakProcessMemoryUsed;
+        public nuint PeakJobMemoryUsed;
     }
 
     [StructLayout(LayoutKind.Sequential)] private struct JOBOBJECT_BASIC_LIMIT_INFORMATION

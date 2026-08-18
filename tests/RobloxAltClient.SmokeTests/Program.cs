@@ -1,6 +1,7 @@
 using RobloxAltClient.Models;
 using RobloxAltClient.Plugins;
 using RobloxAltClient.Services;
+using System.IO.Compression;
 using System.Text.Json;
 
 static void Require(bool condition, string message)
@@ -8,6 +9,19 @@ static void Require(bool condition, string message)
     if (!condition)
     {
         throw new InvalidOperationException(message);
+    }
+}
+
+static void RequireInvalidData(Action action, string message)
+{
+    try
+    {
+        action();
+        throw new InvalidOperationException(message);
+    }
+    catch (InvalidDataException)
+    {
+        // Expected rejection.
     }
 }
 
@@ -584,6 +598,75 @@ try
     Require(pluginManifest.EntryPoint == "ram-macros.exe", "Plugin entrypoint did not parse.");
     Require(PluginInstaller.ParseHash("abc123  plugin.zip".PadLeft(64 + 2 + 10, '0')).Length == 64,
         "A valid plugin checksum was not parsed.");
+
+    // Self-contained plugin entrypoints are currently about 154 MiB. Keep a
+    // regression check at that size so the installer cannot accidentally
+    // restore the old 100 MiB per-entry limit while retaining a bounded
+    // expanded package.
+    var largePluginArchivePath = Path.Combine(testDirectory, "large-plugin.zip");
+    using (var archive = ZipFile.Open(largePluginArchivePath, ZipArchiveMode.Create))
+    {
+        var entry = archive.CreateEntry("ram-macros.exe", CompressionLevel.Fastest);
+        using var output = entry.Open();
+        var zeroes = new byte[1024 * 1024];
+        for (var index = 0; index < 154; index++)
+            output.Write(zeroes, 0, zeroes.Length);
+    }
+    using (var archive = ZipFile.OpenRead(largePluginArchivePath))
+    {
+        PluginInstaller.ValidateArchiveEntries(archive, Path.Combine(testDirectory, "staging"));
+    }
+    var extractedPluginDirectory = Path.Combine(testDirectory, "extracted-plugin");
+    var largePluginArchiveBytes = await File.ReadAllBytesAsync(largePluginArchivePath);
+    PluginInstaller.ExtractSafely(largePluginArchiveBytes, extractedPluginDirectory);
+    Require(new FileInfo(Path.Combine(extractedPluginDirectory, "ram-macros.exe")).Length == 154L * 1024 * 1024,
+        "A valid self-contained-sized plugin entry was not extracted intact.");
+    var outsideDirectory = Path.Combine(testDirectory, "outside");
+    var reparseRoot = Path.Combine(testDirectory, "reparse-root");
+    Directory.CreateDirectory(outsideDirectory);
+    try
+    {
+        Directory.CreateSymbolicLink(reparseRoot, outsideDirectory);
+        RequireInvalidData(
+            () => PluginInstaller.ExtractSafely(largePluginArchiveBytes, reparseRoot),
+            "A reparse-point staging root was accepted.");
+    }
+    catch (UnauthorizedAccessException)
+    {
+        Console.WriteLine("Reparse-point smoke test skipped: symbolic-link creation is not permitted.");
+    }
+    catch (IOException)
+    {
+        Console.WriteLine("Reparse-point smoke test skipped: symbolic-link creation is unavailable.");
+    }
+    Require(PluginInstaller.MaxArchiveEntryBytes >= 154L * 1024 * 1024,
+        "The archive entry limit is smaller than the published self-contained plugin.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("oversized.exe", PluginInstaller.MaxArchiveEntryBytes + 1, 0)],
+            Path.Combine(testDirectory, "staging")),
+        "An oversized plugin entry was accepted.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("first.bin", PluginInstaller.MaxArchiveEntryBytes, 0),
+             ("second.bin", PluginInstaller.MaxArchiveExtractedBytes - PluginInstaller.MaxArchiveEntryBytes + 1, 0)],
+            Path.Combine(testDirectory, "staging")),
+        "An archive over the aggregate extraction limit was accepted.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("../escape.exe", 1, 0)],
+            Path.Combine(testDirectory, "staging")),
+        "A traversal entry was accepted.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("payload:stream", 1, 0)],
+            Path.Combine(testDirectory, "staging")),
+        "An alternate-data-stream entry was accepted.");
+    RequireInvalidData(
+        () => PluginInstaller.ValidateArchiveMetadata(
+            [("link.exe", 1, unchecked((int)(0xA000u << 16)))],
+            Path.Combine(testDirectory, "staging")),
+        "A symlink entry was accepted.");
     try
     {
         _ = PluginManifestReader.Parse("{\"schemaVersion\":1,\"id\":\"bad\",\"name\":\"x\",\"version\":\"1\",\"contractVersion\":\"1\",\"publisher\":\"x\",\"description\":\"x\",\"capabilities\":[],\"entryPoint\":\"../bad.exe\"}");
