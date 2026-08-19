@@ -68,7 +68,16 @@
             </ListBox.ItemContainerStyle>
             <ListBox.ItemTemplate>
                 <DataTemplate>
-                    <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" />
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Center" MaxWidth="180" />
+                        <Button Content="×" Width="20" Height="20" Margin="8,-2,-4,-2"
+                                Padding="0" Background="Transparent" BorderThickness="0"
+                                Foreground="{StaticResource MutedTextBrush}"
+                                ToolTip="Close this Roblox client"
+                                AutomationProperties.Name="Close Roblox client"
+                                Click="CloseClientTab_Click" />
+                    </StackPanel>
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>

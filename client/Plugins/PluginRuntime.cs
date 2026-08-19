@@ -544,6 +544,10 @@ public sealed class PluginRuntime : IAsyncDisposable
         Accounts.Diagnostic -= Accounts_Diagnostic;
         Accounts.AccountChanged -= Accounts_AccountChanged;
         Accounts.AccountExited -= Accounts_AccountExited;
+        // The main window restores the native embedding before App.OnExit
+        // reaches this point.  Terminate only the PID/start-time/executable
+        // identities registered by RAM; unrelated Roblox clients are untouched.
+        await Accounts.TerminateAllManagedAccountsAsync().ConfigureAwait(false);
         _supervisor.Dispose();
         _hotkeyMonitor.Dispose();
         await _actions.DisposeAsync().ConfigureAwait(false);

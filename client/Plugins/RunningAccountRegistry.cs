@@ -12,9 +12,17 @@ public sealed class RunningAccountRegistry : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<string, RunningAccountRecord> _records = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Process> _processes = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _stopping = new(StringComparer.Ordinal);
     private readonly Timer _timer;
     private uint _lastInputTick;
     private DateTime _lastInputUtc = DateTime.UtcNow;
+
+    // Roblox can briefly destroy and recreate its render window while changing
+    // graphics modes or leaving a game.  Keep a bounded grace period so that a
+    // transient HWND loss is not mistaken for a dead process, while still
+    // cleaning up clients that have been closed natively.
+    private static readonly TimeSpan MissingWindowGracePeriod = TimeSpan.FromSeconds(10);
+    private const uint WmClose = 0x0010;
 
     public event EventHandler<ManagedAccountSnapshot>? AccountChanged;
     public event EventHandler<ManagedAccountSnapshot>? AccountExited;
@@ -45,9 +53,12 @@ public sealed class RunningAccountRegistry : IDisposable
         ArgumentNullException.ThrowIfNull(process);
         process.Refresh();
         var startTicks = process.StartTime.ToUniversalTime().Ticks;
+        var executablePath = TryGetExecutablePath(process) ?? string.Empty;
         lock (_gate)
         {
-            _records[account.Id] = new RunningAccountRecord(account.Id, account.Label, process.Id, startTicks, DateTime.UtcNow);
+            _stopping.Remove(account.Id);
+            _records[account.Id] = new RunningAccountRecord(account.Id, account.Label, process.Id, startTicks, DateTime.UtcNow,
+                ExecutablePath: executablePath);
             SaveLocked();
         }
         AttachProcessWatcher(account.Id, process.Id, startTicks);
@@ -70,6 +81,91 @@ public sealed class RunningAccountRegistry : IDisposable
         DetachProcessWatcher(accountId, wrapper);
         RaiseAccountExited(exitedSnapshot);
         return true;
+    }
+
+    /// <summary>
+    /// Stops one managed Roblox process without ever acting on a reused PID.
+    /// Watcher callbacks may win the race and publish the exit event once.
+    /// </summary>
+    public async Task<bool> TerminateAccountAsync(string accountId, CancellationToken cancellationToken = default)
+    {
+        RunningAccountRecord? expected;
+        lock (_gate)
+        {
+            if (!_records.TryGetValue(accountId, out expected)) return false;
+            if (!_stopping.Add(accountId)) return false;
+        }
+
+        try
+        {
+            using var process = TryGetValidatedProcess(expected);
+            if (process is null)
+            {
+                // The process disappeared or no longer matches the persisted
+                // identity. Drop only our stale record; never kill a reused PID.
+                FinalizeRecord(accountId, expected, exitCode: null,
+                    diagnostic: $"Account {expected.Label} was no longer the managed process; its stale record was removed.");
+                return true;
+            }
+
+            TryRequestGracefulClose(process, expected);
+            if (!await WaitForExitAsync(process, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using var revalidated = TryGetValidatedProcess(expected);
+                if (revalidated is not null && !revalidated.HasExited)
+                {
+                    try
+                    {
+                        revalidated.Kill(entireProcessTree: true);
+                        await WaitForExitAsync(revalidated, TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // A watcher may have observed exit between validation
+                        // and Kill. Finalization below remains idempotent.
+                    }
+                    catch (Win32Exception ex)
+                    {
+                        Diagnostic?.Invoke(this, $"Could not terminate {expected.Label} (PID {expected.ProcessId}): {ex.Message}");
+                    }
+                }
+            }
+
+            var exited = HasExitedSafely(process);
+            if (exited)
+            {
+                FinalizeRecord(accountId, expected, TryGetExitCode(process),
+                    $"Account {expected.Label} (PID {expected.ProcessId}) was terminated by RAM.");
+            }
+            else
+            {
+                Diagnostic?.Invoke(this, $"RAM requested termination for {expected.Label}, but the process is still running.");
+            }
+            return exited;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+        {
+            Diagnostic?.Invoke(this, $"Could not terminate {expected.Label} (PID {expected.ProcessId}): {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            lock (_gate) _stopping.Remove(accountId);
+        }
+    }
+
+    /// <summary>Terminates every currently managed account, preserving unrelated Roblox processes.</summary>
+    public async Task TerminateAllManagedAccountsAsync(CancellationToken cancellationToken = default)
+    {
+        string[] accountIds;
+        lock (_gate) accountIds = _records.Keys.ToArray();
+        if (accountIds.Length == 0) return;
+        await Task.WhenAll(accountIds.Select(accountId => TerminateAccountAsync(accountId, cancellationToken))).ConfigureAwait(false);
     }
 
     private void AttachProcessWatcher(string accountId, int processId, long expectedStartTimeUtcTicks)
@@ -189,6 +285,8 @@ public sealed class RunningAccountRegistry : IDisposable
         List<ManagedAccountSnapshot> changed = [];
         List<ManagedAccountSnapshot> exited = [];
         List<Process> wrappersToDetach = [];
+        List<string> missingWindowAccounts = [];
+        var now = DateTime.UtcNow;
         lock (_gate)
         {
             foreach (var record in _records.Values.ToArray())
@@ -198,7 +296,8 @@ public sealed class RunningAccountRegistry : IDisposable
                     var previousSnapshot = record.ToSnapshot();
                     using var process = Process.GetProcessById(record.ProcessId);
                     process.Refresh();
-                    if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != record.ProcessStartTimeUtcTicks)
+                    if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != record.ProcessStartTimeUtcTicks ||
+                        !MatchesExecutable(process, record))
                     {
                         _records.Remove(record.AccountId);
                         _processes.Remove(record.AccountId, out var wrapper);
@@ -224,11 +323,17 @@ public sealed class RunningAccountRegistry : IDisposable
                     var hwnd = IsOwnedProcessWindow(previousWindow, process.Id)
                         ? previousWindow
                         : FindWindow(process.Id);
+                    DateTime? missingSince = hwnd == nint.Zero
+                        ? record.MissingWindowSinceUtc ?? now
+                        : null;
                     var snapshot = record with
                     {
                         WindowHandle = hwnd.ToInt64(),
+                        MissingWindowSinceUtc = missingSince,
                         LastActivityUtc = hwnd != nint.Zero && (foreground == hwnd || GetAncestor(foreground, GA_ROOT) == GetAncestor(hwnd, GA_ROOT)) ? _lastInputUtc : record.LastActivityUtc
                     };
+                    if (hwnd == nint.Zero && missingSince is not null && now - missingSince.Value >= MissingWindowGracePeriod && !_stopping.Contains(record.AccountId))
+                        missingWindowAccounts.Add(record.AccountId);
                     if (snapshot != record)
                     {
                         _records[record.AccountId] = snapshot;
@@ -267,13 +372,15 @@ public sealed class RunningAccountRegistry : IDisposable
                 }
             }
 
-            if (exited.Count > 0) SaveLocked();
+            if (exited.Count > 0 || changed.Count > 0) SaveLocked();
         }
 
         foreach (var wrapper in wrappersToDetach) DetachProcessWatcher(string.Empty, wrapper);
 
         foreach (var snapshot in changed) AccountChanged?.Invoke(this, snapshot);
         foreach (var snapshot in exited) RaiseAccountExited(snapshot);
+        foreach (var accountId in missingWindowAccounts)
+            _ = TerminateAccountAsync(accountId);
     }
 
     private void RaiseAccountExited(ManagedAccountSnapshot snapshot)
@@ -383,7 +490,9 @@ public sealed class RunningAccountRegistry : IDisposable
         int ProcessId,
         long ProcessStartTimeUtcTicks,
         DateTime LastActivityUtc,
-        long WindowHandle = 0)
+        long WindowHandle = 0,
+        string ExecutablePath = "",
+        DateTime? MissingWindowSinceUtc = null)
     {
         public ManagedAccountSnapshot ToSnapshot()
         {
@@ -406,6 +515,122 @@ public sealed class RunningAccountRegistry : IDisposable
                 windowHandle != nint.Zero,
                 processRoot);
         }
+    }
+
+    private static string? TryGetExecutablePath(Process process)
+    {
+        try { return process.MainModule?.FileName; }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static Process? TryGetValidatedProcess(RunningAccountRecord expected)
+    {
+        Process? process = null;
+        try
+        {
+            process = Process.GetProcessById(expected.ProcessId);
+            process.Refresh();
+            if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != expected.ProcessStartTimeUtcTicks ||
+                !MatchesExecutable(process, expected))
+            {
+                process.Dispose();
+                return null;
+            }
+            return process;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+        {
+            process?.Dispose();
+            return null;
+        }
+    }
+
+    private static bool MatchesExecutable(Process process, RunningAccountRecord expected)
+    {
+        var currentPath = TryGetExecutablePath(process);
+        if (!string.IsNullOrWhiteSpace(expected.ExecutablePath))
+        {
+            try
+            {
+                return currentPath is not null &&
+                       string.Equals(Path.GetFullPath(currentPath), Path.GetFullPath(expected.ExecutablePath), StringComparison.OrdinalIgnoreCase);
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        // Older persisted records predate executable-path tracking.  Refuse to
+        // act on an unknown process unless its stable image name is Roblox.
+        return string.Equals(process.ProcessName, "RobloxPlayerBeta", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void TryRequestGracefulClose(Process process, RunningAccountRecord expected)
+    {
+        try
+        {
+            process.Refresh();
+            if (!process.HasExited && process.CloseMainWindow()) return;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
+        {
+            // Embedded clients do not always expose a conventional main window;
+            // fall through to a validated WM_CLOSE on the managed root.
+        }
+
+        var window = GetProcessRootWindow((nint)expected.WindowHandle, expected.ProcessId);
+        if (window != nint.Zero && IsOwnedProcessWindow(window, expected.ProcessId))
+            PostMessage(window, WmClose, nint.Zero, nint.Zero);
+    }
+
+    private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (HasExitedSafely(process)) return true;
+            await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+        }
+        return HasExitedSafely(process);
+    }
+
+    private static bool HasExitedSafely(Process process)
+    {
+        try { return process.HasExited; }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception) { return true; }
+    }
+
+    private static int? TryGetExitCode(Process process)
+    {
+        try { return process.HasExited ? process.ExitCode : null; }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception) { return null; }
+    }
+
+    private void FinalizeRecord(string accountId, RunningAccountRecord expected, int? exitCode, string diagnostic)
+    {
+        ManagedAccountSnapshot? exitedSnapshot = null;
+        Process? wrapper = null;
+        lock (_gate)
+        {
+            if (_records.TryGetValue(accountId, out var current) &&
+                current.ProcessId == expected.ProcessId &&
+                current.ProcessStartTimeUtcTicks == expected.ProcessStartTimeUtcTicks)
+            {
+                _records.Remove(accountId);
+                _processes.Remove(accountId, out wrapper);
+                exitedSnapshot = current.ToSnapshot() with { IsRunning = false, ExitCode = exitCode };
+                SaveLocked();
+            }
+        }
+
+        DetachProcessWatcher(accountId, wrapper);
+        Diagnostic?.Invoke(this, diagnostic);
+        if (exitedSnapshot is not null) RaiseAccountExited(exitedSnapshot);
     }
 
     private static bool IsOwnedProcessWindow(nint hwnd, int processId)
@@ -450,6 +675,7 @@ public sealed class RunningAccountRegistry : IDisposable
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint hwnd, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint hwnd, ref char className, int maxCount);
     [DllImport("user32.dll")] private static extern bool IsIconic(nint hWnd);
+    [DllImport("user32.dll")] private static extern bool PostMessage(nint hWnd, uint message, nint wParam, nint lParam);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint hWnd, out RECT rect);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(nint hWnd, ref POINT point);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint hWnd);

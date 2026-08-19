@@ -20,14 +20,20 @@ public static class EmbeddedInputBridge
     private static HwndSource? _source;
     private static Func<string?>? _visibleAccount;
     private static Func<string, nint?>? _rootResolver;
+    private static Func<string, nint?>? _inputTargetResolver;
 
     public static Action<string>? Diagnostics { get; set; }
 
-    public static void Attach(nint foregroundWindow, Func<string?> visibleAccount, Func<string, nint?> rootResolver)
+    public static void Attach(
+        nint foregroundWindow,
+        Func<string?> visibleAccount,
+        Func<string, nint?> rootResolver,
+        Func<string, nint?>? inputTargetResolver = null)
     {
         Detach();
         _visibleAccount = visibleAccount;
         _rootResolver = rootResolver;
+        _inputTargetResolver = inputTargetResolver;
         _source = HwndSource.FromHwnd(foregroundWindow);
         _source?.AddHook(WndProc);
     }
@@ -38,6 +44,7 @@ public static class EmbeddedInputBridge
         _source = null;
         _visibleAccount = null;
         _rootResolver = null;
+        _inputTargetResolver = null;
     }
 
     public static bool FocusEmbedded(nint root)
@@ -48,7 +55,32 @@ public static class EmbeddedInputBridge
             return false;
         }
 
-        var gameThread = GetWindowThreadProcessId(root, out _);
+        // Focus is allowed only for a client already hosted by the current
+        // foreground top-level window. SetFocus itself does not change the
+        // desktop foreground window, and this check prevents it from being
+        // used to pull RAM over another game or application.
+        var foregroundRoot = GetAncestor(root, GaRoot);
+        if (foregroundRoot == nint.Zero || GetForegroundWindow() != foregroundRoot)
+        {
+            Diagnostics?.Invoke("Embedded focus: RAM does not own the foreground window.");
+            return false;
+        }
+
+        var target = ResolveInputTarget(root);
+        if (target == nint.Zero || !IsWindow(target) || !IsWindowVisible(target) || !IsWindowEnabled(target) ||
+            !IsFocusWithin(root, target))
+        {
+            Diagnostics?.Invoke("Embedded focus: the native Roblox input target is unavailable.");
+            return false;
+        }
+
+        var gameThread = GetWindowThreadProcessId(target, out var targetProcessId);
+        GetWindowThreadProcessId(root, out var rootProcessId);
+        if (gameThread == 0 || targetProcessId == 0 || rootProcessId != targetProcessId)
+        {
+            Diagnostics?.Invoke("Embedded focus: the input target process identity changed.");
+            return false;
+        }
         var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
         if (gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) &&
             IsFocusWithin(root, info.hwndFocus) && IsFocusWithin(root, info.hwndActive)) return true;
@@ -61,20 +93,18 @@ public static class EmbeddedInputBridge
             // SetFocus is only valid across threads while their input queues
             // are attached. The attachment is deliberately scoped to this
             // operation and is always undone below.
-            // SetActiveWindow is required as well: mouse input is routed to
-            // the active window on the Roblox GUI thread, while SetFocus only
-            // changes the keyboard target. This never changes the desktop
-            // foreground window; it only activates the already-foreground
-            // embedded child within the attached input queues.
-            _ = SetActiveWindow(root);
-            _ = SetFocus(root);
+            if (GetForegroundWindow() != foregroundRoot ||
+                GetWindowThreadProcessId(root, out var currentRootProcessId) == 0 ||
+                currentRootProcessId != rootProcessId || GetParent(root) == nint.Zero)
+            {
+                Diagnostics?.Invoke("Embedded focus: the client changed while focus was being prepared.");
+                return false;
+            }
+
+            _ = SetFocus(target);
             info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
             var actual = gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) ? info.hwndFocus : nint.Zero;
-            Diagnostics?.Invoke($"Embedded focus 0x{root.ToInt64():X}: attached={(attached ? "yes" : "no")}, active 0x{info.hwndActive.ToInt64():X}, actual focus 0x{actual.ToInt64():X}.");
-            // Some Roblox builds report no active top-level HWND after their
-            // former popup is reparented, even though the child owns focus.
-            // Focus containment is the reliable invariant for input routing;
-            // the active HWND is diagnostic only.
+            Diagnostics?.Invoke($"Embedded focus 0x{root.ToInt64():X}/target 0x{target.ToInt64():X}: attached={(attached ? "yes" : "no")}, actual focus 0x{actual.ToInt64():X}.");
             return IsFocusWithin(root, actual);
         }
         finally
@@ -94,9 +124,6 @@ public static class EmbeddedInputBridge
 
     public static void TransferFocus(nint? previousRoot, nint currentRoot, bool hostForeground)
     {
-        if (previousRoot is not null && previousRoot != nint.Zero && previousRoot != currentRoot)
-            SendActivation(previousRoot.Value, active: false);
-        SendActivation(currentRoot, hostForeground);
         if (hostForeground) FocusEmbedded(currentRoot);
     }
 
@@ -131,7 +158,6 @@ public static class EmbeddedInputBridge
         if (root == nint.Zero) return;
         var foregroundRoot = _source is null ? nint.Zero : GetAncestor(_source.Handle, GaRoot);
         var foreground = active && foregroundRoot != nint.Zero && GetForegroundWindow() == foregroundRoot;
-        SendActivation(root, foreground);
         if (foreground) FocusEmbedded(root);
     }
 
@@ -145,38 +171,50 @@ public static class EmbeddedInputBridge
             : nint.Zero;
     }
 
-    private static void SendActivation(nint root, bool active)
+    private static nint ResolveInputTarget(nint root)
     {
-        if (root == nint.Zero || !IsWindow(root)) return;
-        var state = active ? new nint(1) : nint.Zero;
-        SendMessageTimeout(root, WmActivateApp, state, nint.Zero, SmtoAbortIfHung, 100, out _);
-        SendMessageTimeout(root, WmActivate, state, _source?.Handle ?? nint.Zero, SmtoAbortIfHung, 100, out _);
+        var accountId = _visibleAccount?.Invoke();
+        var resolved = accountId is null ? null : _inputTargetResolver?.Invoke(accountId);
+        if (resolved is not null && resolved.Value != nint.Zero && IsFocusWithin(root, resolved.Value))
+            return resolved.Value;
+        return FindDeepestInputDescendant(root);
+    }
+
+    private static nint FindDeepestInputDescendant(nint root)
+    {
+        var best = root;
+        var child = GetWindow(root, GwChild);
+        while (child != nint.Zero)
+        {
+            if (IsWindow(child) && IsWindowVisible(child) && IsWindowEnabled(child) && IsFocusWithin(root, child))
+            {
+                best = FindDeepestInputDescendant(child);
+                break;
+            }
+            child = GetWindow(child, GwNext);
+        }
+        return best;
     }
 
     private static bool IsFocusWithin(nint root, nint focusedWindow) =>
         focusedWindow != nint.Zero && (focusedWindow == root || IsChild(root, focusedWindow));
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern nint SendMessageTimeout(
-        nint window,
-        int message,
-        nint wParam,
-        nint lParam,
-        uint flags,
-        uint timeoutMilliseconds,
-        out nint result);
-
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
-    [DllImport("user32.dll")] private static extern nint SetActiveWindow(nint window);
     [DllImport("user32.dll")] private static extern nint SetFocus(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(nint window);
     [DllImport("user32.dll")] private static extern bool IsChild(nint parent, nint window);
+    [DllImport("user32.dll")] private static extern nint GetParent(nint window);
+    [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
     [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
     [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO info);
+
+    private const uint GwChild = 5;
+    private const uint GwNext = 2;
 
     private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 

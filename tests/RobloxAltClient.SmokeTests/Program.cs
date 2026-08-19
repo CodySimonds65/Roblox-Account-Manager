@@ -227,6 +227,28 @@ finally
     if (Directory.Exists(exitStateRoot)) Directory.Delete(exitStateRoot, recursive: true);
 }
 
+var terminationStateRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-terminate-" + Guid.NewGuid().ToString("N"));
+try
+{
+    using var terminationRegistry = new RunningAccountRegistry(terminationStateRoot);
+    using var managedProcess = Process.Start(new ProcessStartInfo("cmd.exe", "/c ping 127.0.0.1 -n 30 > nul")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true
+    }) ?? throw new InvalidOperationException("The termination helper process did not start.");
+    terminationRegistry.Register(new AccountProfile { Id = "terminate-test", Label = "Terminate test" }, managedProcess);
+    Require(await terminationRegistry.TerminateAccountAsync("terminate-test"),
+        "The registry did not terminate the managed helper process.");
+    Require(managedProcess.HasExited, "The managed helper process remained alive after termination.");
+    Require(terminationRegistry.Snapshot().Count == 0, "The terminated account remained registered.");
+}
+finally
+{
+    if (Directory.Exists(terminationStateRoot)) Directory.Delete(terminationStateRoot, recursive: true);
+}
+
+Console.WriteLine("Managed-account termination smoke tests passed.");
+
 var legacySettings = JsonSerializer.Deserialize<LauncherSettings>("{}");
 Require(legacySettings?.GameSettings is not null && legacySettings.GameOverrides is not null,
     "Legacy launcher settings did not receive game-settings defaults.");
@@ -1060,6 +1082,10 @@ try
     Require(subscribeRejected is not null, "The plugin host did not reject an invalid hotkey subscription.");
     var rejectReason = subscribeRejected!.Payload.TryGetProperty("reason", out var reasonElement) ? reasonElement.GetString() : null;
     Require(rejectReason == "invalid-request", "The invalid hotkey subscription was not rejected as invalid-request.");
+    // The loopback account uses this smoke-test process as a stand-in client;
+    // unregister it before PluginRuntime.DisposeAsync performs managed-client
+    // shutdown so the test runner itself is never terminated.
+    Require(inputRuntime.Accounts.Remove(inputAccountId), "The loopback input account was not removed.");
 }
 finally
 {

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -43,7 +44,8 @@ public partial class ClientsPanel : UserControl
         NativeClientHost.FocusVisibleClient = FocusVisibleClient;
         EmbeddedInputBridge.Diagnostics = Log;
         EmbeddedInputBridge.Attach(_foregroundWindow, () => _runtime?.ClientEmbeddings.VisibleAccountId,
-            accountId => _runtime?.ClientEmbeddings.RootFor(accountId));
+            accountId => _runtime?.ClientEmbeddings.RootFor(accountId),
+            accountId => _runtime?.ClientEmbeddings.InputTargetFor(accountId));
         _runtime.Accounts.AccountChanged += Accounts_AccountChanged;
         _runtime.Accounts.AccountExited += Accounts_AccountExited;
         _runtime.ClientEmbeddings.FilterChanged += ResyncTabs;
@@ -204,6 +206,28 @@ public partial class ClientsPanel : UserControl
             if (root is not null && root != nint.Zero)
                 EmbeddedInputBridge.TransferFocus(previousRoot, root.Value, runtime.ClientEmbeddings.HostOwnsForeground());
         }));
+    }
+
+    private async void CloseClientTab_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (_runtime is null || sender is not FrameworkElement { DataContext: ManagedAccountSnapshot account }) return;
+
+        // Closing a tab is a session operation, not an account-profile delete.
+        // Remove the native embedding before asking the registry to stop the
+        // identity-checked Roblox process so its final exit cannot leave a
+        // hidden tray client behind.
+        _runtime.ClientEmbeddings.TryUnembed(account.AccountId);
+        try
+        {
+            var stopped = await _runtime.Accounts.TerminateAccountAsync(account.AccountId);
+            if (!stopped)
+                Log($"RAM could not close {account.Label}; the client remains running.");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+        {
+            Log($"RAM could not close {account.Label}: {ex.Message}");
+        }
     }
 
     private bool HasTab(string accountId) =>
