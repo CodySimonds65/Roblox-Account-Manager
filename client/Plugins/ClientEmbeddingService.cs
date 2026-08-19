@@ -72,9 +72,10 @@ public sealed class ClientEmbeddingService
             SetWindowLongPtr(previousRoot, GwlStyle, new nint((previousStyle & ~WsChild) | WsPopup));
         }
         var style = GetWindowLongPtr(rootWindow, GwlStyle).ToInt64();
-        // Visibility is controlled by ShowOnly/ShowWindow; the child must not
-        // appear on the desktop before it is shown inside the host tab.
-        style = (style & ~WsPopup & ~WsVisible) | WsChild;
+        // Keep the window visible through the reparent: clearing WS_VISIBLE or
+        // hiding a live D3D swapchain is a common game-crash trigger. Visibility
+        // is managed afterwards with ShowWindow/ShowOnly on stable windows.
+        style = (style & ~WsPopup) | WsChild | WsVisible;
         SetWindowLongPtr(rootWindow, GwlStyle, new nint(style));
         SetParent(rootWindow, _hostWindow);
         return true;
