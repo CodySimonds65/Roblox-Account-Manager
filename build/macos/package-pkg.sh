@@ -162,13 +162,19 @@ fi
 # architecture, signature, and payload checks—and pkgbuild itself—operate on
 # this immutable staging copy, avoiding a validation/build TOCTOU window.
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/ram-pkg-build.XXXXXX")"
-trap 'rm -rf -- "$temp_root"' EXIT
+cleanup_build_root() {
+  if [[ -n "${temp_root:-}" && -d "$temp_root" ]]; then
+    chmod -R u+w "$temp_root" 2>/dev/null || true
+    rm -rf "$temp_root"
+  fi
+}
+trap cleanup_build_root EXIT
 if find "$app_path/Contents" -type l -print -quit | grep -q .; then
   die "app contains a symlink; refusing a bundle path escape."
 fi
 staged_app="$temp_root/Roblox Account Manager.app"
 ditto -- "$app_path" "$staged_app"
-chmod -R u-w -- "$staged_app"
+chmod -R u-w "$staged_app"
 app_path="$staged_app"
 
 plist="$app_path/Contents/Info.plist"
