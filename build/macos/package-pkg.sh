@@ -78,10 +78,19 @@ validate_script_free_component() {
       prefix2 = "Roblox Account Manager.app/"
     }
     $0 == "" { next }
+    # pkgutil emits component payload paths relative to the package root and
+    # prefixes them with ./ on macOS. Reject absolute/traversal paths before
+    # normalizing that harmless presentation prefix.
     $0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/ { exit 1 }
-    $0 == "Applications" || $0 == "Applications/" ||
-      $0 == "Roblox Account Manager.app" || $0 == "Roblox Account Manager.app/" { next }
-    index($0, prefix1) == 1 || index($0, prefix2) == 1 { next }
+    path = $0
+    sub(/^\.\//, "", path)
+    path == "" || path == "." { next }
+    path == "Applications" || path == "Applications/" ||
+      path == "Applications/Roblox Account Manager.app" ||
+      path == "Applications/Roblox Account Manager.app/" ||
+      path == "Roblox Account Manager.app" ||
+      path == "Roblox Account Manager.app/" { next }
+    index(path, prefix1) == 1 || index(path, prefix2) == 1 { next }
     { exit 1 }
   ' "$payload_list"; then
     echo "Rejected PKG payload entries:" >&2
