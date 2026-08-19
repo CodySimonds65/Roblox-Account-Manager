@@ -294,7 +294,6 @@ public sealed class App : Application
                 OperatingSystem.IsWindows() ? RobloxPlatform.Windows : RobloxPlatform.Unknown;
             var composition = DesktopComposition.Create(
                 platform,
-                TrustedRobloxIdentityConfiguration.LoadTeamIdentifier(),
                 TrustedRobloxIdentityConfiguration.LoadInstallerIdentity());
             var shell = new DesktopShellViewModel(composition.Capabilities, composition.Accounts, composition.Presets, composition.Settings, composition.Updates, composition.RobloxSettings, composition.Plugins);
             if (composition.Plugins is MacPluginHostFacade macPlugins)

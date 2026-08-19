@@ -57,7 +57,7 @@ Unsigned development bundles may require **System Settings → Privacy & Securit
 
 While Apple signing credentials are being configured, the repository also provides a manually triggered temporary unsigned release path. Its assets include `-unsigned` in the filename and are never presented as certified. Users must explicitly approve the installer and app through macOS **Privacy & Security → Open Anyway**. These packages are for testing only; use the signed workflow for normal distribution.
 
-macOS launching is fail-closed until `RAM_TRUSTED_ROBLOX_TEAM_ID` is set to the 10-character Team Identifier captured from a verified official Roblox installation. Signed release packaging stores that identity in the signed app resources, separately from RAM's own Apple signing identity; an unconfigured development build can manage browser sessions and inspect clients but will not pass an authentication ticket to an app bundle.
+macOS launching is fail-closed unless the selected Roblox bundle passes exact bundle-ID, approved-location, strict Developer ID, Gatekeeper, and designated-requirement checks. These checks do not prove the publisher's Team ID; that pinning is intentionally omitted so unsigned RAM packages can launch without a maintainer-only Roblox signing secret. The RAM app and PKG remain independently signed and notarized when the signed release workflow is used.
 
 ## Settings
 

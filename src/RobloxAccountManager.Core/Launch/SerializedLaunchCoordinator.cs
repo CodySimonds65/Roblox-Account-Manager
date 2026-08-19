@@ -93,7 +93,10 @@ public sealed class SerializedLaunchCoordinator
                     continue;
                 }
 
-                var verification = await _processLocator.VerifyLaunchedProcessAsync(snapshot, request, cancellationToken).ConfigureAwait(false);
+                var verificationRequest = string.IsNullOrWhiteSpace(launch.ValidatedRobloxBundleFingerprint)
+                    ? request
+                    : request with { ValidatedRobloxBundleFingerprint = launch.ValidatedRobloxBundleFingerprint };
+                var verification = await _processLocator.VerifyLaunchedProcessAsync(snapshot, verificationRequest, cancellationToken).ConfigureAwait(false);
                 if (verification.Succeeded && verification.Process is not null && verification.Process.Identity.IsValid)
                 {
                     var identity = verification.Process.Identity;

@@ -3,16 +3,21 @@ namespace RobloxAccountManager.Platform.MacOS;
 public sealed class MacLaunchVerificationService
 {
     private readonly IRobloxProcessLocator _processLocator;
+    private readonly Func<string, CancellationToken, Task<MacBundleInfo?>>? _bundleValidator;
 
-    public MacLaunchVerificationService(IRobloxProcessLocator processLocator)
+    public MacLaunchVerificationService(
+        IRobloxProcessLocator processLocator,
+        Func<string, CancellationToken, Task<MacBundleInfo?>>? bundleValidator = null)
     {
         _processLocator = processLocator;
+        _bundleValidator = bundleValidator;
     }
 
     public async Task<LaunchVerificationResult> WaitForNewProcessAsync(
         RobloxLaunchSnapshot before,
         string expectedBundlePath,
         TimeSpan timeout,
+        string? expectedBundleFingerprint = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(expectedBundlePath) || !Directory.Exists(expectedBundlePath))
@@ -24,11 +29,39 @@ public sealed class MacLaunchVerificationService
                 ["The selected Roblox bundle no longer exists."]);
         }
 
+        var baselineFingerprint = expectedBundleFingerprint;
+        if (_bundleValidator is not null)
+        {
+            var validatedBundle = await _bundleValidator(expectedBundlePath, cancellationToken).ConfigureAwait(false);
+            if (validatedBundle is null)
+            {
+                return new LaunchVerificationResult(
+                    LaunchVerificationStatus.InvalidBundle,
+                    null,
+                    false,
+                    ["The selected Roblox bundle failed signature validation."]);
+            }
+
+            if (!string.IsNullOrWhiteSpace(baselineFingerprint)
+                && !string.Equals(validatedBundle.SourceFingerprint, baselineFingerprint, StringComparison.Ordinal))
+            {
+                return BundleChangedResult();
+            }
+
+            baselineFingerprint ??= validatedBundle.SourceFingerprint;
+        }
+
         var deadline = DateTimeOffset.UtcNow + timeout;
         var candidates = new Dictionary<int, RobloxProcessInfo>();
         while (DateTimeOffset.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (_bundleValidator is not null
+                && !await BundleStillMatchesAsync(expectedBundlePath, baselineFingerprint!, cancellationToken).ConfigureAwait(false))
+            {
+                return BundleChangedResult();
+            }
+
             var snapshot = _processLocator.CaptureSnapshot();
             foreach (var process in snapshot.Processes)
             {
@@ -68,6 +101,12 @@ public sealed class MacLaunchVerificationService
 
             if (stableCandidates.Count == 1)
             {
+                if (_bundleValidator is not null
+                    && !await BundleStillMatchesAsync(expectedBundlePath, baselineFingerprint!, cancellationToken).ConfigureAwait(false))
+                {
+                    return BundleChangedResult();
+                }
+
                 var priorMissing = before.Processes.Any(
                     process => process.IsManaged
                         && PathSafety.PathsEqual(process.Identity.BundlePath, expectedBundlePath)
@@ -109,6 +148,23 @@ public sealed class MacLaunchVerificationService
             priorMissingAtTimeout,
             ["No new stable Roblox process identity was observed before the verification timeout."]);
     }
+
+    private async Task<bool> BundleStillMatchesAsync(
+        string expectedBundlePath,
+        string expectedBundleFingerprint,
+        CancellationToken cancellationToken)
+    {
+        var current = await _bundleValidator!(expectedBundlePath, cancellationToken).ConfigureAwait(false);
+        return current is not null
+            && string.Equals(current.SourceFingerprint, expectedBundleFingerprint, StringComparison.Ordinal);
+    }
+
+    private static LaunchVerificationResult BundleChangedResult() =>
+        new(
+            LaunchVerificationStatus.InvalidBundle,
+            null,
+            false,
+            ["The Roblox bundle changed or failed signature validation during launch verification."]);
 }
 
 public sealed class MacOriginalBundleLaunchStrategy
@@ -116,6 +172,7 @@ public sealed class MacOriginalBundleLaunchStrategy
     private readonly IRobloxProcessLocator _processLocator;
     private readonly MacSemaphore _semaphore;
     private readonly IMacProcessCommandRunner _commandRunner;
+    private readonly MacBundleDiscovery _bundleDiscovery;
     private readonly MacLaunchVerificationService _verification;
     private readonly MacManagedProcessRegistry _registry;
 
@@ -123,12 +180,16 @@ public sealed class MacOriginalBundleLaunchStrategy
         IRobloxProcessLocator processLocator,
         MacSemaphore? semaphore = null,
         IMacProcessCommandRunner? commandRunner = null,
-        MacManagedProcessRegistry? registry = null)
+        MacManagedProcessRegistry? registry = null,
+        MacBundleDiscovery? bundleDiscovery = null)
     {
         _processLocator = processLocator;
         _semaphore = semaphore ?? new MacSemaphore();
         _commandRunner = commandRunner ?? new MacProcessCommandRunner();
-        _verification = new MacLaunchVerificationService(processLocator);
+        _bundleDiscovery = bundleDiscovery ?? new MacBundleDiscovery(_commandRunner);
+        Func<string, CancellationToken, Task<MacBundleInfo?>> bundleValidator =
+            (path, token) => _bundleDiscovery.ValidateAsync(path, token);
+        _verification = new MacLaunchVerificationService(processLocator, bundleValidator);
         _registry = registry ?? new MacManagedProcessRegistry();
     }
 
@@ -155,6 +216,15 @@ public sealed class MacOriginalBundleLaunchStrategy
             var unsupported = new LaunchVerificationResult(LaunchVerificationStatus.Failed, null, false, warning);
             var notMac = new SingletonReleaseResult(SingletonReleaseStatus.NotMacOS, 0, null);
             return new MacLaunchResult(MacLaunchLevel.OriginalBundle, notMac, notMac, unsupported, false, warning);
+        }
+
+        var validatedBundle = await _bundleDiscovery.ValidateAsync(request.BundlePath, cancellationToken).ConfigureAwait(false);
+        if (validatedBundle is null)
+        {
+            var warning = new[] { "The selected Roblox bundle failed signature or path validation; launch was not attempted." };
+            var absent = new SingletonReleaseResult(SingletonReleaseStatus.AlreadyAbsent, 0, null);
+            var invalid = new LaunchVerificationResult(LaunchVerificationStatus.InvalidBundle, null, false, warning);
+            return new MacLaunchResult(MacLaunchLevel.OriginalBundle, absent, absent, invalid, false, warning);
         }
 
         var before = _processLocator.CaptureSnapshot();
@@ -187,20 +257,38 @@ public sealed class MacOriginalBundleLaunchStrategy
                 }
                 else
                 {
-                    // Do not log or retain this argument. It can contain an authentication ticket.
-                    var command = await _commandRunner.RunAsync(
-                        "/usr/bin/open",
-                        ["-n", "-a", request.BundlePath, validUri.ToString()],
-                        cancellationToken).ConfigureAwait(false);
-                    commandSucceeded = command.Succeeded;
-                    var timeout = request.VerificationTimeout.GetValueOrDefault(TimeSpan.FromSeconds(30));
-                    verification = commandSucceeded
-                        ? await _verification.WaitForNewProcessAsync(before, request.BundlePath, timeout, cancellationToken).ConfigureAwait(false)
-                        : new LaunchVerificationResult(
-                            LaunchVerificationStatus.Failed,
+                    var revalidatedBundle = await _bundleDiscovery.ValidateAsync(request.BundlePath, cancellationToken).ConfigureAwait(false);
+                    if (revalidatedBundle is null
+                        || !string.Equals(validatedBundle.SourceFingerprint, revalidatedBundle.SourceFingerprint, StringComparison.Ordinal))
+                    {
+                        verification = new LaunchVerificationResult(
+                            LaunchVerificationStatus.InvalidBundle,
                             null,
                             false,
-                            ["The macOS open command failed; no process was assigned to the account."]);
+                            ["The Roblox bundle changed or failed signature validation before launch."]);
+                    }
+                    else
+                    {
+                        // Do not log or retain this argument. It can contain an authentication ticket.
+                        var command = await _commandRunner.RunAsync(
+                            "/usr/bin/open",
+                            ["-n", "-a", revalidatedBundle.BundlePath, validUri.ToString()],
+                            cancellationToken).ConfigureAwait(false);
+                        commandSucceeded = command.Succeeded;
+                        var timeout = request.VerificationTimeout.GetValueOrDefault(TimeSpan.FromSeconds(30));
+                        verification = commandSucceeded
+                            ? await _verification.WaitForNewProcessAsync(
+                                before,
+                                request.BundlePath,
+                                timeout,
+                                expectedBundleFingerprint: revalidatedBundle.SourceFingerprint,
+                                cancellationToken: cancellationToken).ConfigureAwait(false)
+                            : new LaunchVerificationResult(
+                                LaunchVerificationStatus.Failed,
+                                null,
+                                false,
+                                ["The macOS open command failed; no process was assigned to the account."]);
+                    }
                 }
             }
         }

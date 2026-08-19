@@ -10,20 +10,13 @@ public sealed class MacBundleDiscovery
 
     private readonly IMacProcessCommandRunner _commandRunner;
     private readonly MacSignatureVerifier _signatureVerifier;
-    private readonly string _requiredTeamIdentifier;
-
-    public bool HasTrustedTeamIdentifier =>
-        _requiredTeamIdentifier.Length == 10
-        && _requiredTeamIdentifier.All(character => character is >= 'A' and <= 'Z' or >= '0' and <= '9');
 
     public MacBundleDiscovery(
         IMacProcessCommandRunner? commandRunner = null,
-        MacSignatureVerifier? signatureVerifier = null,
-        string? requiredTeamIdentifier = null)
+        MacSignatureVerifier? signatureVerifier = null)
     {
         _commandRunner = commandRunner ?? new MacProcessCommandRunner();
         _signatureVerifier = signatureVerifier ?? new MacSignatureVerifier(_commandRunner);
-        _requiredTeamIdentifier = requiredTeamIdentifier?.Trim() ?? string.Empty;
     }
 
     public IReadOnlyList<string> GetDefaultBundleCandidates()
@@ -111,7 +104,7 @@ public sealed class MacBundleDiscovery
 
             PathSafety.RejectSymlink(executablePath);
             var signatureVerified = requireApprovedLocation
-                ? await _signatureVerifier.VerifyAsync(fullPath, _requiredTeamIdentifier, cancellationToken).ConfigureAwait(false)
+                ? await _signatureVerifier.VerifyAsync(fullPath, cancellationToken).ConfigureAwait(false)
                 : await _signatureVerifier.VerifyManagedAsync(fullPath, cancellationToken).ConfigureAwait(false);
             if (OperatingSystem.IsMacOS() && !signatureVerified)
             {
@@ -251,7 +244,6 @@ public sealed class MacSignatureVerifier
 
     public async Task<bool> VerifyAsync(
         string bundlePath,
-        string requiredTeamIdentifier,
         CancellationToken cancellationToken = default)
     {
         if (!OperatingSystem.IsMacOS())
@@ -272,7 +264,6 @@ public sealed class MacSignatureVerifier
             "/usr/bin/codesign",
             ["--display", "--verbose=4", "--", bundlePath],
             cancellationToken).ConfigureAwait(false);
-        var output = details.StandardOutput + "\n" + details.StandardError;
         var gatekeeper = await _commandRunner.RunAsync(
             "/usr/sbin/spctl",
             ["--assess", "--type", "execute", "--verbose=4", "--", bundlePath],
@@ -281,15 +272,24 @@ public sealed class MacSignatureVerifier
             "/usr/bin/codesign",
             ["--display", "--requirements", ":-", "--", bundlePath],
             cancellationToken).ConfigureAwait(false);
+        return IsAcceptedOfficialBundleSignature(details, gatekeeper, requirements);
+    }
+
+    internal static bool IsAcceptedOfficialBundleSignature(
+        MacProcessCommandResult details,
+        MacProcessCommandResult gatekeeper,
+        MacProcessCommandResult requirements)
+    {
+        var output = details.StandardOutput + "\n" + details.StandardError;
         var requirementOutput = requirements.StandardOutput + "\n" + requirements.StandardError;
-        // The installed source must be a notarizable/Developer ID application. Ad-hoc or
-        // unsigned input is never accepted as the basis for a managed runtime.
+        // The installed source must be a notarizable/Developer ID application with the
+        // Roblox bundle identity. Ad-hoc or unsigned input is never accepted as the basis
+        // for a managed runtime. Team ID pinning is intentionally omitted, so this check
+        // does not independently prove the publisher's identity.
         return details.Succeeded
             && gatekeeper.Succeeded
             && requirements.Succeeded
-            && !string.IsNullOrWhiteSpace(requiredTeamIdentifier)
             && output.Contains("Authority=Developer ID Application:", StringComparison.Ordinal)
-            && output.Contains($"TeamIdentifier={requiredTeamIdentifier}", StringComparison.Ordinal)
             && output.Contains($"Identifier={MacBundleDiscovery.RobloxBundleIdentifier}", StringComparison.Ordinal)
             && requirementOutput.Contains($"identifier \"{MacBundleDiscovery.RobloxBundleIdentifier}\"", StringComparison.Ordinal)
             && !output.Contains("Signature=adhoc", StringComparison.OrdinalIgnoreCase);

@@ -46,12 +46,6 @@ cp "$plist_template" "$output_app/Contents/Info.plist"
 # workflow after this step.
 find "$output_app/Contents/MacOS" -type f \( -name '*.dylib' -o -name 'RobloxAccountManager' -o -name 'createdump' \) -exec chmod u+x {} +
 
-if [[ -n "${RAM_TRUSTED_ROBLOX_TEAM_ID:-}" ]]; then
-  printf '%s\n' "$RAM_TRUSTED_ROBLOX_TEAM_ID" > \
-    "$output_app/Contents/Resources/RobloxDeveloperTeamIdentifier"
-  chmod 600 "$output_app/Contents/Resources/RobloxDeveloperTeamIdentifier"
-fi
-
 if [[ -n "${RAM_TRUSTED_INSTALLER_IDENTITY:-}" ]]; then
   printf '%s\n' "$RAM_TRUSTED_INSTALLER_IDENTITY" > \
     "$output_app/Contents/Resources/RobloxInstallerIdentity"

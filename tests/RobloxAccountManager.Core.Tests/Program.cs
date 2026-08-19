@@ -58,6 +58,9 @@ var result = await coordinator.LaunchAsync(new RobloxLaunchRequest(
 Require(result.Succeeded, "The retry coordinator did not return the verified second process.");
 Require(uriCalls == 2 && launcher.LaunchCount == 2, "A retry reused a launch URI or skipped an attempt.");
 Require(locator.SnapshotCount == 2, "The process baseline was not refreshed before every launch attempt.");
+Require(locator.ValidatedFingerprints.Count == 2
+        && locator.ValidatedFingerprints.All(fingerprint => fingerprint == "pre-launch-fingerprint"),
+    "The pre-launch bundle fingerprint was not carried into every process verification attempt.");
 
 Require(GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/games/123/example", out var normalized)
         && normalized.Contains("/games/123/", StringComparison.Ordinal),
@@ -111,6 +114,7 @@ sealed class RetryLocator : IRobloxProcessLocator
 {
     private int _verificationCount;
     public int SnapshotCount { get; private set; }
+    public List<string?> ValidatedFingerprints { get; } = [];
 
     public ValueTask<RobloxLaunchSnapshot> CaptureSnapshotAsync(CancellationToken cancellationToken = default)
     {
@@ -121,6 +125,7 @@ sealed class RetryLocator : IRobloxProcessLocator
     public ValueTask<LaunchVerificationResult> VerifyLaunchedProcessAsync(
         RobloxLaunchSnapshot before, RobloxLaunchRequest request, CancellationToken cancellationToken = default)
     {
+        ValidatedFingerprints.Add(request.ValidatedRobloxBundleFingerprint);
         _verificationCount++;
         if (_verificationCount == 1)
             return ValueTask.FromResult(LaunchVerificationResult.Failure(LaunchFailureKind.ProcessNotFound, "not-found"));
@@ -149,6 +154,6 @@ sealed class RecordingLauncher : IRobloxPlatformLauncher
     public ValueTask<PlatformLaunchResult> LaunchAsync(RobloxLaunchRequest request, Uri freshLaunchUri, CancellationToken cancellationToken = default)
     {
         LaunchCount++;
-        return ValueTask.FromResult(PlatformLaunchResult.Success());
+        return ValueTask.FromResult(PlatformLaunchResult.Success("pre-launch-fingerprint"));
     }
 }

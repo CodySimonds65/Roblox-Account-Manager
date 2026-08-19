@@ -1177,7 +1177,7 @@ public sealed class MainWindow : Window
         panel.Children.Add(new TextBlock { Text = "Platform diagnostics", FontSize = 18, FontWeight = FontWeight.SemiBold });
         foreach (var capability in _viewModel.Capabilities.Snapshot.Capabilities)
             panel.Children.Add(new Border { Padding = new Thickness(8), BorderBrush = capability.Status == CapabilityStatus.Supported ? Brushes.ForestGreen : Brushes.DarkOrange, BorderThickness = new Thickness(1), Child = new TextBlock { Text = DesktopShellViewModel.Describe(capability), TextWrapping = TextWrapping.Wrap } });
-        panel.Children.Add(new TextBlock { Text = "Unsigned macOS packages require explicit approval in System Settings → Privacy & Security → Open Anyway. Roblox launch remains fail-closed unless the official Roblox bundle passes its configured Team ID verification.", TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new TextBlock { Text = "Unsigned macOS packages require explicit approval in System Settings → Privacy & Security → Open Anyway. Roblox launch remains fail-closed unless the selected Roblox bundle passes its exact bundle ID, Developer ID, Gatekeeper, and designated-requirement checks. Team ID pinning is intentionally omitted for unsigned-build portability.", TextWrapping = TextWrapping.Wrap });
         return Card(panel);
     }
 
@@ -1226,7 +1226,7 @@ public sealed class MainWindow : Window
     private async Task RunLaunchQueueAsync(bool consent, GamePreset? preset, IReadOnlyList<AccountProfile> accounts)
     {
         if (!consent) { _viewModel.AppendActivity("Launch blocked: explicit macOS multi-instance consent is required."); return; }
-        if (_launches is null || preset is null || !GamePreset.TryNormalizeRobloxGameUrl(preset.Url, out var gameUrl)) { _viewModel.AppendActivity("Launch blocked: configure trusted Roblox and a valid game preset."); return; }
+        if (_launches is null || preset is null || !GamePreset.TryNormalizeRobloxGameUrl(preset.Url, out var gameUrl)) { _viewModel.AppendActivity("Launch blocked: configure a validated Roblox bundle and a valid game preset."); return; }
         if (accounts.Count == 0) { _viewModel.AppendActivity("Launch blocked: favorite or open at least one account."); return; }
         _viewModel.Settings.MultiInstanceConsentGranted = true;
         _lastGameUrl = gameUrl;
@@ -1324,9 +1324,7 @@ public sealed class MainWindow : Window
 
     private async Task<string?> DiscoverRobloxBundleAsync()
     {
-        var team = TrustedRobloxIdentityConfiguration.LoadTeamIdentifier();
-        if (string.IsNullOrWhiteSpace(team)) return null;
-        var discovery = new MacBundleDiscovery(requiredTeamIdentifier: team);
+        var discovery = new MacBundleDiscovery();
         var bundle = await discovery.DiscoverAsync();
         return bundle?.BundlePath;
     }
