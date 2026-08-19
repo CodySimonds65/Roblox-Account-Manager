@@ -14,10 +14,13 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   package-pkg.sh <app> <output-pkg> <rid> <numeric-version> <Developer-ID-Installer-identity> [Developer-ID-Application-identity]
+  package-pkg.sh --unsigned <app> <output-pkg> <rid> <numeric-version>
   package-pkg.sh --verify <signed-and-stapled-pkg> [Developer-ID-Installer-identity]
 
 The build form creates a script-free component package. Gatekeeper and staple
 validation are performed by the --verify form after notarization/stapling.
+The --unsigned form is an explicitly labeled temporary testing path; it never
+claims Gatekeeper trust and must not be used for public releases.
 EOF
   exit 64
 }
@@ -55,14 +58,17 @@ validate_script_free_component() {
   local package_path="$1"
   local temp_root="$2"
   local expected_installer_label="${3:-}"
+  local require_signature="${4:-true}"
   local payload_list="$temp_root/payload-files.txt"
   local expanded="$temp_root/expanded"
 
-  pkgutil --check-signature "$package_path" | tee "$temp_root/signature.txt"
-  grep -q 'Status: signed' "$temp_root/signature.txt" || die "PKG is not signed."
-  grep -q 'Developer ID Installer' "$temp_root/signature.txt" || die "PKG is not signed by a Developer ID Installer identity."
-  if [[ -n "$expected_installer_label" ]]; then
-    grep -Fq "$expected_installer_label" "$temp_root/signature.txt" || die "PKG signer does not match the requested Developer ID Installer identity."
+  if [[ "$require_signature" == true ]]; then
+    pkgutil --check-signature "$package_path" | tee "$temp_root/signature.txt"
+    grep -q 'Status: signed' "$temp_root/signature.txt" || die "PKG is not signed."
+    grep -q 'Developer ID Installer' "$temp_root/signature.txt" || die "PKG is not signed by a Developer ID Installer identity."
+    if [[ -n "$expected_installer_label" ]]; then
+      grep -Fq "$expected_installer_label" "$temp_root/signature.txt" || die "PKG signer does not match the requested Developer ID Installer identity."
+    fi
   fi
 
   pkgutil --payload-files "$package_path" > "$payload_list"
@@ -117,23 +123,40 @@ if [[ "$1" == "--verify" ]]; then
   exit 0
 fi
 
-[[ $# == 5 || $# == 6 ]] || usage
-app_path="$(canonical_file "$1")"
-# The workflow stages into a fresh dist directory. Create only the explicit
-# output parent before canonicalizing it; never resolve or remove a broad path.
-mkdir -p -- "$(dirname "$2")"
-output_path="$(canonical_file "$2")"
-rid="$3"
-version="$4"
-installer_identity="$5"
-application_identity="${6:-${EXPECTED_APPLICATION_IDENTITY:-}}"
+unsigned=false
+if [[ "$1" == "--unsigned" ]]; then
+  [[ $# == 5 ]] || usage
+  unsigned=true
+  app_path="$(canonical_file "$2")"
+  # The workflow stages into a fresh dist directory. Create only the explicit
+  # output parent before canonicalizing it; never resolve or remove a broad path.
+  mkdir -p -- "$(dirname "$3")"
+  output_path="$(canonical_file "$3")"
+  rid="$4"
+  version="$5"
+  installer_identity=""
+  application_identity=""
+else
+  [[ $# == 5 || $# == 6 ]] || usage
+  app_path="$(canonical_file "$1")"
+  # The workflow stages into a fresh dist directory. Create only the explicit
+  # output parent before canonicalizing it; never resolve or remove a broad path.
+  mkdir -p -- "$(dirname "$2")"
+  output_path="$(canonical_file "$2")"
+  rid="$3"
+  version="$4"
+  installer_identity="$5"
+  application_identity="${6:-${EXPECTED_APPLICATION_IDENTITY:-}}"
+fi
 
 [[ -d "$app_path" && "$app_path" == *.app && ! -L "$app_path" ]] || die "input must be a real .app directory: $app_path"
 [[ "$output_path" == *.pkg ]] || die "output must end in .pkg: $output_path"
 [[ "$output_path" != "$app_path" ]] || die "output PKG cannot overwrite the app bundle."
 [[ "$rid" == "osx-arm64" || "$rid" == "osx-x64" ]] || die "RID must be osx-arm64 or osx-x64."
 [[ "$version" =~ ^[1-9][0-9]*$ ]] || die "PKG version must be a positive monotonic integer."
-[[ "$installer_identity" != *$'\n'* && -n "$installer_identity" ]] || die "installer identity is empty or contains a newline."
+if [[ "$unsigned" == false ]]; then
+  [[ "$installer_identity" != *$'\n'* && -n "$installer_identity" ]] || die "installer identity is empty or contains a newline."
+fi
 
 # Stage the app once and make that exact copy read-only. All subsequent plist,
 # architecture, signature, and payload checks—and pkgbuild itself—operate on
@@ -179,20 +202,21 @@ while IFS= read -r -d '' binary; do
   [[ " $binary_architectures " == *" $arch "* ]] || die "Mach-O file has no $arch slice: $binary"
 done < <(find "$app_path/Contents" -type f -print0)
 
-codesign --verify --deep --strict --verbose=2 "$app_path"
-app_signature="$(codesign -dv --verbose=4 "$app_path" 2>&1 || true)"
-grep -q 'Authority=Developer ID Application' <<<"$app_signature" || die "app is not signed by a Developer ID Application identity."
+installer_identity_label=""
+if [[ "$unsigned" == false ]]; then
+  codesign --verify --deep --strict --verbose=2 "$app_path"
+  app_signature="$(codesign -dv --verbose=4 "$app_path" 2>&1 || true)"
+  grep -q 'Authority=Developer ID Application' <<<"$app_signature" || die "app is not signed by a Developer ID Application identity."
 
-installer_identity_line="$(security find-identity -v -p basic | grep -F "$installer_identity" | head -n 1 || true)"
-[[ "$installer_identity_line" == *"Developer ID Installer"* ]] || die "identity is not an installed Developer ID Installer certificate: $installer_identity"
-installer_identity_label="$(resolve_identity_label "$installer_identity")"
+  installer_identity_line="$(security find-identity -v -p basic | grep -F "$installer_identity" | head -n 1 || true)"
+  [[ "$installer_identity_line" == *"Developer ID Installer"* ]] || die "identity is not an installed Developer ID Installer certificate: $installer_identity"
+  installer_identity_label="$(resolve_identity_label "$installer_identity")"
 
-if [[ -n "$application_identity" ]]; then
-  application_identity_label="$(resolve_identity_label "$application_identity")" || die "application identity is not installed: $application_identity"
-  [[ "$application_identity_label" == *"Developer ID Application"* ]] || die "identity is not a Developer ID Application certificate: $application_identity"
-  grep -Fq "$application_identity_label" <<<"$app_signature" || die "app signer does not match the requested Developer ID Application identity."
-else
-  application_identity_label=""
+  if [[ -n "$application_identity" ]]; then
+    application_identity_label="$(resolve_identity_label "$application_identity")" || die "application identity is not installed: $application_identity"
+    [[ "$application_identity_label" == *"Developer ID Application"* ]] || die "identity is not a Developer ID Application certificate: $application_identity"
+    grep -Fq "$application_identity_label" <<<"$app_signature" || die "app signer does not match the requested Developer ID Application identity."
+  fi
 fi
 
 output_parent="$(dirname "$output_path")"
@@ -201,13 +225,22 @@ if [[ -L "$output_path" ]]; then
   die "refusing to replace a symlink output path: $output_path"
 fi
 rm -f -- "$output_path"
-pkgbuild \
-  --component "$app_path" \
-  --install-location /Applications \
-  --identifier "$PACKAGE_IDENTIFIER" \
-  --version "$version" \
-  --sign "$installer_identity" \
-  "$output_path"
+pkgbuild_args=(
+  --component "$app_path"
+  --install-location /Applications
+  --identifier "$PACKAGE_IDENTIFIER"
+  --version "$version"
+)
+if [[ "$unsigned" == false ]]; then
+  pkgbuild_args+=(--sign "$installer_identity")
+fi
+pkgbuild_args+=("$output_path")
+pkgbuild "${pkgbuild_args[@]}"
 
-validate_script_free_component "$output_path" "$temp_root" "$installer_identity_label"
-echo "Created signed, script-free component PKG: $output_path"
+if [[ "$unsigned" == true ]]; then
+  validate_script_free_component "$output_path" "$temp_root" "" false
+  echo "Created UNSIGNED test-only component PKG: $output_path"
+else
+  validate_script_free_component "$output_path" "$temp_root" "$installer_identity_label" true
+  echo "Created signed, script-free component PKG: $output_path"
+fi
