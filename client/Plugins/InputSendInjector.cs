@@ -53,6 +53,13 @@ public sealed class InputSendInjector
             }
             previousOffset = input.OffsetMicroseconds;
             cancellationToken.ThrowIfCancellationRequested();
+            // Never inject into an app the user has switched to: the launcher must
+            // stay foreground and the embedded client visible.
+            if (GetForegroundWindow() != GetAncestor(rootWindow, GaRoot) || !IsWindowVisible(rootWindow))
+            {
+                var after = GetForegroundWindow();
+                return BackgroundInputResult.Failure("focus-lost", "The client lost focus during playback; input was stopped.", foregroundBefore, after, posted);
+            }
             if (!TryInject(rootWindow, input, out var error))
             {
                 var after = GetForegroundWindow();
@@ -133,7 +140,7 @@ public sealed class InputSendInjector
         _ => 0
     };
 
-    internal static uint WheelData(int wheelDelta) => unchecked((uint)(short)Math.Clamp(wheelDelta, -120000, 120000));
+    internal static uint WheelData(int wheelDelta) => unchecked((uint)(short)Math.Clamp(wheelDelta, short.MinValue, short.MaxValue));
 
     private static bool TryGetScreenPoint(nint rootWindow, PluginInputEvent input, out int x, out int y)
     {
@@ -163,6 +170,9 @@ public sealed class InputSendInjector
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint inputCount, INPUT[] inputs, int size);
     [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(nint window, ref POINT point);
+    private const uint GaRoot = 2;
 }

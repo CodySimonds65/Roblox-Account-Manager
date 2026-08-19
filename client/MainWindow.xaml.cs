@@ -64,6 +64,45 @@ public partial class MainWindow : Window
         GamePicker.ItemsSource = _games;
         GamePicker.SelectedIndex = 0;
         Loaded += MainWindow_Loaded;
+        SourceInitialized += (_, _) =>
+        {
+            var runtime = ((App)Application.Current).PluginRuntime;
+            ClientsPanel.AttachToWindow(this);
+            ClientsPanel.AccountEmbedded += () => Dispatcher.BeginInvoke(new Action(ShowClientsView));
+            runtime.ClientEmbeddings.EmbeddedRootResolver = accountId => runtime.ClientEmbeddings.RootFor(accountId);
+            runtime.ClientEmbeddings.EmbeddedActivate = accountId =>
+            {
+                if (Dispatcher.HasShutdownStarted) return;
+                Dispatcher.Invoke(new Action(() =>
+                {
+                    ShowClientsView();
+                    ClientsPanel.ActivateAccountForPlayback(accountId);
+                    Activate();
+                }));
+            };
+        };
+    }
+
+    private void BrowseView_Click(object sender, RoutedEventArgs e) => ShowBrowseView();
+
+    private void ClientsView_Click(object sender, RoutedEventArgs e) => ShowClientsView();
+
+    private void ShowClientsView()
+    {
+        BrowseViewButton.IsEnabled = true;
+        ClientsViewButton.IsEnabled = false;
+        BrowserHost.Visibility = Visibility.Collapsed;
+        ClientsPanel.Visibility = Visibility.Visible;
+        ClientsPanel.SetViewVisible(true);
+    }
+
+    private void ShowBrowseView()
+    {
+        BrowseViewButton.IsEnabled = false;
+        ClientsViewButton.IsEnabled = true;
+        ClientsPanel.SetViewVisible(false);
+        ClientsPanel.Visibility = Visibility.Collapsed;
+        BrowserHost.Visibility = Visibility.Visible;
     }
 
     private void WorkspaceGrid_LayoutUpdated(object? sender, EventArgs e)
@@ -607,19 +646,6 @@ public partial class MainWindow : Window
     {
         var window = new PluginsWindow { Owner = this };
         window.ShowDialog();
-    }
-
-    private ClientsWindow? _clientsWindow;
-
-    private void Clients_Click(object sender, RoutedEventArgs e)
-    {
-        if (_clientsWindow is null)
-        {
-            _clientsWindow = new ClientsWindow { Owner = this };
-            _clientsWindow.Closed += (_, _) => _clientsWindow = null;
-        }
-        _clientsWindow.Show();
-        _clientsWindow.Activate();
     }
 
     private async Task ApplyPendingDataCleanupAsync()
@@ -1552,8 +1578,13 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
-        ((App)Application.Current).PluginRuntime.Diagnostic -= PluginRuntime_Diagnostic;
-        ((App)Application.Current).PluginRuntime.Accounts.AccountExited -= Accounts_AccountExited;
+        var runtime = ((App)Application.Current).PluginRuntime;
+        runtime.Diagnostic -= PluginRuntime_Diagnostic;
+        runtime.Accounts.AccountExited -= Accounts_AccountExited;
+        runtime.ClientEmbeddings.EmbeddedRootResolver = null;
+        runtime.ClientEmbeddings.EmbeddedActivate = null;
+        runtime.ClientEmbeddings.UnembedAll();
+        ClientsPanel.Detach();
         lock (_pluginDiagnosticQueueGate) _pendingPluginDiagnostics.Clear();
         _launchCancellation?.Cancel();
         _launchCancellation?.Dispose();
