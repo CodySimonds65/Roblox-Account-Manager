@@ -38,7 +38,8 @@ public sealed record ManagedAccountSnapshot(
     bool IsMinimized,
     DateTime LastActivityUtc,
     bool IsRunning,
-    nint RootWindowHandle = 0);
+    nint RootWindowHandle = 0,
+    int? ExitCode = null);
 
 public sealed record ThemePalette(
     string Background,
@@ -181,7 +182,8 @@ internal sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<Manage
             value.GetProperty("isMinimized").GetBoolean(),
             value.GetProperty("lastActivityUtc").GetDateTime(),
             value.GetProperty("isRunning").GetBoolean(),
-            value.TryGetProperty("rootWindowHandle", out var root) ? (nint)root.GetInt64() : nint.Zero);
+            value.TryGetProperty("rootWindowHandle", out var root) ? (nint)root.GetInt64() : nint.Zero,
+            value.TryGetProperty("exitCode", out var exitCode) && exitCode.ValueKind != JsonValueKind.Null ? exitCode.GetInt32() : null);
     }
 
     public override void Write(Utf8JsonWriter writer, ManagedAccountSnapshot value, JsonSerializerOptions options)
@@ -201,6 +203,10 @@ internal sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<Manage
         writer.WriteString("lastActivityUtc", value.LastActivityUtc);
         writer.WriteBoolean("isRunning", value.IsRunning);
         writer.WriteNumber("rootWindowHandle", value.RootWindowHandle.ToInt64());
+        if (value.ExitCode is int exitCode)
+        {
+            writer.WriteNumber("exitCode", exitCode);
+        }
         writer.WriteEndObject();
     }
 }
