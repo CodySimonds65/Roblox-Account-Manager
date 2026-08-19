@@ -55,6 +55,8 @@ open "Roblox Account Manager.app"
 
 Unsigned development bundles may require **System Settings → Privacy & Security → Open Anyway**. The release workflow publishes separate `osx-arm64` and `osx-x64` component PKGs signed with Developer ID Installer, notarized, stapled, and checksum-paired. The package has no installer scripts and installs the signed app under `/Applications`.
 
+While Apple signing credentials are being configured, the repository also provides a manually triggered temporary unsigned release path. Its assets include `-unsigned` in the filename and are never presented as certified. Users must explicitly approve the installer and app through macOS **Privacy & Security → Open Anyway**. These packages are for testing only; use the signed workflow for normal distribution.
+
 macOS launching is fail-closed until `RAM_TRUSTED_ROBLOX_TEAM_ID` is set to the 10-character Team Identifier captured from a verified official Roblox installation. Signed release packaging stores that identity in the signed app resources, separately from RAM's own Apple signing identity; an unconfigured development build can manage browser sessions and inspect clients but will not pass an authentication ticket to an app bundle.
 
 ## Settings

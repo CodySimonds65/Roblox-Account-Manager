@@ -1,0 +1,165 @@
+name: Temporary unsigned macOS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing draft release tag (for example v2.8.0)
+        required: true
+        type: string
+      functional_matrix_passed:
+        description: Confirm both real-Mac functional matrices passed
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - name: Resolve verified draft tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "Invalid release tag." >&2; exit 1;
+          }
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$REQUESTED_TAG")"
+          test "$(jq -r .draft <<<"$release_json")" = "true" || {
+            echo "The selected release is not a draft." >&2; exit 1;
+          }
+          test "$(jq -r .tag_name <<<"$release_json")" = "$REQUESTED_TAG" || {
+            echo "Release tag mismatch." >&2; exit 1;
+          }
+          release_target="$(jq -r .target_commitish <<<"$release_json")"
+          git init verified-release
+          git -C verified-release remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C verified-release fetch --no-tags origin \
+            "refs/tags/$REQUESTED_TAG:refs/tags/$REQUESTED_TAG"
+          git -C verified-release fetch --no-tags origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          commit_sha="$(git -C verified-release rev-parse "$REQUESTED_TAG^{commit}")"
+          [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Unable to resolve immutable release commit." >&2; exit 1; }
+          test "$release_target" = "$commit_sha" || {
+            echo "Draft release target does not match its tag commit." >&2; exit 1;
+          }
+          git -C verified-release merge-base --is-ancestor "$commit_sha" refs/remotes/origin/main || {
+            echo "Draft release commit is not reachable from main." >&2; exit 1;
+          }
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+
+  package:
+    if: inputs.functional_matrix_passed == true
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            rid: osx-arm64
+          - runner: macos-15-intel
+            rid: osx-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Test and publish unsigned build
+        run: |
+          set -euo pipefail
+          dotnet run --project tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release
+          dotnet run --project tests/RobloxAccountManager.Platform.MacOS.Tests/RobloxAccountManager.Platform.MacOS.Tests.csproj -c Release
+          version="${{ needs.resolve.outputs.release_tag }}"; version="${version#v}"
+          app_version="${version%%-*}"
+          dotnet publish src/RobloxAccountManager.Desktop/RobloxAccountManager.Desktop.csproj \
+            -c Release -r "${{ matrix.rid }}" --self-contained true -p:Version="$app_version" -o publish
+
+      - name: Create explicitly unsigned PKG
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve.outputs.release_tag }}"; version="${version#v}"
+          app_version="${version%%-*}"
+          package_version="${GITHUB_RUN_NUMBER}"
+          [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "The release tag must have a numeric 3-part base version." >&2; exit 1;
+          }
+          mkdir -p dist
+          app="dist/Roblox Account Manager.app"
+          pkg="dist/RobloxAccountManager-${version}-${{ matrix.rid }}-unsigned.pkg"
+          bash build/macos/package-app.sh publish "$app" "$app_version"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $package_version" "$app/Contents/Info.plist"
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
+          bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" "$package_version"
+          (cd dist && shasum -a 256 "$(basename "$pkg")" > "$(basename "$pkg").sha256")
+          {
+            echo "WARNING: This is an unsigned, temporary macOS test package."
+            echo "Users must explicitly approve it in macOS Privacy & Security."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stage unsigned architecture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-unsigned-${{ matrix.rid }}
+          path: |
+            dist/*.pkg
+            dist/*.pkg.sha256
+          if-no-files-found: error
+
+  publish:
+    if: inputs.functional_matrix_passed == true
+    needs: [resolve, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download both unsigned architecture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-unsigned-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish explicitly unsigned assets to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_tag="${{ needs.resolve.outputs.release_tag }}"
+          version="${release_tag#v}"
+          is_draft="$(gh release view "$release_tag" --json isDraft --jq .isDraft)"
+          test "$is_draft" = "true" || { echo "Refusing to mutate a published release." >&2; exit 1; }
+          shopt -s nullglob
+          artifacts=(dist/*.pkg dist/*.pkg.sha256)
+          expected=(
+            "dist/RobloxAccountManager-${version}-osx-arm64-unsigned.pkg"
+            "dist/RobloxAccountManager-${version}-osx-arm64-unsigned.pkg.sha256"
+            "dist/RobloxAccountManager-${version}-osx-x64-unsigned.pkg"
+            "dist/RobloxAccountManager-${version}-osx-x64-unsigned.pkg.sha256"
+          )
+          ((${#artifacts[@]} == 4)) || { echo "Expected exactly four unsigned macOS artifacts." >&2; exit 1; }
+          for artifact in "${expected[@]}"; do
+            test -f "$artifact" || { echo "Missing expected artifact: $artifact" >&2; exit 1; }
+          done
+          (cd dist && shasum -a 256 -c \
+            "RobloxAccountManager-${version}-osx-arm64-unsigned.pkg.sha256" \
+            "RobloxAccountManager-${version}-osx-x64-unsigned.pkg.sha256")
+          gh release upload "$release_tag" "${artifacts[@]}" --clobber
+          is_draft="$(gh release view "$release_tag" --json isDraft --jq .isDraft)"
+          test "$is_draft" = "true" || { echo "Release changed while artifacts were staged; refusing to publish." >&2; exit 1; }
+          gh release edit "$release_tag" --draft=false
+          echo "Published an explicitly unsigned temporary macOS release. Replace these assets with signed/notarized packages before normal distribution." >> "$GITHUB_STEP_SUMMARY"
