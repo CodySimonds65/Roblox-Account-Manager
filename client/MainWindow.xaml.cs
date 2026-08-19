@@ -955,7 +955,12 @@ public partial class MainWindow : Window
             _singletonUnlockSession = sessionResult.Session;
         }
 
-        return await _singletonUnlockSession.ReleaseAsync(cancellationToken);
+        // Never close singleton handles inside clients the launcher is actively
+        // running: Roblox's watchdog shuts the game down when its handles are
+        // closed from outside. Only unprotected (stale) instances are unlocked.
+        var protectedProcessIds = ((App)Application.Current).PluginRuntime.Accounts.Snapshot()
+            .Select(account => account.ProcessId).ToArray();
+        return await _singletonUnlockSession.ReleaseAsync(cancellationToken, protectedProcessIds);
     }
 
     private TimeSpan GetLaunchTimeout()
