@@ -50,7 +50,8 @@ public static class EmbeddedInputBridge
 
         var gameThread = GetWindowThreadProcessId(root, out _);
         var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
-        if (gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) && IsFocusWithin(root, info.hwndFocus)) return true;
+        if (gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) &&
+            IsFocusWithin(root, info.hwndFocus) && IsFocusWithin(root, info.hwndActive)) return true;
 
         var ourThread = GetCurrentThreadId();
         var attached = gameThread != 0 && gameThread != ourThread &&
@@ -60,10 +61,20 @@ public static class EmbeddedInputBridge
             // SetFocus is only valid across threads while their input queues
             // are attached. The attachment is deliberately scoped to this
             // operation and is always undone below.
+            // SetActiveWindow is required as well: mouse input is routed to
+            // the active window on the Roblox GUI thread, while SetFocus only
+            // changes the keyboard target. This never changes the desktop
+            // foreground window; it only activates the already-foreground
+            // embedded child within the attached input queues.
+            _ = SetActiveWindow(root);
             _ = SetFocus(root);
             info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
             var actual = gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) ? info.hwndFocus : nint.Zero;
-            Diagnostics?.Invoke($"Embedded focus 0x{root.ToInt64():X}: attached={(attached ? "yes" : "no")}, actual focus 0x{actual.ToInt64():X}.");
+            Diagnostics?.Invoke($"Embedded focus 0x{root.ToInt64():X}: attached={(attached ? "yes" : "no")}, active 0x{info.hwndActive.ToInt64():X}, actual focus 0x{actual.ToInt64():X}.");
+            // Some Roblox builds report no active top-level HWND after their
+            // former popup is reparented, even though the child owns focus.
+            // Focus containment is the reliable invariant for input routing;
+            // the active HWND is diagnostic only.
             return IsFocusWithin(root, actual);
         }
         finally
@@ -156,6 +167,7 @@ public static class EmbeddedInputBridge
         out nint result);
 
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern nint SetActiveWindow(nint window);
     [DllImport("user32.dll")] private static extern nint SetFocus(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);

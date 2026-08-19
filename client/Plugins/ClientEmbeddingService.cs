@@ -198,16 +198,23 @@ public sealed class ClientEmbeddingService
 
     public void ShowOnly(string accountId)
     {
+        // A selected client can be activated only when RAM already owns the
+        // foreground. This lets a real click naturally activate the embedded
+        // Roblox child while ensuring tab synchronization never steals focus
+        // from an external game or application.
+        var activateSelected = HostOwnsForeground();
         lock (_gate)
         {
             _visibleAccountId = accountId;
             foreach (var (id, embedded) in _embedded)
             {
                 if (!IsCurrent(embedded, _hostWindow)) continue;
-                // Showing a selected client must not activate it. The caller
-                // performs an explicit guarded focus handoff only when RAM
-                // already owns foreground.
-                ShowWindow(embedded.Root, string.Equals(id, accountId, StringComparison.Ordinal) ? SwShowNoActivate : SwHide);
+                // Activate only on the already-foreground RAM path; the
+                // external-foreground path remains strictly no-activate.
+                ShowWindow(embedded.Root,
+                    string.Equals(id, accountId, StringComparison.Ordinal)
+                        ? (activateSelected ? SwShow : SwShowNoActivate)
+                        : SwHide);
             }
         }
     }
@@ -264,6 +271,7 @@ public sealed class ClientEmbeddingService
         GetWindowThreadProcessId(embedded.Root, out var processId);
         if (processId != embedded.ProcessId) return;
 
+        RestorePointerState(embedded.Root);
         ShowWindow(embedded.Root, SwHide);
         SetParent(embedded.Root, embedded.OriginalParent);
         TrySetStyle(embedded.Root, embedded.OriginalStyle);
@@ -278,6 +286,23 @@ public sealed class ClientEmbeddingService
             height,
             SwpNoActivate | SwpNoZOrder | SwpFrameChanged);
         ShowWindow(embedded.Root, embedded.OriginalVisible ? SwShowNoActivate : SwHide);
+    }
+
+    private static void RestorePointerState(nint root)
+    {
+        var capture = GetCapture();
+        if (capture != nint.Zero && (capture == root || IsChild(root, capture)))
+            ReleaseCapture();
+
+        if (!GetClipCursor(out var clip) || !GetWindowRect(root, out var bounds)) return;
+        if (clip.Left == bounds.Left && clip.Top == bounds.Top &&
+            clip.Right == bounds.Right && clip.Bottom == bounds.Bottom)
+        {
+            // Roblox may retain a client-area cursor clip while its window is
+            // being detached. Clear only an exact clip owned by this client;
+            // never disturb a user's unrelated foreground application's clip.
+            ClipCursor(nint.Zero);
+        }
     }
 
     private sealed record EmbeddedWindow(
@@ -296,6 +321,11 @@ public sealed class ClientEmbeddingService
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(nint window, out RECT rect);
+    [DllImport("user32.dll")] private static extern bool GetClipCursor(out RECT rect);
+    [DllImport("user32.dll")] private static extern bool ClipCursor(nint rect);
+    [DllImport("user32.dll")] private static extern nint GetCapture();
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] private static extern bool IsChild(nint parent, nint child);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
     [DllImport("user32.dll")] private static extern nint GetParent(nint window);
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
