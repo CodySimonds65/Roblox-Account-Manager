@@ -112,15 +112,17 @@ public sealed class ClientEmbeddingService
 
     public void Layout(int hostLeft, int hostTop, int hostWidth, int hostHeight)
     {
-        if (_hostWindow == nint.Zero || hostWidth <= 0 || hostHeight <= 0) return;
+        // Never resize an embedded client to a degenerate size: shrinking a live
+        // D3D swapchain to a few pixels (e.g., while the host section is still
+        // collapsing or not yet laid out) can crash the game. Skip until the host
+        // area has a real size.
+        if (_hostWindow == nint.Zero || hostWidth < 64 || hostHeight < 64) return;
         nint[] roots;
         lock (_gate) roots = _embedded.Values.ToArray();
-        var width = Math.Max(1, hostWidth);
-        var height = Math.Max(1, hostHeight);
         foreach (var root in roots)
         {
             if (root == nint.Zero) continue;
-            MoveWindow(root, hostLeft, hostTop, width, height, true);
+            MoveWindow(root, hostLeft, hostTop, hostWidth, hostHeight, true);
         }
     }
 

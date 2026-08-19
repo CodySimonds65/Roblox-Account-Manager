@@ -118,11 +118,15 @@ public partial class ClientsPanel : UserControl
             return;
         }
         var root = account.RootWindowHandle != nint.Zero ? account.RootWindowHandle : account.WindowHandle;
-        if (root != nint.Zero)
+        // Embed only once the client window is a real size: reparenting a D3D
+        // window during its startup window-size handshake can crash the game.
+        var embedReady = root != nint.Zero && account.ClientWidth >= 200 && account.ClientHeight >= 200;
+        if (embedReady)
         {
             if (!_runtime.ClientEmbeddings.IsEmbedded(account.AccountId))
                 _runtime.ClientEmbeddings.HideRootWindow(root);
             _runtime.ClientEmbeddings.TryEmbed(account.AccountId, root);
+            if (_runtime.ClientEmbeddings.IsEmbedded(account.AccountId)) ShowOnlySelection();
         }
         if (HasTab(account.AccountId))
         {
@@ -245,7 +249,7 @@ public partial class ClientsPanel : UserControl
 
     private void Relayout()
     {
-        if (_hostWindow == nint.Zero || !IsLoaded) return;
+        if (_hostWindow == nint.Zero || !IsLoaded || Visibility != Visibility.Visible || HostArea.ActualWidth < 100) return;
         var rect = HostRect();
         _runtime?.ClientEmbeddings.Layout(rect.Left, rect.Top, rect.Width, rect.Height);
     }
