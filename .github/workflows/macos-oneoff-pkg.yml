@@ -2,6 +2,9 @@ name: One-off unsigned macOS PKG
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/macos-support
 
 permissions:
   contents: read
