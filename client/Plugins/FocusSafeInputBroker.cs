@@ -13,8 +13,32 @@ public sealed record BackgroundInputResult(
     nint ForegroundBefore,
     nint ForegroundAfter)
 {
+    /// <summary>Concrete transport used for this result.</summary>
+    public string DeliveryMode { get; init; } = "unknown";
+
+    /// <summary>Posted messages are intentionally reported as unverified.</summary>
+    public string Verification { get; init; } = "unverified";
+
+    /// <summary>Optional host trace/correlation id for diagnostic probes.</summary>
+    public string? TraceId { get; init; }
+
+    public int RequestedCount { get; init; }
+    public nint TargetRootWindow { get; init; }
+    public nint TargetRenderWindow { get; init; }
+    public int TargetProcessId { get; init; }
+    public long TargetProcessStartTimeUtcTicks { get; init; }
+    /// <summary>Read-only cursor observation captured with the delivery result.</summary>
+    public int CursorX { get; init; }
+    public int CursorY { get; init; }
+    public string? SelectedAccountId { get; init; }
+    public bool? SelectedVisible { get; init; }
+
     public static BackgroundInputResult Failure(string code, string message, nint before, nint after, int posted = 0) =>
-        new(false, code, message, posted, before, after);
+        new(false, code, message, posted, before, after)
+        {
+            DeliveryMode = "none",
+            Verification = "not-delivered"
+        };
 }
 
 public sealed class FocusSafeInputBroker
@@ -22,83 +46,191 @@ public sealed class FocusSafeInputBroker
     public BackgroundInputResult Post(
         ManagedAccountSnapshot account,
         IReadOnlyList<PluginInputEvent> events,
-        Func<nint, bool>? windowValidator = null)
+        Func<nint, bool>? windowValidator = null,
+        InputDeliveryIntent deliveryIntent = InputDeliveryIntent.Default,
+        string? traceId = null,
+        Func<ManagedAccountSnapshot?>? accountResolver = null)
     {
-        return PostAsync(account, events, CancellationToken.None, windowValidator).GetAwaiter().GetResult();
+        return PostAsync(account, events, CancellationToken.None, windowValidator, deliveryIntent, traceId, accountResolver).GetAwaiter().GetResult();
     }
 
     public async Task<BackgroundInputResult> PostAsync(
         ManagedAccountSnapshot account,
         IReadOnlyList<PluginInputEvent> events,
         CancellationToken cancellationToken,
-        Func<nint, bool>? windowValidator = null)
+        Func<nint, bool>? windowValidator = null,
+        InputDeliveryIntent deliveryIntent = InputDeliveryIntent.Default,
+        string? traceId = null,
+        Func<ManagedAccountSnapshot?>? accountResolver = null)
     {
-        if (account.WindowHandle == nint.Zero || account.IsMinimized || events.Count == 0)
+        if (events.Count == 0)
         {
-            return BackgroundInputResult.Failure("unavailable", "The target window is unavailable or minimized.", GetForegroundWindow(), GetForegroundWindow());
+            return Stamp(BackgroundInputResult.Failure("unavailable", "No input events were supplied.", GetForegroundWindow(), GetForegroundWindow()), account, 0, traceId, deliveryIntent);
+        }
+        if (accountResolver is not null)
+        {
+            var resolved = accountResolver.Invoke();
+            if (resolved is null)
+            {
+                return Stamp(BackgroundInputResult.Failure("stale-window", "The managed account is stopping or its process identity is stale.", GetForegroundWindow(), GetForegroundWindow()), account, events.Count, traceId, deliveryIntent);
+            }
+            account = resolved;
+        }
+        if (account.WindowHandle == nint.Zero || account.IsMinimized)
+        {
+            return Stamp(BackgroundInputResult.Failure("unavailable", "The target window is unavailable or minimized.", GetForegroundWindow(), GetForegroundWindow()), account, events.Count, traceId, deliveryIntent);
         }
 
         var hostIntegrity = ProcessIntegrity.Current;
         var targetIntegrity = ProcessIntegrity.ForWindow(account.WindowHandle);
-        if (hostIntegrity != ProcessIntegrityLevel.Unknown &&
-            targetIntegrity != ProcessIntegrityLevel.Unknown && targetIntegrity > hostIntegrity)
+        if (hostIntegrity == ProcessIntegrityLevel.Unknown || targetIntegrity == ProcessIntegrityLevel.Unknown)
         {
-            return BackgroundInputResult.Failure("integrity-mismatch",
+            return Stamp(BackgroundInputResult.Failure("integrity-unknown",
+                "The integrity level of RAM or the target client could not be verified; background delivery was blocked.",
+                GetForegroundWindow(), GetForegroundWindow()), account, events.Count, traceId, deliveryIntent);
+        }
+        if (targetIntegrity > hostIntegrity)
+        {
+            return Stamp(BackgroundInputResult.Failure("integrity-mismatch",
                 $"The target client is {targetIntegrity} integrity while RAM is {hostIntegrity}; background delivery was blocked.",
-                GetForegroundWindow(), GetForegroundWindow());
+                GetForegroundWindow(), GetForegroundWindow()), account, events.Count, traceId, deliveryIntent);
         }
 
-        if (!ValidateWindowIdentity(account, account.WindowHandle) ||
+        if (!ValidateWindowIdentity(account, account.WindowHandle, requireMetrics: true) ||
             (windowValidator is not null && !windowValidator(account.WindowHandle)))
         {
-            return BackgroundInputResult.Failure("stale-window", "The target window is no longer valid.", GetForegroundWindow(), GetForegroundWindow());
+            return Stamp(BackgroundInputResult.Failure("stale-window", "The target window is no longer valid.", GetForegroundWindow(), GetForegroundWindow()), account, events.Count, traceId, deliveryIntent);
         }
 
         var foregroundBefore = GetForegroundWindow();
         var posted = 0;
         long previousOffset = 0;
-        foreach (var input in events.OrderBy(item => item.OffsetMicroseconds))
+        var postedEvents = new List<PluginInputEvent>();
+        try
         {
-            // Macro timing must be honored: pace from time zero to the first event's
-            // offset, then from event to event. 1 microsecond equals 10 ticks.
-            var gapMicroseconds = input.OffsetMicroseconds - previousOffset;
-            if (gapMicroseconds > 0)
+            foreach (var input in events.OrderBy(item => item.OffsetMicroseconds))
             {
-                await Task.Delay(TimeSpan.FromTicks(gapMicroseconds * 10), cancellationToken).ConfigureAwait(false);
-            }
-            previousOffset = input.OffsetMicroseconds;
+                // Macro timing must be honored: pace from time zero to the first event's
+                // offset, then from event to event. 1 microsecond equals 10 ticks.
+                var gapMicroseconds = input.OffsetMicroseconds - previousOffset;
+                if (gapMicroseconds > 0)
+                {
+                    await Task.Delay(TimeSpan.FromTicks(gapMicroseconds * 10), cancellationToken).ConfigureAwait(false);
+                }
+                previousOffset = input.OffsetMicroseconds;
 
-            cancellationToken.ThrowIfCancellationRequested();
+                cancellationToken.ThrowIfCancellationRequested();
 
-            // Revalidate immediately before every post: HWND values are reusable and
-            // a Roblox process can recreate its render window while a macro is running.
-            if (!ValidateWindowIdentity(account, account.WindowHandle))
-            {
-                var after = GetForegroundWindow();
-                return BackgroundInputResult.Failure("stale-window", "The target HWND changed or its client metrics no longer match.", foregroundBefore, after, posted);
+                // Re-resolve immediately before every post: HWND values are reusable and
+                // Roblox can recreate its render child while a macro is running.
+                var liveAccount = accountResolver is null ? account : accountResolver.Invoke();
+                if (liveAccount is null ||
+                    !ValidateWindowIdentity(liveAccount, liveAccount.WindowHandle, requireMetrics: true) ||
+                    (windowValidator is not null && !windowValidator(liveAccount.WindowHandle)))
+                {
+                    await ReleaseHeldInputsAsync(liveAccount ?? account, postedEvents, windowValidator, accountResolver).ConfigureAwait(false);
+                    var after = GetForegroundWindow();
+                    return Stamp(BackgroundInputResult.Failure("stale-window", "The target HWND changed or its client metrics no longer match.", foregroundBefore, after, posted), account, events.Count, traceId, deliveryIntent);
+                }
+                var safeAccount = liveAccount;
+                var destination = IsKeyboard(input) && safeAccount.RootWindowHandle != nint.Zero
+                    ? safeAccount.RootWindowHandle : safeAccount.WindowHandle;
+                var destinationValid = ValidateWindowIdentity(safeAccount, destination, requireMetrics: destination != safeAccount.RootWindowHandle) &&
+                    (windowValidator is null || windowValidator(destination));
+                if (!destinationValid)
+                {
+                    await ReleaseHeldInputsAsync(safeAccount, postedEvents, windowValidator, accountResolver).ConfigureAwait(false);
+                    var foregroundAfterFailure = GetForegroundWindow();
+                    return Stamp(BackgroundInputResult.Failure("stale-window", "The final input destination is no longer valid.", foregroundBefore, foregroundAfterFailure, posted), account, events.Count, traceId, deliveryIntent);
+                }
+                if (!TryPost(destination, safeAccount, input, out var error))
+                {
+                    await ReleaseHeldInputsAsync(safeAccount, postedEvents, windowValidator, accountResolver).ConfigureAwait(false);
+                    var foregroundAfterFailure = GetForegroundWindow();
+                    return Stamp(BackgroundInputResult.Failure(error.Code, error.Message, foregroundBefore, foregroundAfterFailure, posted), account, events.Count, traceId, deliveryIntent);
+                }
+                postedEvents.Add(input);
+                posted++;
             }
-            if (!TryPost(account.WindowHandle, account, input, out var error))
-            {
-                var foregroundAfterFailure = GetForegroundWindow();
-                return BackgroundInputResult.Failure(error.Code, error.Message, foregroundBefore, foregroundAfterFailure, posted);
-            }
-            posted++;
+        }
+        catch (OperationCanceledException)
+        {
+            await ReleaseHeldInputsAsync(account, postedEvents, windowValidator, accountResolver).ConfigureAwait(false);
+            var foregroundAfterCancel = GetForegroundWindow();
+            return Stamp(BackgroundInputResult.Failure("canceled", "Input dispatch was canceled; held input cleanup was attempted.", foregroundBefore, foregroundAfterCancel, posted), account, events.Count, traceId, deliveryIntent);
         }
 
+        // Never leave a logical key/button down after a detached best-effort run.
+        await ReleaseHeldInputsAsync(account, postedEvents, windowValidator, accountResolver).ConfigureAwait(false);
         var foregroundAfter = GetForegroundWindow();
         // The broker never restores focus. A changed foreground window is reported to
         // the caller so an external user action cannot be mistaken for our own focus work.
-        return new BackgroundInputResult(true, foregroundBefore == foregroundAfter ? "ok" : "foreground-changed",
-            foregroundBefore == foregroundAfter ? "All messages were posted." : "Messages posted; foreground changed externally.",
-            posted, foregroundBefore, foregroundAfter);
+        return Stamp(new BackgroundInputResult(true, foregroundBefore == foregroundAfter ? "ok" : "foreground-changed",
+            foregroundBefore == foregroundAfter ? "Messages queued; consumption is unverified." : "Messages queued; foreground changed externally and consumption is unverified.",
+            posted, foregroundBefore, foregroundAfter)
+        {
+            DeliveryMode = "post-message",
+            Verification = "unverified"
+        }, account, events.Count, traceId, deliveryIntent);
     }
 
-    private static bool ValidateWindowIdentity(ManagedAccountSnapshot account, nint hwnd)
+    private static async Task ReleaseHeldInputsAsync(ManagedAccountSnapshot account,
+        IReadOnlyList<PluginInputEvent> postedEvents, Func<nint, bool>? windowValidator,
+        Func<ManagedAccountSnapshot?>? accountResolver)
+    {
+        var releases = InputSendInjector.PendingReleases(postedEvents);
+        var live = accountResolver is null ? account : accountResolver.Invoke();
+        if (live is null) return;
+        if (releases.Count == 0 || !ValidateWindowIdentity(live, live.WindowHandle, requireMetrics: true) ||
+            (windowValidator is not null && !windowValidator(live.WindowHandle))) return;
+        foreach (var release in releases)
+        {
+            var destination = IsKeyboard(release) && live.RootWindowHandle != nint.Zero ? live.RootWindowHandle : live.WindowHandle;
+            if (!ValidateWindowIdentity(live, destination, requireMetrics: destination != live.RootWindowHandle) ||
+                (windowValidator is not null && !windowValidator(destination)) ||
+                !TryPost(destination, live, release, out _)) break;
+        }
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    private static bool IsKeyboard(PluginInputEvent input) =>
+        input.Kind is PluginInputKind.KeyDown or PluginInputKind.KeyUp;
+
+    private static BackgroundInputResult Stamp(BackgroundInputResult result, ManagedAccountSnapshot account,
+        int requestedCount, string? traceId, InputDeliveryIntent deliveryIntent) => result with
+        {
+            DeliveryMode = result.DeliveryMode == "post-message"
+            ? deliveryIntent == InputDeliveryIntent.PostMessageProbe ? "post-message-probe" : "post-message"
+            : result.DeliveryMode,
+            TraceId = traceId,
+            RequestedCount = requestedCount,
+            TargetRootWindow = account.RootWindowHandle,
+            TargetRenderWindow = account.WindowHandle,
+            TargetProcessId = account.ProcessId,
+            TargetProcessStartTimeUtcTicks = account.ProcessStartTimeUtcTicks,
+            CursorX = TryGetCursor(out var point) ? point.X : 0,
+            CursorY = point.Y
+        };
+
+    private static bool TryGetCursor(out POINT point)
+    {
+        point = default;
+        try { return GetCursorPos(out point); }
+        catch (DllNotFoundException) { return false; }
+        catch (EntryPointNotFoundException) { return false; }
+    }
+
+    private static bool ValidateWindowIdentity(ManagedAccountSnapshot account, nint hwnd, bool requireMetrics)
     {
         if (hwnd == nint.Zero || !IsWindow(hwnd)) return false;
         if (IsIconic(hwnd) || IsIconic(GetAncestor(hwnd, GA_ROOT))) return false;
+        var root = GetAncestor(hwnd, GA_ROOT);
+        if (root == nint.Zero || !IsWindow(root)) return false;
+        if (account.RootWindowHandle != nint.Zero && root != account.RootWindowHandle) return false;
         GetWindowThreadProcessId(hwnd, out var ownerPid);
         if (ownerPid != account.ProcessId) return false;
+        GetWindowThreadProcessId(root, out var rootOwnerPid);
+        if (rootOwnerPid != account.ProcessId) return false;
         try
         {
             using var process = Process.GetProcessById(account.ProcessId);
@@ -107,6 +239,7 @@ public sealed class FocusSafeInputBroker
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception) { return false; }
 
+        if (!requireMetrics) return true;
         if (!GetClientRect(hwnd, out var client)) return false;
         var origin = new POINT();
         if (!ClientToScreen(hwnd, ref origin)) return false;
@@ -217,6 +350,7 @@ public sealed class FocusSafeInputBroker
     private const nuint MK_MBUTTON = 0x0010;
 
     [DllImport("user32.dll", SetLastError = true)] private static extern bool PostMessage(nint hWnd, uint msg, nuint wParam, nint lParam);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool IsWindow(nint hWnd);
     [DllImport("user32.dll")] private static extern bool IsIconic(nint hWnd);

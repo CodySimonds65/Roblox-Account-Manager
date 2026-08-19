@@ -29,16 +29,19 @@ public sealed class InputSendInjector
         IReadOnlyList<PluginInputEvent> events,
         CancellationToken cancellationToken,
         Func<bool>? targetValidator = null,
-        Func<IReadOnlyList<PluginInputEvent>, Task>? releaseFallback = null)
+        Func<IReadOnlyList<PluginInputEvent>, Task>? releaseFallback = null,
+        InputDeliveryIntent deliveryIntent = InputDeliveryIntent.Default,
+        string? traceId = null)
     {
+        _ = deliveryIntent; // PostMessageProbe is routed by PluginRuntime before this broker.
         if (rootWindow == nint.Zero || events.Count == 0 || !IsWindow(rootWindow))
         {
-            return BackgroundInputResult.Failure("unavailable", "The docked client window is unavailable.", GetForegroundWindow(), GetForegroundWindow());
+            return Stamp(BackgroundInputResult.Failure("unavailable", "The docked client window is unavailable.", GetForegroundWindow(), GetForegroundWindow()), rootWindow, events.Count, traceId);
         }
         var foregroundBefore = GetForegroundWindow();
         if (!IsSafeTarget(rootWindow, targetValidator))
         {
-            return BackgroundInputResult.Failure("focus-lost", "The embedded client is not the visible foreground target.", foregroundBefore, GetForegroundWindow());
+            return Stamp(BackgroundInputResult.Failure("focus-lost", "The embedded client is not the visible foreground target.", foregroundBefore, GetForegroundWindow()), rootWindow, events.Count, traceId);
         }
         var posted = 0;
         long previousOffset = 0;
@@ -60,13 +63,13 @@ public sealed class InputSendInjector
                 {
                     await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
                     var after = GetForegroundWindow();
-                    return BackgroundInputResult.Failure("focus-lost", "The client lost focus during playback; input was stopped.", foregroundBefore, after, posted);
+                    return Stamp(BackgroundInputResult.Failure("focus-lost", "The client lost focus during playback; input was stopped.", foregroundBefore, after, posted), rootWindow, events.Count, traceId);
                 }
                 if (!TryInject(rootWindow, input, out var error))
                 {
                     await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
                     var after = GetForegroundWindow();
-                    return BackgroundInputResult.Failure(error.Code, error.Message, foregroundBefore, after, posted);
+                    return Stamp(BackgroundInputResult.Failure(error.Code, error.Message, foregroundBefore, after, posted), rootWindow, events.Count, traceId);
                 }
                 postedEvents.Add(input);
                 posted++;
@@ -80,10 +83,23 @@ public sealed class InputSendInjector
 
         await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
         var foregroundAfter = GetForegroundWindow();
-        return new BackgroundInputResult(true, foregroundBefore == foregroundAfter ? "ok" : "foreground-changed",
+        return Stamp(new BackgroundInputResult(true, foregroundBefore == foregroundAfter ? "ok" : "foreground-changed",
             foregroundBefore == foregroundAfter ? "All input was injected." : "Input injected; foreground changed externally.",
-            posted, foregroundBefore, foregroundAfter);
+            posted, foregroundBefore, foregroundAfter)
+        {
+            DeliveryMode = "send-input",
+            Verification = "guarded"
+        }, rootWindow, events.Count, traceId);
     }
+
+    private static BackgroundInputResult Stamp(BackgroundInputResult result, nint rootWindow,
+        int requestedCount, string? traceId) => result with
+        {
+            TraceId = traceId,
+            RequestedCount = requestedCount,
+            TargetRootWindow = rootWindow,
+            TargetRenderWindow = nint.Zero
+        };
 
     private static async Task ReleaseHeldInputsAsync(
         nint rootWindow,

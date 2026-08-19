@@ -161,6 +161,26 @@ try
     var inputResultJson = JsonSerializer.Serialize(BackgroundInputResult.Failure("test", "test", (nint)7, (nint)8), PluginJson.Options);
     Require(inputResultJson.Contains("\"foregroundBefore\":7", StringComparison.Ordinal) && inputResultJson.Contains("\"foregroundAfter\":8", StringComparison.Ordinal),
         "Background input HWND wire serialization was not numeric.");
+    var probeResultJson = JsonSerializer.Serialize(new BackgroundInputResult(true, "ok", "posted", 1, nint.Zero, nint.Zero)
+    {
+        DeliveryMode = "post-message-probe",
+        Verification = "unverified",
+        TraceId = "smoke-trace",
+        RequestedCount = 1,
+        TargetRootWindow = (nint)9,
+        TargetRenderWindow = (nint)10,
+        TargetProcessId = 11,
+        TargetProcessStartTimeUtcTicks = 12,
+        CursorX = 100,
+        CursorY = 200,
+        SelectedAccountId = "state-test",
+        SelectedVisible = false
+    }, PluginJson.Options);
+    Require(probeResultJson.Contains("\"deliveryMode\":\"post-message-probe\"", StringComparison.Ordinal) &&
+            probeResultJson.Contains("\"verification\":\"unverified\"", StringComparison.Ordinal) &&
+            probeResultJson.Contains("\"traceId\":\"smoke-trace\"", StringComparison.Ordinal) &&
+            probeResultJson.Contains("\"selectedVisible\":false", StringComparison.Ordinal),
+        "Background input probe metadata did not survive JSON serialization.");
 
     var sdkSnapshot = new RobloxAccountManager.PluginSdk.ManagedAccountSnapshot(
         "sdk-test", "SDK test", 2, 3, (nint)0x1234, 1, 2, 300, 200, 144, false, DateTime.UtcNow, true, (nint)0x5678);
@@ -1025,7 +1045,9 @@ try
             {
                 new PluginInputEvent(Kind: PluginInputKind.KeyDown, VirtualKey: 0x41, ScanCode: 0x1E, Extended: false, Button: 0, WheelDelta: 0, NormalizedX: 0, NormalizedY: 0, OffsetMicroseconds: 0),
                 new PluginInputEvent(Kind: PluginInputKind.KeyUp, VirtualKey: 0x41, ScanCode: 0x1E, Extended: false, Button: 0, WheelDelta: 0, NormalizedX: 0, NormalizedY: 0, OffsetMicroseconds: 300_000)
-            }
+            },
+            deliveryIntent = "post-message",
+            traceId = "input-post-trace"
         }, PluginJson.Options)));
     var inputPosted = await ReadEnvelopeUntilAsync(inputPipe, "input.result", TimeSpan.FromSeconds(5));
     Require(inputPosted is not null, "The plugin host did not answer the valid input.post.");
@@ -1037,6 +1059,8 @@ try
         $"The valid input.post was rejected with an unexpected code: {acceptedInputResult.Code}");
     if (acceptedInputResult.Accepted)
         Require(acceptedInputResult.PostedCount == 2, "The broker did not post both paced key events.");
+    Require(acceptedInputResult.RequestedCount == 2 && acceptedInputResult.TraceId == "input-post-trace",
+        "The input.post delivery intent did not preserve request trace metadata.");
 
     var invalidPostRequestId = "input-post-invalid-" + Guid.NewGuid().ToString("N");
     await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("input.post", invalidPostRequestId,
@@ -1072,6 +1096,19 @@ try
     var unknownResult = unknownPosted.Payload.Deserialize<BackgroundInputResult>(PluginJson.Options);
     Require(unknownResult?.Code == "unknown-account",
         "The input.post for an unknown account was not rejected.");
+
+    await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("input.post", unknownPostRequestId,
+        JsonSerializer.SerializeToElement(new
+        {
+            accountId = "input-unknown-duplicate",
+            events = new[]
+            {
+                new PluginInputEvent(Kind: PluginInputKind.KeyDown, VirtualKey: 0x41, ScanCode: 0x1E, Extended: false, Button: 0, WheelDelta: 0, NormalizedX: 0, NormalizedY: 0, OffsetMicroseconds: 0)
+            }
+        }, PluginJson.Options)));
+    var duplicatePosted = await ReadEnvelopeUntilAsync(inputPipe, "input.result", TimeSpan.FromSeconds(5));
+    Require(duplicatePosted?.Payload.Deserialize<BackgroundInputResult>(PluginJson.Options)?.Code == "duplicate-request",
+        "A completed input request id was accepted a second time.");
 
     var subscribeRequestId = "hotkey-subscribe-" + Guid.NewGuid().ToString("N");
     await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("hotkey.subscribe", subscribeRequestId,

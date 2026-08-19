@@ -18,6 +18,10 @@ public static class PluginCapabilities
     public const string HostActivityRead = "host.queries.account-activity";
     public const string HostThemeRead = "host.theme.read";
     public const string HostInputBackground = "host.input.background";
+    // Keep the legacy capability accepted for already released plugins. New
+    // manifests can expose the explicit message-only boundary in consent.
+    public const string HostInputBackgroundMessages = "host.input.background.messages";
+    public const string HostInputForegroundReal = "host.input.foreground.real";
     public const string HostActionsRegister = "host.actions.register";
     public const string HostActionsInvoke = "host.actions.invoke";
     public const string SystemWatchGlobalInput = "system.watch-global-input";
@@ -66,6 +70,16 @@ public enum PluginInputKind
     MouseButtonDown,
     MouseButtonUp,
     MouseWheel
+}
+
+/// <summary>
+/// An input request's delivery preference. Default preserves the existing
+/// guarded foreground route; PostMessageProbe is an opt-in diagnostic path.
+/// </summary>
+public enum InputDeliveryIntent
+{
+    Default,
+    PostMessageProbe
 }
 
 public sealed record PluginInputEvent(
@@ -223,7 +237,21 @@ internal sealed class BackgroundInputResultJsonConverter : JsonConverter<Backgro
             value.GetProperty("message").GetString() ?? string.Empty,
             value.GetProperty("postedCount").GetInt32(),
             (nint)value.GetProperty("foregroundBefore").GetInt64(),
-            (nint)value.GetProperty("foregroundAfter").GetInt64());
+            (nint)value.GetProperty("foregroundAfter").GetInt64())
+        {
+            DeliveryMode = value.TryGetProperty("deliveryMode", out var mode) ? mode.GetString() ?? "unknown" : "unknown",
+            Verification = value.TryGetProperty("verification", out var verification) ? verification.GetString() ?? "unverified" : "unverified",
+            TraceId = value.TryGetProperty("traceId", out var trace) && trace.ValueKind != JsonValueKind.Null ? trace.GetString() : null,
+            RequestedCount = value.TryGetProperty("requestedCount", out var requested) ? requested.GetInt32() : 0,
+            TargetRootWindow = value.TryGetProperty("targetRootWindow", out var root) ? (nint)root.GetInt64() : nint.Zero,
+            TargetRenderWindow = value.TryGetProperty("targetRenderWindow", out var render) ? (nint)render.GetInt64() : nint.Zero,
+            TargetProcessId = value.TryGetProperty("targetProcessId", out var pid) ? pid.GetInt32() : 0,
+            TargetProcessStartTimeUtcTicks = value.TryGetProperty("targetProcessStartTimeUtcTicks", out var start) ? start.GetInt64() : 0,
+            CursorX = value.TryGetProperty("cursorX", out var cursorX) ? cursorX.GetInt32() : 0,
+            CursorY = value.TryGetProperty("cursorY", out var cursorY) ? cursorY.GetInt32() : 0,
+            SelectedAccountId = value.TryGetProperty("selectedAccountId", out var selected) && selected.ValueKind != JsonValueKind.Null ? selected.GetString() : null,
+            SelectedVisible = value.TryGetProperty("selectedVisible", out var visible) && visible.ValueKind != JsonValueKind.Null ? visible.GetBoolean() : null
+        };
     }
 
     public override void Write(Utf8JsonWriter writer, BackgroundInputResult value, JsonSerializerOptions options)
@@ -235,6 +263,18 @@ internal sealed class BackgroundInputResultJsonConverter : JsonConverter<Backgro
         writer.WriteNumber("postedCount", value.PostedCount);
         writer.WriteNumber("foregroundBefore", value.ForegroundBefore.ToInt64());
         writer.WriteNumber("foregroundAfter", value.ForegroundAfter.ToInt64());
+        writer.WriteString("deliveryMode", value.DeliveryMode);
+        writer.WriteString("verification", value.Verification);
+        if (value.TraceId is not null) writer.WriteString("traceId", value.TraceId);
+        writer.WriteNumber("requestedCount", value.RequestedCount);
+        writer.WriteNumber("targetRootWindow", value.TargetRootWindow.ToInt64());
+        writer.WriteNumber("targetRenderWindow", value.TargetRenderWindow.ToInt64());
+        writer.WriteNumber("targetProcessId", value.TargetProcessId);
+        writer.WriteNumber("targetProcessStartTimeUtcTicks", value.TargetProcessStartTimeUtcTicks);
+        writer.WriteNumber("cursorX", value.CursorX);
+        writer.WriteNumber("cursorY", value.CursorY);
+        if (value.SelectedAccountId is not null) writer.WriteString("selectedAccountId", value.SelectedAccountId);
+        if (value.SelectedVisible is not null) writer.WriteBoolean("selectedVisible", value.SelectedVisible.Value);
         writer.WriteEndObject();
     }
 }
