@@ -1565,10 +1565,52 @@ public partial class MainWindow : Window
     {
         try
         {
-            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => Log($"{snapshot.Label} exited (PID {snapshot.ProcessId}).")));
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            {
+                var codeText = snapshot.ExitCode is int code ? $", exit code 0x{unchecked((uint)code):X8}" : string.Empty;
+                Log($"{snapshot.Label} exited (PID {snapshot.ProcessId}{codeText}).");
+                foreach (var item in _launchQueue)
+                {
+                    if (item.Account.Id == snapshot.AccountId && item.State == LaunchQueueState.Running)
+                    {
+                        item.State = LaunchQueueState.Exited;
+                        item.Detail = snapshot.ExitCode is int exitedCode ? $"Exited (0x{unchecked((uint)exitedCode):X8})" : "Exited";
+                    }
+                }
+
+                _ = LogRobloxAutopsyAsync(snapshot);
+            }));
         }
         catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
         {
+        }
+    }
+
+    private async Task LogRobloxAutopsyAsync(ManagedAccountSnapshot snapshot)
+    {
+        try
+        {
+            var lines = await Task.Run(() => RobloxLogAutopsy.Autopsy(snapshot));
+            if (lines.Count == 0)
+            {
+                return;
+            }
+
+            if (Dispatcher.CheckAccess())
+            {
+                foreach (var line in lines) Log(line);
+            }
+            else
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    foreach (var line in lines) Log(line);
+                });
+            }
+        }
+        catch
+        {
+            // Best-effort diagnostics; never disturb the UI.
         }
     }
 

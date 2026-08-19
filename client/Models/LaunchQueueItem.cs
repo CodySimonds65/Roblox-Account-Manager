@@ -9,6 +9,7 @@ public enum LaunchQueueState
     Preparing,
     Launching,
     Running,
+    Exited,
     Failed,
     Canceled
 }
@@ -59,6 +60,7 @@ public sealed class LaunchQueueItem(AccountProfile account) : INotifyPropertyCha
         LaunchQueueState.Preparing => "PREPARING",
         LaunchQueueState.Launching => "LAUNCHING",
         LaunchQueueState.Running => "RUNNING",
+        LaunchQueueState.Exited => "EXITED",
         LaunchQueueState.Failed => "FAILED",
         LaunchQueueState.Canceled => "CANCELED",
         _ => State.ToString().ToUpperInvariant()

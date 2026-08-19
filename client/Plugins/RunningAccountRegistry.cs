@@ -11,6 +11,7 @@ public sealed class RunningAccountRegistry : IDisposable
     private readonly string _path;
     private readonly object _gate = new();
     private readonly Dictionary<string, RunningAccountRecord> _records = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Process> _processes = new(StringComparer.Ordinal);
     private readonly Timer _timer;
     private uint _lastInputTick;
     private DateTime _lastInputUtc = DateTime.UtcNow;
@@ -49,6 +50,7 @@ public sealed class RunningAccountRegistry : IDisposable
             _records[account.Id] = new RunningAccountRecord(account.Id, account.Label, process.Id, startTicks, DateTime.UtcNow);
             SaveLocked();
         }
+        AttachProcessWatcher(account.Id, process.Id, startTicks);
         Refresh();
         var registered = Snapshot().FirstOrDefault(snapshot => string.Equals(snapshot.AccountId, account.Id, StringComparison.Ordinal));
         if (registered is not null) AccountChanged?.Invoke(this, registered);
@@ -57,14 +59,121 @@ public sealed class RunningAccountRegistry : IDisposable
     public bool Remove(string accountId)
     {
         ManagedAccountSnapshot exitedSnapshot;
+        Process? wrapper;
         lock (_gate)
         {
+            _processes.Remove(accountId, out wrapper);
             if (!_records.Remove(accountId, out var record)) return false;
             exitedSnapshot = record.ToSnapshot() with { IsRunning = false };
             SaveLocked();
         }
-        AccountExited?.Invoke(this, exitedSnapshot);
+        DetachProcessWatcher(accountId, wrapper);
+        RaiseAccountExited(exitedSnapshot);
         return true;
+    }
+
+    private void AttachProcessWatcher(string accountId, int processId, long expectedStartTimeUtcTicks)
+    {
+        Process? wrapper;
+        try
+        {
+            wrapper = Process.GetProcessById(processId);
+            // Never watch a PID that belongs to a different process: persisted
+            // records can be stale after PID reuse, and a watcher on the wrong
+            // process would emit spurious exit events with misleading codes.
+            if (wrapper.StartTime.ToUniversalTime().Ticks != expectedStartTimeUtcTicks)
+            {
+                wrapper.Dispose();
+                return;
+            }
+            wrapper.EnableRaisingEvents = true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception)
+        {
+            return;
+        }
+
+        Process? previous;
+        lock (_gate)
+        {
+            _processes.Remove(accountId, out previous);
+            _processes[accountId] = wrapper;
+        }
+
+        wrapper.Exited += (_, _) => OnWatchedProcessExited(accountId, wrapper);
+        if (previous is not null) DetachProcessWatcher(accountId, previous);
+    }
+
+    private static void DetachProcessWatcher(string accountId, Process? wrapper)
+    {
+        if (wrapper is null) return;
+        try
+        {
+            wrapper.EnableRaisingEvents = false;
+        }
+        catch
+        {
+            // Best effort.
+        }
+        try
+        {
+            wrapper.Dispose();
+        }
+        catch
+        {
+            // Best effort: the process may already be finalized.
+        }
+    }
+
+    private void OnWatchedProcessExited(string accountId, Process wrapper)
+    {
+        int? exitCode = null;
+        try
+        {
+            if (wrapper.HasExited) exitCode = wrapper.ExitCode;
+        }
+        catch
+        {
+            // Exit code may be unavailable after the OS reaps the process.
+        }
+
+        ManagedAccountSnapshot? exitedSnapshot = null;
+        var stale = false;
+        lock (_gate)
+        {
+            // A watcher that was swapped out by a re-registration can fire late.
+            // Only the CURRENT wrapper may remove the record; a stale one must
+            // never touch a record that now belongs to a newer process.
+            if (!_processes.TryGetValue(accountId, out var current) || !ReferenceEquals(current, wrapper))
+            {
+                stale = true;
+            }
+            else
+            {
+                _processes.Remove(accountId);
+                if (_records.Remove(accountId, out var record))
+                {
+                    exitedSnapshot = record.ToSnapshot() with { IsRunning = false, ExitCode = exitCode };
+                    SaveLocked();
+                }
+            }
+        }
+
+        if (stale)
+        {
+            DetachProcessWatcher(accountId, wrapper);
+            return;
+        }
+
+        try { wrapper.Dispose(); } catch { }
+
+        if (exitedSnapshot is not null)
+        {
+            Diagnostic?.Invoke(this, exitCode is null
+                ? $"Account {exitedSnapshot.Label} (PID {exitedSnapshot.ProcessId}) exited; the process is no longer available."
+                : $"Account {exitedSnapshot.Label} (PID {exitedSnapshot.ProcessId}) exited with code 0x{unchecked((uint)exitCode.Value):X8}.");
+            RaiseAccountExited(exitedSnapshot);
+        }
     }
 
     private void Refresh()
@@ -79,6 +188,7 @@ public sealed class RunningAccountRegistry : IDisposable
 
         List<ManagedAccountSnapshot> changed = [];
         List<ManagedAccountSnapshot> exited = [];
+        List<Process> wrappersToDetach = [];
         lock (_gate)
         {
             foreach (var record in _records.Values.ToArray())
@@ -91,9 +201,19 @@ public sealed class RunningAccountRegistry : IDisposable
                     if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != record.ProcessStartTimeUtcTicks)
                     {
                         _records.Remove(record.AccountId);
+                        _processes.Remove(record.AccountId, out var wrapper);
+                        if (wrapper is not null) wrappersToDetach.Add(wrapper);
                         int? exitCode = null;
-                        try { if (process.HasExited) exitCode = process.ExitCode; } catch { }
-                        exited.Add(record.ToSnapshot() with { IsRunning = false });
+                        try
+                        {
+                            if (process.StartTime.ToUniversalTime().Ticks == record.ProcessStartTimeUtcTicks)
+                            {
+                                if (wrapper is { HasExited: true }) exitCode = wrapper.ExitCode;
+                                else if (process.HasExited) exitCode = process.ExitCode;
+                            }
+                        }
+                        catch { }
+                        exited.Add(record.ToSnapshot() with { IsRunning = false, ExitCode = exitCode });
                         Diagnostic?.Invoke(this, exitCode is null
                             ? $"Account {record.Label} (PID {record.ProcessId}) exited; the process is no longer available."
                             : $"Account {record.Label} (PID {record.ProcessId}) exited with code 0x{unchecked((uint)exitCode.Value):X8}.");
@@ -120,16 +240,22 @@ public sealed class RunningAccountRegistry : IDisposable
                 }
                 catch (ArgumentException)
                 {
+                    _processes.Remove(record.AccountId, out var wrapper);
+                    if (wrapper is not null) wrappersToDetach.Add(wrapper);
                     _records.Remove(record.AccountId);
                     exited.Add(record.ToSnapshot() with { IsRunning = false });
                 }
                 catch (InvalidOperationException)
                 {
+                    _processes.Remove(record.AccountId, out var wrapper);
+                    if (wrapper is not null) wrappersToDetach.Add(wrapper);
                     _records.Remove(record.AccountId);
                     exited.Add(record.ToSnapshot() with { IsRunning = false });
                 }
                 catch (Win32Exception)
                 {
+                    _processes.Remove(record.AccountId, out var wrapper);
+                    if (wrapper is not null) wrappersToDetach.Add(wrapper);
                     _records.Remove(record.AccountId);
                     exited.Add(record.ToSnapshot() with { IsRunning = false });
                 }
@@ -138,8 +264,27 @@ public sealed class RunningAccountRegistry : IDisposable
             if (exited.Count > 0) SaveLocked();
         }
 
+        foreach (var wrapper in wrappersToDetach) DetachProcessWatcher(string.Empty, wrapper);
+
         foreach (var snapshot in changed) AccountChanged?.Invoke(this, snapshot);
-        foreach (var snapshot in exited) AccountExited?.Invoke(this, snapshot);
+        foreach (var snapshot in exited) RaiseAccountExited(snapshot);
+    }
+
+    private void RaiseAccountExited(ManagedAccountSnapshot snapshot)
+    {
+        var handlers = AccountExited?.GetInvocationList() ?? [];
+        foreach (var handler in handlers)
+        {
+            try
+            {
+                ((EventHandler<ManagedAccountSnapshot>)handler)(this, snapshot);
+            }
+            catch (Exception ex)
+            {
+                // A broken subscriber must never crash the registry thread.
+                Diagnostic?.Invoke(this, $"Account-exit handler failed for {snapshot.Label}: {ex.Message}");
+            }
+        }
     }
 
     private static nint FindWindow(int processId)
@@ -182,7 +327,11 @@ public sealed class RunningAccountRegistry : IDisposable
             if (!File.Exists(_path)) return;
             var records = JsonSerializer.Deserialize<List<RunningAccountRecord>>(File.ReadAllText(_path), PluginJson.Options);
             if (records is null) return;
-            foreach (var record in records) _records[record.AccountId] = record;
+            foreach (var record in records)
+            {
+                _records[record.AccountId] = record;
+                AttachProcessWatcher(record.AccountId, record.ProcessId, record.ProcessStartTimeUtcTicks);
+            }
         }
         catch
         {
@@ -201,14 +350,26 @@ public sealed class RunningAccountRegistry : IDisposable
             File.WriteAllText(temporaryPath, JsonSerializer.Serialize(_records.Values.OrderBy(record => record.AccountId), PluginJson.Options));
             File.Move(temporaryPath, _path, overwrite: true);
         }
-        catch (Exception ex) when (ex is InvalidCastException or JsonException or IOException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
             try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); } catch { }
             Diagnostic?.Invoke(this, $"Running-account state was not persisted: {ex.Message}");
         }
     }
 
-    public void Dispose() => _timer.Dispose();
+    public void Dispose()
+    {
+        _timer.Dispose();
+        lock (_gate)
+        {
+            foreach (var wrapper in _processes.Values)
+            {
+                try { wrapper.EnableRaisingEvents = false; } catch { }
+                try { wrapper.Dispose(); } catch { }
+            }
+            _processes.Clear();
+        }
+    }
 
     private sealed record RunningAccountRecord(
         string AccountId,
