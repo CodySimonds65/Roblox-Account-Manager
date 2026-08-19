@@ -17,6 +17,7 @@ namespace RobloxAltClient;
 public partial class ClientsPanel : UserControl
 {
     private readonly ObservableCollection<string> _focusDiagnostics = new();
+    private readonly Dictionary<string, DateTime> _embedTimes = new(StringComparer.Ordinal);
     private PluginRuntime? _runtime;
     private Window? _ownerWindow;
     private nint _hostWindow;
@@ -118,15 +119,23 @@ public partial class ClientsPanel : UserControl
             return;
         }
         var root = account.RootWindowHandle != nint.Zero ? account.RootWindowHandle : account.WindowHandle;
-        // Embed only once the client window is a real size: reparenting a D3D
-        // window during its startup window-size handshake can crash the game.
-        var embedReady = root != nint.Zero && account.ClientWidth >= 200 && account.ClientHeight >= 200;
+        // Embed only once the client is fully stable: never hide, reparent, or
+        // resize a D3D window during its startup handshake — games crash. The
+        // window must be several seconds old and a real size.
+        var processAgeSeconds = account.ProcessStartTimeUtcTicks > 0
+            ? (DateTime.UtcNow - new DateTime(account.ProcessStartTimeUtcTicks, DateTimeKind.Utc)).TotalSeconds
+            : 0;
+        var embedReady = root != nint.Zero && processAgeSeconds >= 4 &&
+                         account.ClientWidth >= 400 && account.ClientHeight >= 300;
         if (embedReady)
         {
-            if (!_runtime.ClientEmbeddings.IsEmbedded(account.AccountId))
-                _runtime.ClientEmbeddings.HideRootWindow(root);
             _runtime.ClientEmbeddings.TryEmbed(account.AccountId, root);
-            if (_runtime.ClientEmbeddings.IsEmbedded(account.AccountId)) ShowOnlySelection();
+            if (_runtime.ClientEmbeddings.IsEmbedded(account.AccountId))
+            {
+                _embedTimes[account.AccountId] = DateTime.UtcNow;
+                if (!_viewVisible) _runtime.ClientEmbeddings.HideAll();
+                else ShowOnlySelection();
+            }
         }
         if (HasTab(account.AccountId))
         {
@@ -155,6 +164,12 @@ public partial class ClientsPanel : UserControl
         }
         if (_runtime is null) return;
         _runtime.ClientEmbeddings.TryUnembed(snapshot.AccountId);
+        if (_embedTimes.TryGetValue(snapshot.AccountId, out var embeddedAt) &&
+            (DateTime.UtcNow - embeddedAt).TotalSeconds < 10)
+        {
+            _embedTimes.Remove(snapshot.AccountId);
+            Log($"Client {snapshot.Label} exited {(DateTime.UtcNow - embeddedAt).TotalSeconds:0.0}s after embedding.");
+        }
         RemoveTab(snapshot.AccountId);
         ShowOnlySelection();
         Relayout();
