@@ -24,7 +24,6 @@
                     <Setter Property="Padding" Value="14,7" />
                     <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
                     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-                    <Setter Property="Focusable" Value="False" />
                     <Setter Property="Template">
                         <Setter.Value>
                             <ControlTemplate TargetType="ListBoxItem">

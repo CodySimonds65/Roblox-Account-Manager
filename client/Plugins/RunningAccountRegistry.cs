@@ -220,7 +220,10 @@ public sealed class RunningAccountRegistry : IDisposable
                         continue;
                     }
 
-                    var hwnd = FindWindow(process.Id);
+                    var previousWindow = (nint)record.WindowHandle;
+                    var hwnd = IsOwnedProcessWindow(previousWindow, process.Id)
+                        ? previousWindow
+                        : FindWindow(process.Id);
                     var snapshot = record with
                     {
                         WindowHandle = hwnd.ToInt64(),
@@ -386,6 +389,7 @@ public sealed class RunningAccountRegistry : IDisposable
         {
             var windowHandle = (nint)WindowHandle;
             var rect = GetClientMetrics(windowHandle);
+            var processRoot = GetProcessRootWindow(windowHandle, ProcessId);
             return new ManagedAccountSnapshot(
                 AccountId,
                 Label,
@@ -400,7 +404,26 @@ public sealed class RunningAccountRegistry : IDisposable
                 windowHandle != nint.Zero && IsIconic(GetAncestor(windowHandle, GA_ROOT)),
                 LastActivityUtc,
                 windowHandle != nint.Zero,
-                windowHandle == nint.Zero ? nint.Zero : GetAncestor(windowHandle, GA_ROOT));
+                processRoot);
+        }
+    }
+
+    private static bool IsOwnedProcessWindow(nint hwnd, int processId)
+    {
+        if (hwnd == nint.Zero || !IsWindow(hwnd)) return false;
+        GetWindowThreadProcessId(hwnd, out var ownerPid);
+        return ownerPid == processId;
+    }
+
+    private static nint GetProcessRootWindow(nint hwnd, int processId)
+    {
+        if (!IsOwnedProcessWindow(hwnd, processId)) return nint.Zero;
+        var current = hwnd;
+        while (true)
+        {
+            var parent = GetParent(current);
+            if (!IsOwnedProcessWindow(parent, processId)) return current;
+            current = parent;
         }
     }
 
@@ -423,6 +446,7 @@ public sealed class RunningAccountRegistry : IDisposable
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint hWnd);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint hWnd);
     [DllImport("user32.dll")] private static extern nint GetWindow(nint hWnd, uint command);
+    [DllImport("user32.dll")] private static extern nint GetParent(nint hWnd);
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint hwnd, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint hwnd, ref char className, int maxCount);
     [DllImport("user32.dll")] private static extern bool IsIconic(nint hWnd);
