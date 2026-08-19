@@ -85,10 +85,8 @@ public sealed partial class SingletonService
 
     internal static async Task<UnlockResult> ReleaseHandlesAsync(
         string handlePath,
-        CancellationToken cancellationToken,
-        IReadOnlyCollection<int>? protectedProcessIds = null)
+        CancellationToken cancellationToken)
     {
-        var protectedSet = protectedProcessIds is null ? null : new HashSet<int>(protectedProcessIds);
         var processes = Process.GetProcessesByName("RobloxPlayerBeta");
         if (processes.Length == 0)
         {
@@ -102,79 +100,79 @@ public sealed partial class SingletonService
         var closedCount = 0;
         try
         {
-            try
+            // A running client can re-open the named singleton objects between
+            // the close pass and the verification pass, which would fail the
+            // whole unlock spuriously. Retry the close+verify cycle once before
+            // giving up so a transient re-open does not abort the launch.
+            for (var attempt = 1; attempt <= 2; attempt++)
             {
-                foreach (var process in processes)
+                try
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    // Closing the singleton handles inside a RUNNING managed client
-                    // makes its watchdog shut the game down. Managed accounts are
-                    // protected; their handles are never closed or verified.
-                    if (protectedSet is not null && protectedSet.Contains(process.Id))
-                    {
-                        messages.Add($"Skipped singleton release for PID {process.Id} (managed account in use).");
-                        continue;
-                    }
-                    var queryResult = await RunHandleAsync(
-                        handlePath,
-                        cancellationToken,
-                        "-accepteula", "-nobanner", "-a", "-p", process.Id.ToString());
-                    EnsureHandleSucceeded(queryResult, $"inspect Roblox PID {process.Id}");
-
-                    foreach (var handle in ParseSingletonHandles(queryResult.Output))
+                    foreach (var process in processes)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        var closeResult = await RunHandleAsync(
+                        var queryResult = await RunHandleAsync(
                             handlePath,
                             cancellationToken,
-                            "-accepteula", "-nobanner", "-c", handle.Id, "-p", process.Id.ToString(), "-y");
-                        EnsureHandleSucceeded(closeResult, $"release {handle.Name} in PID {process.Id}");
-                        closedCount++;
-                        messages.Add($"Released {handle.Name} in PID {process.Id}.");
+                            "-accepteula", "-nobanner", "-a", "-p", process.Id.ToString());
+                        EnsureHandleSucceeded(queryResult, $"inspect Roblox PID {process.Id}");
+
+                        foreach (var handle in ParseSingletonHandles(queryResult.Output))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            var closeResult = await RunHandleAsync(
+                                handlePath,
+                                cancellationToken,
+                                "-accepteula", "-nobanner", "-c", handle.Id, "-p", process.Id.ToString(), "-y");
+                            EnsureHandleSucceeded(closeResult, $"release {handle.Name} in PID {process.Id}");
+                            closedCount++;
+                            messages.Add($"Released {handle.Name} in PID {process.Id}.");
+                        }
+                    }
+
+                    var verificationProcesses = Process.GetProcessesByName("RobloxPlayerBeta");
+                    try
+                    {
+                        foreach (var process in verificationProcesses)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            var verificationResult = await RunHandleAsync(
+                                handlePath,
+                                cancellationToken,
+                                "-accepteula", "-nobanner", "-a", "-p", process.Id.ToString());
+                            EnsureHandleSucceeded(verificationResult, $"verify Roblox PID {process.Id}");
+
+                            if (ParseSingletonHandles(verificationResult.Output).Count > 0)
+                            {
+                                throw new InvalidOperationException($"Roblox still owns a singleton object in PID {process.Id}.");
+                            }
+                        }
+
+                        break;
+                    }
+                    finally
+                    {
+                        foreach (var process in verificationProcesses)
+                        {
+                            process.Dispose();
+                        }
                     }
                 }
-            }
-            finally
-            {
-                foreach (var process in processes)
+                catch (InvalidOperationException) when (attempt < 2)
                 {
-                    process.Dispose();
+                    messages.Add("A singleton handle reappeared; retrying the unlock pass...");
+                    await Task.Delay(300, cancellationToken);
                 }
+            }
+
+            foreach (var process in processes)
+            {
+                process.Dispose();
             }
 
             if (closedCount == 0)
             {
                 messages.Add("No singleton handles are currently present; Roblox is already unlocked.");
-            }
-
-            var verificationProcesses = Process.GetProcessesByName("RobloxPlayerBeta");
-            try
-            {
-                foreach (var process in verificationProcesses)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (protectedSet is not null && protectedSet.Contains(process.Id))
-                    {
-                        continue;
-                    }
-                    var verificationResult = await RunHandleAsync(
-                        handlePath,
-                        cancellationToken,
-                        "-accepteula", "-nobanner", "-a", "-p", process.Id.ToString());
-                    EnsureHandleSucceeded(verificationResult, $"verify Roblox PID {process.Id}");
-
-                    if (ParseSingletonHandles(verificationResult.Output).Count > 0)
-                    {
-                        throw new InvalidOperationException($"Roblox still owns a singleton object in PID {process.Id}.");
-                    }
-                }
-            }
-            finally
-            {
-                foreach (var process in verificationProcesses)
-                {
-                    process.Dispose();
-                }
             }
 
             return new UnlockResult(true, closedCount, [.. messages]);
@@ -352,12 +350,10 @@ public sealed class SingletonUnlockSession : IAsyncDisposable
         _handlePath = handlePath;
     }
 
-    public Task<UnlockResult> ReleaseAsync(
-        CancellationToken cancellationToken = default,
-        IReadOnlyCollection<int>? protectedProcessIds = null)
+    public Task<UnlockResult> ReleaseAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return SingletonService.ReleaseHandlesAsync(_handlePath, cancellationToken, protectedProcessIds);
+        return SingletonService.ReleaseHandlesAsync(_handlePath, cancellationToken);
     }
 
     public ValueTask DisposeAsync()

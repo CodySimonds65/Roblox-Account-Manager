@@ -19,9 +19,14 @@ public static partial class RobloxLogAutopsy
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Roblox",
             "logs");
+        return Autopsy(snapshot, logsDirectory);
+    }
+
+    internal static IReadOnlyList<string> Autopsy(ManagedAccountSnapshot snapshot, string logsDirectory)
+    {
         if (!Directory.Exists(logsDirectory))
         {
-            return [];
+            return [$"No Roblox session log was found for {snapshot.Label}."];
         }
 
         var nowUtc = DateTime.UtcNow;
@@ -32,7 +37,17 @@ public static partial class RobloxLogAutopsy
         var candidate = FindSessionLog(logsDirectory, processStartUtc, nowUtc);
         if (candidate is null)
         {
-            return [];
+            return [$"No Roblox session log was found for {snapshot.Label}."];
+        }
+
+        IReadOnlyList<string> tail;
+        try
+        {
+            tail = ReadTailWithRetry(candidate.Path, 600);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return [$"Roblox log for {snapshot.Label} could not be read: {ex.Message}"];
         }
 
         var fileName = Path.GetFileName(candidate.Path);
@@ -43,7 +58,6 @@ public static partial class RobloxLogAutopsy
             $"Roblox log: {fileName} (client {version}, started {startText})."
         };
 
-        var tail = ReadTail(candidate.Path, 600);
         foreach (var line in tail)
         {
             if (line.Contains("updateRequired TRUE", StringComparison.OrdinalIgnoreCase) ||
@@ -85,7 +99,7 @@ public static partial class RobloxLogAutopsy
                     nameMatch.Groups["time"].Value,
                     "yyyyMMddTHHmmss",
                     CultureInfo.InvariantCulture,
-                    DateTimeStyles.AssumeUniversal,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
                     out var startUtc))
             {
                 continue;
@@ -104,6 +118,28 @@ public static partial class RobloxLogAutopsy
         // A one-minute ceiling keeps two accounts launched back-to-back from
         // borrowing each other's session logs.
         return bestDelta <= TimeSpan.FromMinutes(1) ? best : null;
+    }
+
+    private static IReadOnlyList<string> ReadTailWithRetry(string path, int maxLines)
+    {
+        // Roblox holds its session log exclusively while the process tears down,
+        // and security software may scan-lock it right after a write. Retry a few
+        // times before giving up; the caller runs off the UI thread.
+        IOException? lastError = null;
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            if (attempt > 0) Thread.Sleep(250);
+            try
+            {
+                return ReadTail(path, maxLines);
+            }
+            catch (IOException ex)
+            {
+                lastError = ex;
+            }
+        }
+
+        throw lastError ?? new IOException($"The log file {path} could not be opened.");
     }
 
     private static IReadOnlyList<string> ReadTail(string path, int maxLines)
