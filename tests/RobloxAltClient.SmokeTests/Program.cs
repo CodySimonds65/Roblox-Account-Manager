@@ -1082,6 +1082,61 @@ Require(unchecked((short)InputSendInjector.WheelData(120)) == 120 && unchecked((
 
 Console.WriteLine("Plugin input injector mapping smoke tests passed.");
 
+var autopsyRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-autopsy-" + Guid.NewGuid().ToString("N"));
+try
+{
+    Directory.CreateDirectory(autopsyRoot);
+    var autopsySessionStart = new DateTime(2026, 8, 19, 1, 38, 57, DateTimeKind.Utc);
+    var autopsySnapshot = new ManagedAccountSnapshot(
+        "autopsy-test",
+        "Autopsy test",
+        4242,
+        autopsySessionStart.Ticks,
+        nint.Zero,
+        0,
+        0,
+        100,
+        100,
+        96,
+        false,
+        autopsySessionStart,
+        true);
+    var autopsyLogPath = Path.Combine(
+        autopsyRoot,
+        $"0.734.0.7340917_{autopsySessionStart:yyyyMMddTHHmmss}Z_Player_4367A_last.log");
+    var sessionLines = new List<string>();
+    for (var index = 0; index < 700; index++)
+    {
+        sessionLines.Add($"{autopsySessionStart.AddSeconds(index).ToUniversalTime():O} [FLog::Graphics] RenderView frame {index}");
+    }
+    sessionLines.Add("2026-08-19T01:39:04.305Z [FLog::UpdateController] Update check thread: updateRequired TRUE");
+    sessionLines.Add("2026-08-19T01:39:04.305Z [FLog::UpdateController] Update mode is chosen as FORCE. Telemetry sent");
+    sessionLines.Add("2026-08-19T01:39:04.111Z [FLog::Output] RobloxChannel has been set to zfrmparticlesaug18");
+    sessionLines.Add("2026-08-19T01:39:04.704Z [FLog::Network] Sending disconnect with reason: 285");
+    await File.WriteAllLinesAsync(autopsyLogPath, sessionLines);
+
+    var autopsyLines = RobloxLogAutopsy.Autopsy(autopsySnapshot, autopsyRoot);
+    Require(autopsyLines.Count > 0, "The Roblox log autopsy found no session log.");
+    Require(autopsyLines.Any(line => line.Contains("updater", StringComparison.OrdinalIgnoreCase) &&
+                                     line.Contains("REQUIRED", StringComparison.Ordinal)),
+        "The Roblox log autopsy did not detect the force-update shutdown.");
+    Require(autopsyLines.Any(line => line.Contains("zfrmparticlesaug18", StringComparison.Ordinal)),
+        "The Roblox log autopsy did not report the Roblox channel.");
+    Require(autopsyLines.Any(line => line.Contains("285", StringComparison.Ordinal)),
+        "The Roblox log autopsy did not report the disconnect reason.");
+
+    var unrelatedSnapshot = autopsySnapshot with { ProcessStartTimeUtcTicks = new DateTime(2026, 8, 19, 3, 0, 0, DateTimeKind.Utc).Ticks };
+    var missingAutopsyLines = RobloxLogAutopsy.Autopsy(unrelatedSnapshot, autopsyRoot);
+    Require(missingAutopsyLines.Count == 1 && missingAutopsyLines[0].Contains("No Roblox session log", StringComparison.Ordinal),
+        "The Roblox log autopsy did not report a missing session log.");
+}
+finally
+{
+    if (Directory.Exists(autopsyRoot)) Directory.Delete(autopsyRoot, recursive: true);
+}
+
+Console.WriteLine("Roblox log autopsy smoke tests passed.");
+
 static SecurityIdentifier? GetMandatoryLabelSid(GenericAce ace)
 {
     var binary = new byte[ace.BinaryLength];

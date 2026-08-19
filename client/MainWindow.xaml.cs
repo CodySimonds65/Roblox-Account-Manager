@@ -955,12 +955,14 @@ public partial class MainWindow : Window
             _singletonUnlockSession = sessionResult.Session;
         }
 
-        // Never close singleton handles inside clients the launcher is actively
-        // running: Roblox's watchdog shuts the game down when its handles are
-        // closed from outside. Only unprotected (stale) instances are unlocked.
-        var protectedProcessIds = ((App)Application.Current).PluginRuntime.Accounts.Snapshot()
-            .Select(account => account.ProcessId).ToArray();
-        return await _singletonUnlockSession.ReleaseAsync(cancellationToken, protectedProcessIds);
+        // Destroy the singleton objects in EVERY running Roblox client before
+        // the next launch. If a running instance still owns the mutex/event,
+        // the new instance's startup signals the event and the old instance's
+        // reload watchdog shuts the game down. Closing the handles makes the
+        // new instance create fresh objects that nobody else holds, so no
+        // takeover signal is ever delivered. (Roblox clients tolerate the
+        // externally closed handles; RAM's multi-instance unlock relies on it.)
+        return await _singletonUnlockSession.ReleaseAsync(cancellationToken);
     }
 
     private TimeSpan GetLaunchTimeout()

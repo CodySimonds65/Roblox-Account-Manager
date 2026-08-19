@@ -244,6 +244,7 @@ public sealed class RunningAccountRegistry : IDisposable
                     if (wrapper is not null) wrappersToDetach.Add(wrapper);
                     _records.Remove(record.AccountId);
                     exited.Add(record.ToSnapshot() with { IsRunning = false });
+                    Diagnostic?.Invoke(this, $"Account {record.Label} (PID {record.ProcessId}) exited; the process is no longer available.");
                 }
                 catch (InvalidOperationException)
                 {
@@ -251,6 +252,7 @@ public sealed class RunningAccountRegistry : IDisposable
                     if (wrapper is not null) wrappersToDetach.Add(wrapper);
                     _records.Remove(record.AccountId);
                     exited.Add(record.ToSnapshot() with { IsRunning = false });
+                    Diagnostic?.Invoke(this, $"Account {record.Label} (PID {record.ProcessId}) exited; the process is no longer available.");
                 }
                 catch (Win32Exception)
                 {
@@ -258,6 +260,7 @@ public sealed class RunningAccountRegistry : IDisposable
                     if (wrapper is not null) wrappersToDetach.Add(wrapper);
                     _records.Remove(record.AccountId);
                     exited.Add(record.ToSnapshot() with { IsRunning = false });
+                    Diagnostic?.Invoke(this, $"Account {record.Label} (PID {record.ProcessId}) exited; the process is no longer available.");
                 }
             }
 
