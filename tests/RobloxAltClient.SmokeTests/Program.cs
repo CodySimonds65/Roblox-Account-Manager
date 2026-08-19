@@ -1109,6 +1109,50 @@ Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { Is
 
 Console.WriteLine("Plugin input routing smoke tests passed.");
 
+using (var nativeHost = NativeEmbeddingTestWindow.CreateHost())
+using (var firstRoot = NativeEmbeddingTestWindow.CreateRoot(-31900, -31900, 800, 600))
+using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 1024, 768))
+{
+    var firstOriginalStyle = firstRoot.Style;
+    var firstOriginalBounds = firstRoot.Bounds;
+    var secondOriginalStyle = secondRoot.Style;
+    var secondOriginalBounds = secondRoot.Bounds;
+    var embeddings = new ClientEmbeddingService();
+    embeddings.SetHostWindow(nativeHost.Handle);
+
+    Require(!embeddings.TryEmbed("stale-process", firstRoot.Handle, Environment.ProcessId + 1),
+        "Embedding accepted a window owned by an unexpected process.");
+    Require(embeddings.TryEmbed("native-first", firstRoot.Handle, Environment.ProcessId),
+        "The first native test window could not be embedded.");
+    Require(embeddings.TryEmbed("native-second", secondRoot.Handle, Environment.ProcessId),
+        "The second native test window could not be embedded.");
+    Require(firstRoot.Parent == nativeHost.Handle && secondRoot.Parent == nativeHost.Handle,
+        "Embedded windows were not parented beneath the native Clients host.");
+    Require(firstRoot.HasChildStyle && secondRoot.HasChildStyle,
+        "Embedded windows did not receive the native child-window style.");
+
+    embeddings.ShowOnly("native-first");
+    Require(embeddings.IsVisible("native-first") && firstRoot.Visible && !secondRoot.Visible,
+        "Selecting the first native client did not hide every other embedded client.");
+    embeddings.ShowOnly("native-second");
+    Require(embeddings.IsVisible("native-second") && secondRoot.Visible && !firstRoot.Visible,
+        "Selecting the second native client did not transfer exclusive visibility.");
+
+    Require(embeddings.TryUnembed("native-first"), "The first native test window could not be unembedded.");
+    Require(firstRoot.Parent == nint.Zero && firstRoot.Style == firstOriginalStyle &&
+            firstRoot.Bounds == firstOriginalBounds && firstRoot.Visible,
+        "Unembedding did not restore the first window's parent, style, placement, and visibility.");
+
+    embeddings.ReleaseHostWindow(nativeHost.Handle);
+    Require(secondRoot.Parent == nint.Zero && secondRoot.Style == secondOriginalStyle &&
+            secondRoot.Bounds == secondOriginalBounds && secondRoot.Visible,
+        "Destroying the native host did not restore its remaining embedded window.");
+    Require(embeddings.EmbeddedAccountIds().Length == 0,
+        "Releasing the native host left stale embedded-account state.");
+}
+
+Console.WriteLine("Native client host lifecycle smoke tests passed.");
+
 var autopsyRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-autopsy-" + Guid.NewGuid().ToString("N"));
 try
 {
