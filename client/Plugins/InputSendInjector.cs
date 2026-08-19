@@ -119,7 +119,7 @@ public sealed class InputSendInjector
         var releases = PendingReleases(postedEvents);
         return await ReleasePendingInputsAsync(
             releases,
-            IsReleaseSafe(rootWindow),
+            IsReleaseSafe(rootWindow, targetValidator),
             release => TryInject(rootWindow, release, out _),
             releaseFallback).ConfigureAwait(false);
     }
@@ -128,9 +128,14 @@ public sealed class InputSendInjector
     // foreground. It intentionally does not invoke the full target validator:
     // identity/focus drift must stop new events, but a still-foreground root can
     // safely receive the key/button-up cleanup before it is hidden or destroyed.
-    private static bool IsReleaseSafe(nint rootWindow) =>
-        IsWindow(rootWindow) && IsWindowVisible(rootWindow) &&
-        GetAncestor(rootWindow, GaRoot) == rootWindow && GetForegroundWindow() == rootWindow;
+    private static bool IsReleaseSafe(nint rootWindow, Func<bool>? targetValidator)
+    {
+        if (!IsWindow(rootWindow) || !IsWindowVisible(rootWindow) ||
+            GetAncestor(rootWindow, GaRoot) != rootWindow || GetForegroundWindow() != rootWindow)
+            return false;
+        try { return targetValidator?.Invoke() ?? true; }
+        catch { return false; }
+    }
 
     internal static async Task<bool> ReleasePendingInputsAsync(
         IReadOnlyList<PluginInputEvent> releases,

@@ -107,7 +107,10 @@ public sealed class ForegroundAutomationCoordinator : IAsyncDisposable
         if (!_accounts.TryResolveLiveAccount(accountId, out var account))
             return AutomationSessionResult.Fail("stale-window", "The managed account process or window is no longer valid.");
 
+        var trackedRoot = _embeddings.TrackedRootFor(accountId);
         var root = ResolveRoot(accountId, account);
+        if (trackedRoot is not null && _embeddings.RootFor(accountId) is null)
+            return AutomationSessionResult.Fail("stale-window", "The managed client docking identity drifted before activation.");
         if (!IsValidatedRoot(root, account) ||
             (account.RootWindowHandle != nint.Zero && root != account.RootWindowHandle))
             return AutomationSessionResult.Fail("stale-window", "The managed Roblox root window is unavailable.");
@@ -119,8 +122,21 @@ public sealed class ForegroundAutomationCoordinator : IAsyncDisposable
             _embeddings.Layout();
         }
 
+        // Layout/show operations can race a Roblox restart. Revalidate the
+        // process identity immediately before the only activation call.
+        if (!_accounts.TryResolveLiveAccount(accountId, out var preActivation) ||
+            preActivation.ProcessId != account.ProcessId ||
+            preActivation.ProcessStartTimeUtcTicks != account.ProcessStartTimeUtcTicks ||
+            !IsValidatedRoot(root, preActivation))
+            return AutomationSessionResult.Fail("stale-window", "The managed Roblox identity changed before activation.");
+
         if (!IsWindowVisible(root)) ShowWindow(root, SwShow);
         if (IsIconic(root)) ShowWindow(root, SwRestore);
+        if (!_accounts.TryResolveLiveAccount(accountId, out var beforeActivation) ||
+            beforeActivation.ProcessId != account.ProcessId ||
+            beforeActivation.ProcessStartTimeUtcTicks != account.ProcessStartTimeUtcTicks ||
+            !IsValidatedRoot(root, beforeActivation))
+            return AutomationSessionResult.Fail("stale-window", "The managed Roblox identity changed before activation.");
 
         // This is the only approved activation call in the product. It is
         // deliberately guarded by live identity and followed by exact-root
@@ -174,7 +190,10 @@ public sealed class ForegroundAutomationCoordinator : IAsyncDisposable
 
         if (!_accounts.TryResolveLiveAccount(accountId, out var expected))
             return BackgroundInputResult.Failure("stale-window", "The managed account process or window is no longer valid.", nint.Zero, nint.Zero);
+        var trackedRoot = _embeddings.TrackedRootFor(accountId);
         var root = ResolveRoot(accountId, expected);
+        if (trackedRoot is not null && _embeddings.RootFor(accountId) is null)
+            return BackgroundInputResult.Failure("stale-window", "The managed client docking identity drifted during automation.", nint.Zero, nint.Zero);
         if (root == nint.Zero || root != session.LastRoot)
             return BackgroundInputResult.Failure("stale-window", "The managed Roblox root changed during automation.", nint.Zero, nint.Zero);
 
@@ -187,6 +206,8 @@ public sealed class ForegroundAutomationCoordinator : IAsyncDisposable
                     return false;
             }
             if (!_accounts.TryResolveLiveAccount(accountId, out var live)) return false;
+            if (_embeddings.TrackedRootFor(accountId) is not null && _embeddings.RootFor(accountId) is null)
+                return false;
             if (!IsValidatedRoot(root, live) || !IsWindowVisible(root) || GetForegroundWindow() != root)
             {
                 lock (_gate)
@@ -260,13 +281,26 @@ public sealed class ForegroundAutomationCoordinator : IAsyncDisposable
     {
         if (root == nint.Zero || !IsWindow(root) || GetAncestor(root, GaRoot) != root)
             return false;
-        return GetWindowThreadProcessId(root, out var processId) != 0 && processId == account.ProcessId;
+        if (GetWindowThreadProcessId(root, out var processId) == 0 || processId != account.ProcessId)
+            return false;
+        try
+        {
+            using var process = Process.GetProcessById(account.ProcessId);
+            return !process.HasExited &&
+                   process.StartTime.ToUniversalTime().Ticks == account.ProcessStartTimeUtcTicks &&
+                   string.Equals(process.ProcessName, "RobloxPlayerBeta", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private bool RestoreSnapshot(ForegroundSnapshot snapshot)
     {
         if (snapshot.ForegroundWindow == nint.Zero || !IsWindow(snapshot.ForegroundWindow)) return false;
-        if (snapshot.ForegroundProcessId > 0 && GetWindowThreadProcessId(snapshot.ForegroundWindow, out var pid) != 0 && pid != snapshot.ForegroundProcessId) return false;
+        if (snapshot.ForegroundProcessId > 0 &&
+            (GetWindowThreadProcessId(snapshot.ForegroundWindow, out var pid) == 0 || pid != snapshot.ForegroundProcessId)) return false;
         if (snapshot.ForegroundProcessId > 0)
         {
             try

@@ -94,6 +94,16 @@ public sealed class ClientEmbeddingService
         }
     }
 
+    /// <summary>
+    /// Returns the tracked dock root even when temporary docking state has
+    /// drifted. Callers use this only to fail closed rather than fall back to
+    /// a process root that could be visible outside the Clients viewport.
+    /// </summary>
+    public nint? TrackedRootFor(string accountId)
+    {
+        lock (_gate) return _embedded.TryGetValue(accountId, out var embedded) ? embedded.Root : null;
+    }
+
     /// <summary>Returns true only when this selected Roblox top-level owns desktop foreground.</summary>
     public bool TargetOwnsForeground(string accountId)
     {
