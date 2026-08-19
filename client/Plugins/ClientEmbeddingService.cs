@@ -11,6 +11,7 @@ public sealed class ClientEmbeddingService
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, nint> _embedded = new(StringComparer.Ordinal);
+    private string? _visibleAccountId;
     private nint _hostWindow;
 
     /// <summary>Returns the embedded root HWND for an account when it is visible and selected; null otherwise.</summary>
@@ -39,6 +40,11 @@ public sealed class ClientEmbeddingService
         lock (_gate) return _embedded.ContainsKey(accountId);
     }
 
+    public string? VisibleAccountId
+    {
+        get { lock (_gate) return _visibleAccountId; }
+    }
+
     public nint? RootFor(string accountId)
     {
         lock (_gate) return _embedded.TryGetValue(accountId, out var root) ? root : null;
@@ -49,16 +55,35 @@ public sealed class ClientEmbeddingService
     public bool TryEmbed(string accountId, nint rootWindow)
     {
         if (rootWindow == nint.Zero || _hostWindow == nint.Zero || !IsWindow(_hostWindow)) return false;
+        nint previousRoot = nint.Zero;
         lock (_gate)
         {
-            if (_embedded.TryGetValue(accountId, out var existing) && existing == rootWindow) return true;
+            if (_embedded.TryGetValue(accountId, out var existing))
+            {
+                if (existing == rootWindow) return true;
+                previousRoot = existing;
+            }
             _embedded[accountId] = rootWindow;
         }
+        if (previousRoot != nint.Zero && IsWindow(previousRoot))
+        {
+            SetParent(previousRoot, nint.Zero);
+            var previousStyle = GetWindowLongPtr(previousRoot, GwlStyle).ToInt64();
+            SetWindowLongPtr(previousRoot, GwlStyle, new nint((previousStyle & ~WsChild) | WsPopup));
+        }
         var style = GetWindowLongPtr(rootWindow, GwlStyle).ToInt64();
-        style = (style & ~WsPopup) | WsChild | WsVisible;
+        // Visibility is controlled by ShowOnly/ShowWindow; the child must not
+        // appear on the desktop before it is shown inside the host tab.
+        style = (style & ~WsPopup & ~WsVisible) | WsChild;
         SetWindowLongPtr(rootWindow, GwlStyle, new nint(style));
         SetParent(rootWindow, _hostWindow);
         return true;
+    }
+
+    public void HideRootWindow(nint rootWindow)
+    {
+        if (rootWindow == nint.Zero || !IsWindow(rootWindow)) return;
+        ShowWindow(rootWindow, SwHide);
     }
 
     public bool TryUnembed(string accountId)
@@ -103,11 +128,33 @@ public sealed class ClientEmbeddingService
     {
         lock (_gate)
         {
+            _visibleAccountId = accountId;
             foreach (var (id, root) in _embedded)
             {
                 if (root == nint.Zero) continue;
                 ShowWindow(root, string.Equals(id, accountId, StringComparison.Ordinal) ? SwShow : SwHide);
             }
+        }
+    }
+
+    public void HideAll()
+    {
+        lock (_gate)
+        {
+            _visibleAccountId = null;
+            foreach (var root in _embedded.Values)
+            {
+                if (root != nint.Zero) ShowWindow(root, SwHide);
+            }
+        }
+    }
+
+    public void HideRoot(string accountId)
+    {
+        lock (_gate)
+        {
+            if (_embedded.TryGetValue(accountId, out var root) && root != nint.Zero)
+                ShowWindow(root, SwHide);
         }
     }
 

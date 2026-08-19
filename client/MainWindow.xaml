@@ -1,6 +1,7 @@
 <Window x:Class="RobloxAltClient.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:RobloxAltClient"
         Title="Roblox Account Manager" Height="860" Width="1380" MinHeight="700" MinWidth="1080"
         Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
         WindowStartupLocation="CenterScreen">
@@ -159,8 +160,6 @@
                                Foreground="{StaticResource MutedTextBrush}" FontSize="13" Margin="0,3,0,0" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Button Content="Clients" Click="Clients_Click" Style="{StaticResource SecondaryButton}"
-                            Padding="12,6" Margin="0,0,8,0" ToolTip="Embed running clients as tabs for macro playback"/>
                     <Button Content="Plugins" Click="Plugins_Click" Style="{StaticResource SecondaryButton}"
                             Padding="12,6" Margin="0,0,8,0" />
                     <Button Content="Settings" Click="Settings_Click" Style="{StaticResource SecondaryButton}"
@@ -254,6 +253,12 @@
                             <TextBlock Text="  •  SESSION" FontSize="10" FontWeight="Bold"
                                        Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
                         </StackPanel>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0">
+                            <Button x:Name="BrowseViewButton" Content="Browse" Click="BrowseView_Click" Style="{StaticResource SecondaryButton}"
+                                    Padding="14,5" IsEnabled="False" ToolTip="Roblox session browser"/>
+                            <Button x:Name="ClientsViewButton" Content="Clients" Click="ClientsView_Click" Style="{StaticResource SecondaryButton}"
+                                    Padding="14,5" Margin="6,0,0,0" ToolTip="Embedded clients (opt-in per profile)"/>
+                        </StackPanel>
                     </Grid>
                     <ProgressBar x:Name="LaunchProgress" Grid.Row="1" IsIndeterminate="True" Visibility="Collapsed"
                                  Foreground="{StaticResource AccentBrush}" Background="Transparent" BorderThickness="0" />
@@ -269,6 +274,7 @@
                                        Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" />
                         </StackPanel>
                     </Grid>
+                    <local:ClientsPanel x:Name="ClientsPanel" Grid.Row="2" Visibility="Collapsed" />
                 </Grid>
             </Border>
 
