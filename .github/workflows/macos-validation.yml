@@ -1,0 +1,42 @@
+name: macOS compatibility
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/RobloxAccountManager.Core.Tests/**"
+      - "tests/RobloxAccountManager.Platform.MacOS.Tests/**"
+      - ".github/workflows/macos-*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            rid: osx-arm64
+          - runner: macos-15-intel
+            rid: osx-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - name: Test shared launch and security contracts
+        run: dotnet run --project tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release
+      - name: Test macOS platform safety contracts
+        run: dotnet run --project tests/RobloxAccountManager.Platform.MacOS.Tests/RobloxAccountManager.Platform.MacOS.Tests.csproj -c Release
+      - name: Build macOS platform adapter
+        run: dotnet build src/RobloxAccountManager.Platform.MacOS/RobloxAccountManager.Platform.MacOS.csproj -c Release
+      - name: Publish Avalonia desktop
+        run: dotnet publish src/RobloxAccountManager.Desktop/RobloxAccountManager.Desktop.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -o "artifacts/${{ matrix.rid }}"
+      - name: Package unsigned app bundle
+        run: bash build/macos/package-app.sh "artifacts/${{ matrix.rid }}" "artifacts/Roblox Account Manager.app" 0.0.0
+      - name: Smoke-test app composition
+        run: "artifacts/Roblox Account Manager.app/Contents/MacOS/RobloxAccountManager --validate-composition"

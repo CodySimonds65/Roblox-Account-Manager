@@ -1,0 +1,62 @@
+name: One-off unsigned macOS PKG
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            rid: osx-arm64
+          - runner: macos-15-intel
+            rid: osx-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build and test
+        run: |
+          set -euo pipefail
+          dotnet run --project tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release
+          dotnet run --project tests/RobloxAccountManager.Platform.MacOS.Tests/RobloxAccountManager.Platform.MacOS.Tests.csproj -c Release
+          dotnet publish src/RobloxAccountManager.Desktop/RobloxAccountManager.Desktop.csproj \
+            -c Release -r "${{ matrix.rid }}" --self-contained true -o publish
+
+      - name: Create unsigned app and test PKG
+        run: |
+          set -euo pipefail
+          version="0.0.${GITHUB_RUN_NUMBER}"
+          package_version="${GITHUB_RUN_NUMBER}"
+          mkdir -p dist
+          app="dist/Roblox Account Manager.app"
+          pkg="dist/RobloxAccountManager-oneoff-${{ matrix.rid }}.pkg"
+          bash build/macos/package-app.sh publish "$app" "$version"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $package_version" "$app/Contents/Info.plist"
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
+          pkgbuild \
+            --component "$app" \
+            --install-location /Applications \
+            --identifier io.github.codysimonds65.roblox-account-manager.oneoff \
+            --version "$package_version" \
+            "$pkg"
+          pkgutil --check-signature "$pkg" || true
+          shasum -a 256 "$pkg" > "$pkg.sha256"
+
+      - name: Upload one-off PKG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-oneoff-${{ matrix.rid }}
+          path: |
+            dist/*.pkg
+            dist/*.pkg.sha256
+          if-no-files-found: error

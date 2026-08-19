@@ -42,7 +42,11 @@ public sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<ManagedA
             value.GetProperty("isMinimized").GetBoolean(),
             value.GetProperty("lastActivityUtc").GetDateTime(),
             value.GetProperty("isRunning").GetBoolean(),
-            value.TryGetProperty("rootWindowHandle", out var root) ? (nint)root.GetInt64() : nint.Zero);
+            value.TryGetProperty("rootWindowHandle", out var root) ? (nint)root.GetInt64() : nint.Zero,
+            value.TryGetProperty("platform", out var platform) && platform.ValueKind == JsonValueKind.String ? platform.GetString() : null,
+            value.TryGetProperty("windowIdentifier", out var windowIdentifier) && windowIdentifier.ValueKind == JsonValueKind.String
+                ? windowIdentifier.GetString()
+                : null);
     }
 
     public override void Write(Utf8JsonWriter writer, ManagedAccountSnapshot value, JsonSerializerOptions options)
@@ -62,6 +66,8 @@ public sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<ManagedA
         writer.WriteString("lastActivityUtc", value.LastActivityUtc);
         writer.WriteBoolean("isRunning", value.IsRunning);
         writer.WriteNumber("rootWindowHandle", value.RootWindowHandle.ToInt64());
+        if (value.Platform is not null) writer.WriteString("platform", value.Platform);
+        if (value.WindowIdentifier is not null) writer.WriteString("windowIdentifier", value.WindowIdentifier);
         writer.WriteEndObject();
     }
 }

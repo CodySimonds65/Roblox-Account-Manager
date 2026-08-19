@@ -89,6 +89,128 @@ static async Task<PluginEnvelope?> ReadEnvelopeUntilAsync(Stream stream, string 
     return null;
 }
 
+// The singleton sweep is intentionally exercised with fake operations so this
+// regression test never needs to inspect or terminate a real Roblox process.
+var fakeClosedHandles = new List<string>();
+var fakeInspectCall = 0;
+var fakeProcess = new SingletonProcessIdentity(1701, 1, @"C:\Roblox\RobloxPlayerBeta.exe");
+var reappearingSweep = await new SingletonHandleReleaseCoordinator().ReleaseAsync(
+    _ => Task.FromResult<IReadOnlyList<SingletonProcessIdentity>>(new[] { fakeProcess }),
+    (_, _) =>
+    {
+        fakeInspectCall++;
+        IReadOnlyList<SingletonHandleInfo> handles = fakeInspectCall switch
+        {
+            1 or 2 or 3 => new[] { new SingletonHandleInfo("0x1", "ROBLOX_singletonEvent") },
+            _ => Array.Empty<SingletonHandleInfo>()
+        };
+        return Task.FromResult(handles);
+    },
+    (_, handle, _) =>
+    {
+        fakeClosedHandles.Add(handle.Name);
+        return Task.CompletedTask;
+    },
+    maxPasses: 3);
+Require(reappearingSweep.Success && reappearingSweep.HadReappearingHandles,
+    "A singleton handle that reappeared during verification did not trigger a retry sweep.");
+Require(fakeClosedHandles.Count == 2,
+    "The singleton retry sweep did not release both the original and reappeared handles.");
+
+var lateHandleInspectCall = 0;
+var delayedHandleActive = false;
+var delayedSweep = await new SingletonHandleReleaseCoordinator().ReleaseAsync(
+    _ => Task.FromResult<IReadOnlyList<SingletonProcessIdentity>>(new[]
+        { new SingletonProcessIdentity(1704, 4, @"C:\Roblox\RobloxPlayerBeta.exe") }),
+    (_, _) =>
+    {
+        lateHandleInspectCall++;
+        // The first client can recreate its singleton after an initially clean
+        // verification. The settle window must keep polling long enough to
+        // observe that delayed appearance before another client is launched.
+        if (lateHandleInspectCall == 6)
+            delayedHandleActive = true;
+        IReadOnlyList<SingletonHandleInfo> handles = delayedHandleActive
+            ? new[] { new SingletonHandleInfo("0x3", "ROBLOX_singletonEvent") }
+            : Array.Empty<SingletonHandleInfo>();
+        return Task.FromResult(handles);
+    },
+    (_, _, _) =>
+    {
+        delayedHandleActive = false;
+        return Task.CompletedTask;
+    },
+    maxPasses: 60,
+    retryDelay: TimeSpan.FromMilliseconds(5),
+    settleWindow: TimeSpan.FromMilliseconds(100));
+Require(delayedSweep.Success && delayedSweep.HadReappearingHandles && delayedSweep.ClosedCount == 1,
+    "The singleton settle window did not catch a handle that appeared after a clean verification.");
+
+var transientExitedInspectCalls = 0;
+var transientProcessA = new SingletonProcessIdentity(1702, 2, @"C:\Roblox\RobloxPlayerBeta.exe");
+var transientProcessB = new SingletonProcessIdentity(1703, 3, @"C:\Roblox\RobloxPlayerBeta.exe");
+var transientExitSweep = await new SingletonHandleReleaseCoordinator().ReleaseAsync(
+    _ => Task.FromResult<IReadOnlyList<SingletonProcessIdentity>>(new[] { transientProcessA, transientProcessB }),
+    (process, _) =>
+    {
+        transientExitedInspectCalls++;
+        if (process.Pid == 1702)
+            throw new SingletonProcessGoneException(process.Pid);
+
+        IReadOnlyList<SingletonHandleInfo> handles = transientExitedInspectCalls == 2
+            ? new[] { new SingletonHandleInfo("0x2", "ROBLOX_singletonMutex") }
+            : Array.Empty<SingletonHandleInfo>();
+        return Task.FromResult(handles);
+    },
+    (_, _, _) => Task.CompletedTask,
+    maxPasses: 2);
+Require(transientExitSweep.Success && transientExitSweep.ClosedCount == 1,
+    "A transiently exited Roblox PID incorrectly aborted singleton release.");
+
+var identityChangeExpected = new SingletonProcessIdentity(1705, 5, @"C:\Roblox\RobloxPlayerBeta.exe");
+var identityChangeCurrent = new SingletonProcessIdentity(1705, 6, @"C:\Roblox\RobloxPlayerBeta.exe");
+var identityChangeCloseCalls = 0;
+var identityChangeSweep = await new SingletonHandleReleaseCoordinator().ReleaseAsync(
+    _ => Task.FromResult<IReadOnlyList<SingletonProcessIdentity>>(new[] { identityChangeExpected }),
+    (process, _) =>
+    {
+        if (process != identityChangeCurrent)
+            throw new SingletonProcessGoneException(process.Pid);
+        return Task.FromResult<IReadOnlyList<SingletonHandleInfo>>(
+            new[] { new SingletonHandleInfo("0x4", "ROBLOX_singletonMutex") });
+    },
+    (_, _, _) =>
+    {
+        identityChangeCloseCalls++;
+        return Task.CompletedTask;
+    },
+    maxPasses: 2);
+Require(identityChangeSweep.Success && identityChangeCloseCalls == 0,
+    "A changed PID identity was allowed to reach the singleton close operation.");
+
+var conflictingIdentity = await new SingletonHandleReleaseCoordinator().ReleaseAsync(
+    _ => Task.FromResult<IReadOnlyList<SingletonProcessIdentity>>(new[]
+    {
+        new SingletonProcessIdentity(1706, 6, @"C:\Roblox\RobloxPlayerBeta.exe"),
+        new SingletonProcessIdentity(1706, 7, @"C:\Roblox\RobloxPlayerBeta.exe")
+    }),
+    (_, _) => throw new InvalidOperationException("Conflicting identities should stop before inspection."),
+    (_, _, _) => Task.CompletedTask,
+    maxPasses: 2);
+Require(!conflictingIdentity.Success,
+    "Conflicting identities for one PID were silently deduplicated.");
+
+var passBudgetSweep = await new SingletonHandleReleaseCoordinator().ReleaseAsync(
+    _ => Task.FromResult<IReadOnlyList<SingletonProcessIdentity>>(new[] { fakeProcess }),
+    (_, _) => Task.FromResult<IReadOnlyList<SingletonHandleInfo>>(
+        new[] { new SingletonHandleInfo("0x5", "ROBLOX_singletonEvent") }),
+    (_, _, _) => Task.CompletedTask,
+    maxPasses: 2,
+    retryDelay: TimeSpan.FromMilliseconds(1),
+    settleWindow: TimeSpan.FromMilliseconds(100));
+Require(!passBudgetSweep.Success,
+    "A singleton sweep reported success after exhausting its pass budget with handles still present.");
+
 Require(
     GamePreset.TryNormalizeRobloxGameUrl(
         "https://www.roblox.com/games/77649408247578/Dungeon-Quest-Reborn",
@@ -155,9 +277,13 @@ try
     Require(stateDocument.RootElement[0].GetProperty("windowHandle").ValueKind == JsonValueKind.Number,
         "Running-account HWND persistence was not written as a numeric value.");
     var snapshotJson = JsonSerializer.Serialize(new ManagedAccountSnapshot(
-        "state-test", "State test", 1, 1, (nint)42, 0, 0, 100, 100, 96, false, DateTime.UtcNow, true), PluginJson.Options);
+        "state-test", "State test", 1, 1, (nint)42, 0, 0, 100, 100, 96, false, DateTime.UtcNow, true,
+        Platform: "windows", WindowIdentifier: "hwnd:42"), PluginJson.Options);
     Require(snapshotJson.Contains("\"windowHandle\":42", StringComparison.Ordinal),
         "Managed-account HWND wire serialization was not numeric.");
+    Require(snapshotJson.Contains("\"platform\":\"windows\"", StringComparison.Ordinal) &&
+            snapshotJson.Contains("\"windowIdentifier\":\"hwnd:42\"", StringComparison.Ordinal),
+        "Managed-account cross-platform identity fields were not serialized.");
     var inputResultJson = JsonSerializer.Serialize(BackgroundInputResult.Failure("test", "test", (nint)7, (nint)8), PluginJson.Options);
     Require(inputResultJson.Contains("\"foregroundBefore\":7", StringComparison.Ordinal) && inputResultJson.Contains("\"foregroundAfter\":8", StringComparison.Ordinal),
         "Background input HWND wire serialization was not numeric.");
@@ -784,6 +910,53 @@ try
         """);
     Require(pluginManifest.Id == "io.github.codysimonds65.ram.macros", "Plugin manifest id did not parse.");
     Require(pluginManifest.EntryPoint == "ram-macros.exe", "Plugin entrypoint did not parse.");
+    var macLegacyManifest = PluginManifestReader.Parse("""
+        {
+          "schemaVersion": 1,
+          "id": "io.github.codysimonds65.ram.macros",
+          "name": "RAM Macros",
+          "version": "1.0.0",
+          "contractVersion": "1.0",
+          "publisher": "CodySimonds65",
+          "description": "Windows-only legacy plugin.",
+          "capabilities": ["host.accounts.read"],
+          "entryPoint": "ram-macros.exe"
+        }
+        """, "osx-arm64");
+    Require(!macLegacyManifest.IsAvailableOnCurrentPlatform,
+        "A schema 1 Windows plugin was incorrectly marked available on macOS.");
+    var macSchema2Manifest = PluginManifestReader.Parse("""
+        {
+          "schemaVersion": 2,
+          "id": "io.github.example.portable",
+          "name": "Portable plugin",
+          "version": "2.0.0",
+          "contractVersion": "1.0",
+          "publisher": "Example",
+          "description": "RID-aware plugin.",
+          "capabilities": ["host.accounts.read"],
+          "entryPoints": {
+            "win-x64": "windows/plugin.exe",
+            "osx-arm64": "macos-arm64/plugin",
+            "osx-x64": "macos-x64/plugin"
+          }
+        }
+        """, "osx-arm64");
+    Require(macSchema2Manifest.EntryPoint == "macos-arm64/plugin" && macSchema2Manifest.IsAvailableOnCurrentPlatform,
+        "Plugin schema 2 did not select the exact macOS RID entrypoint.");
+    RequireInvalidData(() => PluginManifestReader.Parse("""
+        {
+          "schemaVersion": 2,
+          "id": "io.github.example.unsafe",
+          "name": "Unsafe plugin",
+          "version": "2.0.0",
+          "contractVersion": "1.0",
+          "publisher": "Example",
+          "description": "Unsafe RID path.",
+          "capabilities": ["host.accounts.read"],
+          "entryPoints": { "osx-arm64": "../escape" }
+        }
+        """, "osx-arm64"), "Plugin schema 2 accepted a path escape.");
     Require(PluginInstaller.ParseHash("abc123  plugin.zip".PadLeft(64 + 2 + 10, '0')).Length == 64,
         "A valid plugin checksum was not parsed.");
 
