@@ -1,30 +1,34 @@
 using System.ComponentModel;
-using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Interop;
 using System.Windows.Threading;
 using RobloxAltClient.Plugins;
 
 namespace RobloxAltClient;
 
 /// <summary>
-/// Embeds running game clients beneath a dedicated native HwndHost and presents
-/// them as a tab strip. The native window hierarchy owns the human input path.
+/// Docks running game clients over a dedicated native viewport and presents
+/// them as a tab strip. Roblox remains top-level for the human input path.
 /// </summary>
 public partial class ClientsPanel : UserControl
 {
-    private readonly ObservableCollection<string> _focusDiagnostics = new();
     private readonly Dictionary<string, DateTime> _embedTimes = new(StringComparer.Ordinal);
+    private readonly Queue<string> _diagnosticLines = new();
+    private readonly NativeInputDiagnostics _nativeInputDiagnostics = new();
+    private readonly DispatcherTimer _diagnosticTimer;
     private PluginRuntime? _runtime;
     private Window? _ownerWindow;
-    private nint _foregroundWindow;
     private bool _attached;
     private bool _viewVisible;
 
     public ClientsPanel()
     {
         InitializeComponent();
+        _diagnosticTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(75)
+        };
+        _diagnosticTimer.Tick += DiagnosticTimer_Tick;
     }
 
     /// <summary>Raised on the UI thread when an account's tab is created for the first time.</summary>
@@ -36,20 +40,17 @@ public partial class ClientsPanel : UserControl
         _attached = true;
         _ownerWindow = ownerWindow;
         _runtime = ((App)Application.Current).PluginRuntime;
-        _runtime.EnsureEmbeddedFocus = EnsureEmbeddedFocus;
-        _foregroundWindow = new WindowInteropHelper(ownerWindow).Handle;
         NativeClientHost.HandleCreated += NativeClientHost_HandleCreated;
         NativeClientHost.HandleDestroying += NativeClientHost_HandleDestroying;
         NativeClientHost.NativeSizeChanged += NativeClientHost_NativeSizeChanged;
-        NativeClientHost.FocusVisibleClient = FocusVisibleClient;
-        EmbeddedInputBridge.Diagnostics = Log;
-        EmbeddedInputBridge.Attach(_foregroundWindow, () => _runtime?.ClientEmbeddings.VisibleAccountId,
-            accountId => _runtime?.ClientEmbeddings.RootFor(accountId),
-            accountId => _runtime?.ClientEmbeddings.InputTargetFor(accountId));
         _runtime.Accounts.AccountChanged += Accounts_AccountChanged;
         _runtime.Accounts.AccountExited += Accounts_AccountExited;
         _runtime.ClientEmbeddings.FilterChanged += ResyncTabs;
+        _runtime.ClientEmbeddings.Diagnostics = Log;
         ownerWindow.SizeChanged += OwnerWindow_SizeChanged;
+        ownerWindow.LocationChanged += OwnerWindow_LocationChanged;
+        ownerWindow.StateChanged += OwnerWindow_StateChanged;
+        ownerWindow.IsVisibleChanged += OwnerWindow_IsVisibleChanged;
         if (NativeClientHost.NativeHandle != nint.Zero)
             NativeClientHost_HandleCreated(NativeClientHost.NativeHandle);
         foreach (var account in _runtime.Accounts.Snapshot()) EnsureTab(account);
@@ -64,17 +65,21 @@ public partial class ClientsPanel : UserControl
             _runtime.Accounts.AccountChanged -= Accounts_AccountChanged;
             _runtime.Accounts.AccountExited -= Accounts_AccountExited;
             _runtime.ClientEmbeddings.FilterChanged -= ResyncTabs;
+            _runtime.ClientEmbeddings.Diagnostics = null;
         }
         if (_ownerWindow is not null) _ownerWindow.SizeChanged -= OwnerWindow_SizeChanged;
+        if (_ownerWindow is not null)
+        {
+            _ownerWindow.LocationChanged -= OwnerWindow_LocationChanged;
+            _ownerWindow.StateChanged -= OwnerWindow_StateChanged;
+            _ownerWindow.IsVisibleChanged -= OwnerWindow_IsVisibleChanged;
+        }
         NativeClientHost.HandleCreated -= NativeClientHost_HandleCreated;
         NativeClientHost.HandleDestroying -= NativeClientHost_HandleDestroying;
         NativeClientHost.NativeSizeChanged -= NativeClientHost_NativeSizeChanged;
-        NativeClientHost.FocusVisibleClient = null;
         if (_runtime is not null && NativeClientHost.NativeHandle != nint.Zero)
             _runtime.ClientEmbeddings.ReleaseHostWindow(NativeClientHost.NativeHandle);
-        EmbeddedInputBridge.Diagnostics = null;
-        EmbeddedInputBridge.Detach();
-        if (_runtime is not null) _runtime.EnsureEmbeddedFocus = null;
+        _diagnosticTimer.Stop();
         _attached = false;
     }
 
@@ -86,7 +91,6 @@ public partial class ClientsPanel : UserControl
         {
             ShowOnlySelection();
             Relayout();
-            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => FocusVisibleClient()));
         }
         else
         {
@@ -110,7 +114,7 @@ public partial class ClientsPanel : UserControl
             return;
         }
         var root = account.RootWindowHandle != nint.Zero ? account.RootWindowHandle : account.WindowHandle;
-        // Embed only once the client is fully stable: never hide, reparent, or
+        // Dock only once the client is fully stable: never hide, restyle, or
         // resize a D3D window during its startup handshake — games crash. The
         // window must be several seconds old and a real size.
         var processAgeSeconds = account.ProcessStartTimeUtcTicks > 0
@@ -124,7 +128,7 @@ public partial class ClientsPanel : UserControl
             var clientIntegrity = ProcessIntegrity.ForWindow(root);
             if (hostIntegrity != ProcessIntegrityLevel.Unknown &&
                 clientIntegrity != ProcessIntegrityLevel.Unknown && hostIntegrity != clientIntegrity)
-                Log($"{account.Label}: RAM integrity is {hostIntegrity}; Roblox is {clientIntegrity}. Native input will be validated at focus time.");
+                Log($"{account.Label}: RAM integrity is {hostIntegrity}; Roblox is {clientIntegrity}. Native input remains OS-routed.");
 
             _runtime.ClientEmbeddings.TryEmbed(
                 account.AccountId,
@@ -206,19 +210,8 @@ public partial class ClientsPanel : UserControl
     {
         if (_runtime is null) return;
         if (ClientTabs.SelectedItem is not ManagedAccountSnapshot selected) return;
-        var previousRoot = e.RemovedItems.OfType<ManagedAccountSnapshot>()
-            .Select(item => _runtime.ClientEmbeddings.RootFor(item.AccountId))
-            .FirstOrDefault(root => root is not null && root != nint.Zero);
         _runtime.ClientEmbeddings.ShowOnly(selected.AccountId);
         Relayout();
-        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
-        {
-            var runtime = _runtime;
-            if (runtime is null || !runtime.ClientEmbeddings.IsVisible(selected.AccountId)) return;
-            var root = runtime.ClientEmbeddings.RootFor(selected.AccountId);
-            if (root is not null && root != nint.Zero)
-                EmbeddedInputBridge.TransferFocus(previousRoot, root.Value, runtime.ClientEmbeddings.HostOwnsForeground());
-        }));
     }
 
     private async void CloseClientTab_Click(object sender, RoutedEventArgs e)
@@ -283,38 +276,6 @@ public partial class ClientsPanel : UserControl
 
     private void NativeClientHost_NativeSizeChanged() => Relayout();
 
-    private bool FocusVisibleClient()
-    {
-        if (_runtime is null || !_viewVisible || !_runtime.ClientEmbeddings.HostOwnsForeground()) return false;
-        var accountId = _runtime.ClientEmbeddings.VisibleAccountId;
-        if (accountId is null || !_runtime.ClientEmbeddings.IsVisible(accountId)) return false;
-        var root = _runtime.ClientEmbeddings.RootFor(accountId);
-        return root is not null && root != nint.Zero && EmbeddedInputBridge.FocusEmbedded(root.Value);
-    }
-
-    private bool EnsureEmbeddedFocus(string accountId)
-    {
-        if (!Dispatcher.CheckAccess())
-        {
-            if (Dispatcher.HasShutdownStarted) return false;
-            try
-            {
-                return Dispatcher.Invoke(() => EnsureEmbeddedFocus(accountId));
-            }
-            catch (InvalidOperationException)
-            {
-                return false;
-            }
-        }
-
-        if (_runtime is null || !_viewVisible ||
-            !string.Equals(_runtime.ClientEmbeddings.VisibleAccountId, accountId, StringComparison.Ordinal) ||
-            !_runtime.ClientEmbeddings.HostOwnsForeground()) return false;
-
-        var root = _runtime.ClientEmbeddings.RootFor(accountId);
-        return root is not null && root != nint.Zero && EmbeddedInputBridge.FocusEmbedded(root.Value);
-    }
-
     private void Relayout()
     {
         if (NativeClientHost.NativeHandle == nint.Zero || !IsLoaded || Visibility != Visibility.Visible) return;
@@ -326,17 +287,74 @@ public partial class ClientsPanel : UserControl
     private void HostArea_SizeChanged(object sender, SizeChangedEventArgs e) => Relayout();
 
     private void OwnerWindow_SizeChanged(object sender, SizeChangedEventArgs e) => Relayout();
+    private void OwnerWindow_LocationChanged(object? sender, EventArgs e) => Relayout();
+
+    private void OwnerWindow_StateChanged(object? sender, EventArgs e)
+    {
+        if (_runtime is null) return;
+        if (_ownerWindow?.WindowState == WindowState.Minimized)
+        {
+            _runtime.ClientEmbeddings.HideAll();
+            return;
+        }
+        if (_viewVisible)
+        {
+            ShowOnlySelection();
+            Relayout();
+        }
+    }
+
+    private void OwnerWindow_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (_runtime is null) return;
+        if (e.NewValue is bool visible && visible)
+        {
+            if (_viewVisible)
+            {
+                ShowOnlySelection();
+                Relayout();
+            }
+        }
+        else
+        {
+            _runtime.ClientEmbeddings.HideAll();
+        }
+    }
+
+    private void NativeDiagnosticsToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        if (NativeDiagnosticsToggle.IsChecked == true)
+        {
+            _diagnosticTimer.Start();
+            Log("Native diagnostics enabled; no input is hooked, forwarded, or synthesized.");
+        }
+        else
+        {
+            _diagnosticTimer.Stop();
+            _diagnosticLines.Clear();
+            FocusDiagnostics.Text = string.Empty;
+            FocusDiagnostics.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void DiagnosticTimer_Tick(object? sender, EventArgs e)
+    {
+        if (!_viewVisible || _runtime is null || NativeClientHost.NativeHandle == nint.Zero) return;
+        var accountId = _runtime.ClientEmbeddings.VisibleAccountId;
+        if (accountId is null) return;
+        var root = _runtime.ClientEmbeddings.RootFor(accountId);
+        if (root is null || root == nint.Zero) return;
+        var snapshot = _nativeInputDiagnostics.CaptureAfterSystemInput(NativeClientHost.NativeHandle, root.Value);
+        if (snapshot is not null) Log(snapshot);
+    }
 
     private void Log(string message)
     {
-        if (!Dispatcher.CheckAccess())
-        {
-            Dispatcher.BeginInvoke(new Action(() => Log(message)));
-            return;
-        }
-        if (_focusDiagnostics.Count >= 12) _focusDiagnostics.RemoveAt(0);
-        _focusDiagnostics.Add(message);
-        FocusDiagnostics.Text = string.Join(Environment.NewLine, _focusDiagnostics);
+        System.Diagnostics.Debug.WriteLine(message);
+        if (NativeDiagnosticsToggle.IsChecked != true) return;
+        while (_diagnosticLines.Count >= 4) _diagnosticLines.Dequeue();
+        _diagnosticLines.Enqueue(message);
+        FocusDiagnostics.Text = string.Join(Environment.NewLine, _diagnosticLines);
         FocusDiagnostics.Visibility = Visibility.Visible;
     }
 }

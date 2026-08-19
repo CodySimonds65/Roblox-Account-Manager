@@ -1,15 +1,14 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Threading;
 
 namespace RobloxAltClient;
 
 /// <summary>
-/// Owns the native child-window boundary used by the Clients view. Roblox is
-/// parented below this HWND, so Windows delivers physical input to Roblox
-/// directly instead of WPF translating or forwarding messages.
+/// Owns the native viewport boundary used by the Clients view. Roblox remains
+/// a validated top-level owned window docked over this viewport, so Windows
+/// delivers physical input to Roblox without WPF forwarding messages.
 /// </summary>
 public sealed class EmbeddedClientHost : HwndHost
 {
@@ -22,14 +21,8 @@ public sealed class EmbeddedClientHost : HwndHost
     private const int WmNcCreate = 0x0081;
     private const int WmNcDestroy = 0x0082;
     private const int WmSize = 0x0005;
-    private const int WmSetFocus = 0x0007;
-    private const int WmKillFocus = 0x0008;
-    private const int WmMouseActivate = 0x0021;
     private const int WmNcHitTest = 0x0084;
-    private const int WmSetCursor = 0x0020;
-    private const int WmCaptureChanged = 0x0215;
     private const int HtClient = 1;
-    private const int MaActivate = 1;
     private const int GwlpUserData = -21;
 
     private static readonly HostWindowProc NativeWindowProc = StaticWindowProc;
@@ -38,16 +31,11 @@ public sealed class EmbeddedClientHost : HwndHost
     private static int _classRegistered;
 
     private GCHandle _selfHandle;
-    private int _focusScheduled;
-
     public nint NativeHandle { get; private set; }
 
     public event Action<nint>? HandleCreated;
     public event Action<nint>? HandleDestroying;
     public event Action? NativeSizeChanged;
-
-    /// <summary>Focuses the visible Roblox child only after RAM owns the foreground.</summary>
-    public Func<bool>? FocusVisibleClient { get; set; }
 
     protected override HandleRef BuildWindowCore(HandleRef hwndParent)
     {
@@ -90,8 +78,6 @@ public sealed class EmbeddedClientHost : HwndHost
     protected override nint WndProc(nint hwnd, int message, nint wParam, nint lParam, ref bool handled) =>
         HandleNativeMessage(message, wParam, lParam, out handled);
 
-    protected override bool TabIntoCore(TraversalRequest request) => FocusVisibleClient?.Invoke() == true;
-
     private nint HandleNativeMessage(int message, nint wParam, nint lParam, out bool handled)
     {
         handled = false;
@@ -101,51 +87,12 @@ public sealed class EmbeddedClientHost : HwndHost
                 handled = true;
                 return new nint(HtClient);
 
-            case WmMouseActivate:
-                // MA_ACTIVATE lets a real click activate the RAM top-level
-                // window naturally. The deferred callback then verifies that
-                // RAM really owns foreground before moving keyboard focus.
-                ScheduleFocus();
-                handled = true;
-                return new nint(MaActivate);
-
-            case WmSetFocus:
-                ScheduleFocus();
-                break;
-
-            case WmKillFocus:
-            case WmCaptureChanged:
-                // Let DefWindowProc preserve the native focus/capture
-                // transition. Roblox remains the direct owner of its input.
-                break;
-
             case WmSize:
                 Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() => NativeSizeChanged?.Invoke()));
-                break;
-
-            case WmSetCursor:
-                // Keep the native cursor path. DefWindowProc selects the
-                // cursor supplied by Roblox/Windows; WPF never synthesizes it.
                 break;
         }
 
         return nint.Zero;
-    }
-
-    private void ScheduleFocus()
-    {
-        if (Interlocked.Exchange(ref _focusScheduled, 1) != 0) return;
-        if (Dispatcher.HasShutdownStarted)
-        {
-            Volatile.Write(ref _focusScheduled, 0);
-            return;
-        }
-
-        _ = Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
-        {
-            Volatile.Write(ref _focusScheduled, 0);
-            FocusVisibleClient?.Invoke();
-        }));
     }
 
     private static nint StaticWindowProc(nint hwnd, uint message, nint wParam, nint lParam)

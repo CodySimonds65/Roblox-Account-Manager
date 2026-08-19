@@ -24,12 +24,6 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly GlobalHotkeyMonitor _hotkeyMonitor = new();
     private readonly InputSendInjector _sendInjector = new();
     public ClientEmbeddingService ClientEmbeddings { get; } = new();
-    /// <summary>
-    /// UI-owned focus handoff used only immediately before guarded macro input.
-    /// The callback must refuse to focus anything unless RAM already owns the
-    /// foreground, so plugin playback can never activate RAM or steal focus.
-    /// </summary>
-    internal Func<string, bool>? EnsureEmbeddedFocus { get; set; }
     private int _queuedAccountUpdates;
     private const int MaxQueuedAccountUpdates = 64;
 
@@ -78,14 +72,23 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     internal enum InputDeliveryMode { GuardedReal, BackgroundMessage }
 
-    internal static InputDeliveryMode SelectInputDeliveryMode(bool embedded, bool selectedVisible, bool hostForeground) =>
-        embedded && selectedVisible && hostForeground ? InputDeliveryMode.GuardedReal : InputDeliveryMode.BackgroundMessage;
+    internal static InputDeliveryMode SelectInputDeliveryMode(bool docked, bool selectedVisible, bool targetForeground) =>
+        docked && selectedVisible && targetForeground ? InputDeliveryMode.GuardedReal : InputDeliveryMode.BackgroundMessage;
 
     internal static bool MatchesInputTarget(ManagedAccountSnapshot expected, ManagedAccountSnapshot? current, nint expectedRoot) =>
         current is not null && current.IsRunning &&
         current.ProcessId == expected.ProcessId &&
         current.ProcessStartTimeUtcTicks == expected.ProcessStartTimeUtcTicks &&
         current.RootWindowHandle == expectedRoot;
+
+    internal static bool MatchesReleaseTarget(
+        ManagedAccountSnapshot expected,
+        ManagedAccountSnapshot? current,
+        nint expectedRoot,
+        nint currentDockedRoot,
+        nint candidateWindow) =>
+        MatchesInputTarget(expected, current, expectedRoot) &&
+        currentDockedRoot == expectedRoot && current!.WindowHandle == candidateWindow;
 
     private async Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken)
     {
@@ -95,7 +98,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         var deliveryMode = SelectInputDeliveryMode(
             embeddedRoot is not null && embeddedRoot != nint.Zero,
             ClientEmbeddings.IsVisible(accountId),
-            ClientEmbeddings.HostOwnsForeground());
+            ClientEmbeddings.TargetOwnsForeground(accountId));
         if (deliveryMode == InputDeliveryMode.GuardedReal)
         {
             var expectedRoot = embeddedRoot!.Value;
@@ -105,26 +108,36 @@ public sealed class PluginRuntime : IAsyncDisposable
                 targetIntegrity != ProcessIntegrityLevel.Unknown && targetIntegrity > hostIntegrity)
             {
                 return BackgroundInputResult.Failure("integrity-mismatch",
-                    $"The embedded client is {targetIntegrity} integrity while RAM is {hostIntegrity}; input was not injected.",
+                    $"The docked client is {targetIntegrity} integrity while RAM is {hostIntegrity}; input was not injected.",
                     nint.Zero, nint.Zero);
             }
-            var focusReady = EnsureEmbeddedFocus?.Invoke(accountId) == true ||
-                              EmbeddedInputBridge.HasFocusWithin(expectedRoot);
-            if (!focusReady)
-            {
-                return BackgroundInputResult.Failure("focus-lost",
-                    "The selected embedded client does not own keyboard focus.",
-                    nint.Zero, nint.Zero);
-            }
-            return await _sendInjector.PostAsync(expectedRoot, events, cancellationToken, () =>
+            bool TargetStillValid()
             {
                 var current = Accounts.Snapshot().FirstOrDefault(snapshot =>
                     string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
                 return ClientEmbeddings.IsVisible(accountId) &&
-                       ClientEmbeddings.HostOwnsForeground() &&
+                       ClientEmbeddings.TargetOwnsForeground(accountId) &&
                        ClientEmbeddings.RootFor(accountId) == expectedRoot &&
                        MatchesInputTarget(account, current, expectedRoot);
-            }).ConfigureAwait(false);
+            }
+
+            async Task ReleaseWithoutForegroundAsync(IReadOnlyList<PluginInputEvent> releases)
+            {
+                var current = Accounts.Snapshot().FirstOrDefault(snapshot =>
+                    string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
+                var dockedRoot = ClientEmbeddings.RootFor(accountId) ?? nint.Zero;
+                if (!MatchesReleaseTarget(account, current, expectedRoot, dockedRoot, current?.WindowHandle ?? nint.Zero)) return;
+                _ = await _inputBroker.PostAsync(current!, releases, CancellationToken.None, hwnd =>
+                    MatchesReleaseTarget(account, current, expectedRoot,
+                        ClientEmbeddings.RootFor(accountId) ?? nint.Zero, hwnd)).ConfigureAwait(false);
+            }
+
+            return await _sendInjector.PostAsync(
+                expectedRoot,
+                events,
+                cancellationToken,
+                TargetStillValid,
+                ReleaseWithoutForegroundAsync).ConfigureAwait(false);
         }
 
         var result = await _inputBroker.PostAsync(account, events, cancellationToken).ConfigureAwait(false);

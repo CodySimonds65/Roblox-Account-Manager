@@ -88,7 +88,13 @@
             <local:EmbeddedClientHost x:Name="NativeClientHost" Focusable="True" />
         </Border>
 
-        <TextBlock Grid.Row="2" x:Name="FocusDiagnostics" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
-                   MaxHeight="40" TextWrapping="Wrap" Margin="0,6,0,0" Visibility="Collapsed" />
+        <StackPanel Grid.Row="2" Margin="0,6,0,0">
+            <CheckBox x:Name="NativeDiagnosticsToggle" Content="Native input diagnostics"
+                      Foreground="{StaticResource MutedTextBrush}" FontSize="10"
+                      ToolTip="Observe physical input ownership without forwarding or recreating input"
+                      Checked="NativeDiagnosticsToggle_Changed" Unchecked="NativeDiagnosticsToggle_Changed" />
+            <TextBlock x:Name="FocusDiagnostics" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
+                       MaxHeight="72" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed" />
+        </StackPanel>
     </Grid>
 </UserControl>
