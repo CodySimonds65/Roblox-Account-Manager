@@ -12,7 +12,6 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly PluginHostService _host;
     private readonly PluginProcessSupervisor _supervisor;
     private readonly PluginInstaller _installer;
-    private readonly FocusSafeInputBroker _inputBroker = new();
     private readonly PluginActionRouter _actions;
     private readonly Dictionary<string, InstalledPlugin> _installed = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _launchGates = new(StringComparer.Ordinal);
@@ -24,6 +23,7 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly GlobalHotkeyMonitor _hotkeyMonitor = new();
     private readonly InputSendInjector _sendInjector = new();
     public ClientEmbeddingService ClientEmbeddings { get; } = new();
+    private readonly ForegroundAutomationCoordinator _foregroundAutomation;
     private int _queuedAccountUpdates;
     private const int MaxQueuedAccountUpdates = 64;
 
@@ -31,6 +31,7 @@ public sealed class PluginRuntime : IAsyncDisposable
     {
         _paths = new PluginPaths(appDataDirectory);
         Accounts = new RunningAccountRegistry(_paths.Root);
+        _foregroundAutomation = new ForegroundAutomationCoordinator(Accounts, ClientEmbeddings, _sendInjector);
         _consent = new PluginConsentStore(_paths);
         _host = new PluginHostService();
         _actions = new PluginActionRouter(_host);
@@ -42,6 +43,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         _host.Disconnected += Host_Disconnected;
         _host.InputDispatcher = DispatchInputAsync;
         _host.InputDispatcherWithIntent = DispatchInputWithIntentAsync;
+        _host.InputDispatcherWithSession = DispatchInputWithSessionAsync;
         _hotkeyMonitor.KeyDown += (_, vk) => _host.BroadcastHotkey("hotkey.pressed", vk);
         _hotkeyMonitor.KeyUp += (_, vk) => _host.BroadcastHotkey("hotkey.released", vk);
         _hotkeyMonitor.Start();
@@ -62,9 +64,9 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     public static IReadOnlyList<PluginCatalogEntry> OfficialCatalog { get; } =
     [
-        new("io.github.codysimonds65.ram.macros", "RAM Macros", "Portable, background-safe macro recording and playback.", "https://github.com/CodySimonds65/ram-macros/releases/latest/download/"),
-        new("io.github.codysimonds65.ram.ocr", "RAM OCR", "Window-relative OCR and color triggers.", "https://github.com/CodySimonds65/ram-ocr/releases/latest/download/"),
-        new("io.github.codysimonds65.ram.afk", "RAM AFK", "Staggered background keep-alive for enabled accounts.", "https://github.com/CodySimonds65/ram-afk/releases/latest/download/")
+        new("io.github.codysimonds65.ram.macros", "RAM Macros", "Foreground macro recording and playback; focus may switch briefly.", "https://github.com/CodySimonds65/ram-macros/releases/latest/download/"),
+        new("io.github.codysimonds65.ram.ocr", "RAM OCR", "Foreground window-relative OCR and color triggers.", "https://github.com/CodySimonds65/ram-ocr/releases/latest/download/"),
+        new("io.github.codysimonds65.ram.afk", "RAM AFK", "Staggered foreground keep-alive for enabled accounts.", "https://github.com/CodySimonds65/ram-afk/releases/latest/download/")
     ];
 
     public event EventHandler? Changed;
@@ -72,26 +74,8 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     public sealed record PluginDiagnostic(string PluginId, string Level, string Message, DateTime Utc);
 
-    internal enum InputDeliveryMode { GuardedReal, BackgroundMessage }
-
-    internal static InputDeliveryMode SelectInputDeliveryMode(bool docked, bool selectedVisible, bool targetForeground) =>
-        docked && selectedVisible && targetForeground ? InputDeliveryMode.GuardedReal : InputDeliveryMode.BackgroundMessage;
-
-    internal static bool MatchesInputTarget(ManagedAccountSnapshot expected, ManagedAccountSnapshot? current, nint expectedRoot) =>
-        current is not null && current.IsRunning &&
-        current.ProcessId == expected.ProcessId &&
-        current.ProcessStartTimeUtcTicks == expected.ProcessStartTimeUtcTicks &&
-        current.RootWindowHandle == expectedRoot &&
-        current.WindowHandle != nint.Zero;
-
-    internal static bool MatchesReleaseTarget(
-        ManagedAccountSnapshot expected,
-        ManagedAccountSnapshot? current,
-        nint expectedRoot,
-        nint currentDockedRoot,
-        nint candidateWindow) =>
-        MatchesInputTarget(expected, current, expectedRoot) &&
-        currentDockedRoot == expectedRoot && current!.WindowHandle == candidateWindow;
+    internal static bool HasForegroundInputCapability(IReadOnlySet<string> capabilities) =>
+        capabilities.Contains(PluginCapabilities.HostInputForegroundReal);
 
     private Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken) =>
         DispatchInputWithIntentAsync(accountId, events, InputDeliveryIntent.Default, null, cancellationToken);
@@ -100,81 +84,39 @@ public sealed class PluginRuntime : IAsyncDisposable
         IReadOnlyList<PluginInputEvent> events, InputDeliveryIntent deliveryIntent, string? traceId,
         CancellationToken cancellationToken)
     {
-        var account = Accounts.Snapshot().FirstOrDefault(snapshot => string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
-        if (account is null) return BackgroundInputResult.Failure("unknown-account", "The managed account is not running.", nint.Zero, nint.Zero);
-        if (Accounts.IsStopping(accountId))
-            return BackgroundInputResult.Failure("account-stopping", "The managed account is stopping; input was not delivered.", nint.Zero, nint.Zero);
-        var embeddedRoot = ClientEmbeddings.RootFor(accountId);
-        var deliveryMode = deliveryIntent == InputDeliveryIntent.PostMessageProbe
-            ? InputDeliveryMode.BackgroundMessage
-            : SelectInputDeliveryMode(
-            embeddedRoot is not null && embeddedRoot != nint.Zero,
-            ClientEmbeddings.IsVisible(accountId),
-            ClientEmbeddings.TargetOwnsForeground(accountId));
-        if (deliveryMode == InputDeliveryMode.GuardedReal)
-        {
-            var expectedRoot = embeddedRoot!.Value;
-            var hostIntegrity = ProcessIntegrity.Current;
-            var targetIntegrity = ProcessIntegrity.ForWindow(expectedRoot);
-            if (hostIntegrity != ProcessIntegrityLevel.Unknown &&
-                targetIntegrity != ProcessIntegrityLevel.Unknown && targetIntegrity > hostIntegrity)
-            {
-                return BackgroundInputResult.Failure("integrity-mismatch",
-                    $"The docked client is {targetIntegrity} integrity while RAM is {hostIntegrity}; input was not injected.",
-                    nint.Zero, nint.Zero);
-            }
-            bool TargetStillValid()
-            {
-                if (!Accounts.TryResolveLiveAccount(accountId, out var current)) return false;
-                return ClientEmbeddings.IsVisible(accountId) &&
-                       ClientEmbeddings.TargetOwnsForeground(accountId) &&
-                       ClientEmbeddings.RootFor(accountId) == expectedRoot &&
-                       MatchesInputTarget(account, current, expectedRoot);
-            }
-
-            async Task ReleaseWithoutForegroundAsync(IReadOnlyList<PluginInputEvent> releases)
-            {
-                var current = Accounts.TryResolveLiveAccount(accountId, out var live) ? live : null;
-                var dockedRoot = ClientEmbeddings.RootFor(accountId) ?? nint.Zero;
-                if (!MatchesReleaseTarget(account, current, expectedRoot, dockedRoot, current?.WindowHandle ?? nint.Zero)) return;
-                _ = await _inputBroker.PostAsync(current!, releases, CancellationToken.None, hwnd =>
-                    MatchesReleaseTarget(account, current, expectedRoot,
-                        ClientEmbeddings.RootFor(accountId) ?? nint.Zero, hwnd)).ConfigureAwait(false);
-            }
-
-            var realResult = await _sendInjector.PostAsync(
-                expectedRoot,
-                events,
-                cancellationToken,
-                TargetStillValid,
-                ReleaseWithoutForegroundAsync,
-                deliveryIntent,
-                traceId).ConfigureAwait(false);
-            return AnnotateInputResult(realResult, accountId);
-        }
-
-        ManagedAccountSnapshot? ResolveLiveAccount()
-        {
-            if (Accounts.IsStopping(accountId) || !Accounts.TryResolveLiveAccount(accountId, out var live)) return null;
-            return live;
-        }
-
-        bool TargetWindowStillValid(nint hwnd)
-        {
-            var live = ResolveLiveAccount();
-            if (live is null || hwnd == nint.Zero) return false;
-            var root = live.RootWindowHandle;
-            return hwnd == live.WindowHandle || hwnd == root;
-        }
-
-        var result = await _inputBroker.PostAsync(account, events, cancellationToken, TargetWindowStillValid, deliveryIntent, traceId, ResolveLiveAccount).ConfigureAwait(false);
-        result = AnnotateInputResult(result, accountId);
-        if (result.Accepted)
-        {
-            return result with { Message = result.Message + " Delivered as best-effort background input without changing the foreground window or selected tab." };
-        }
-        return result;
+        return await DispatchInputWithSessionAsync("host.input", accountId, null, events, deliveryIntent, traceId, cancellationToken).ConfigureAwait(false);
     }
+
+    private async Task<BackgroundInputResult> DispatchInputWithSessionAsync(string pluginId, string accountId, string? sessionId,
+        IReadOnlyList<PluginInputEvent> events, InputDeliveryIntent deliveryIntent, string? traceId,
+        CancellationToken cancellationToken)
+    {
+        if (deliveryIntent == InputDeliveryIntent.PostMessageProbe)
+            return BackgroundInputResult.Failure("foreground-required", "Message delivery is disabled; foreground-real automation is required.", nint.Zero, nint.Zero);
+        if (sessionId is null)
+        {
+            var opened = await _foregroundAutomation.OpenAsync(pluginId, [accountId], cancellationToken).ConfigureAwait(false);
+            if (!opened.Accepted || opened.SessionId is null)
+                return BackgroundInputResult.Failure(opened.Code, opened.Message, nint.Zero, nint.Zero);
+            try
+            {
+                var activated = await _foregroundAutomation.ActivateAsync(pluginId, opened.SessionId, accountId, cancellationToken).ConfigureAwait(false);
+                if (!activated.Accepted)
+                    return BackgroundInputResult.Failure(activated.Code, activated.Message, nint.Zero, nint.Zero);
+                return AnnotateInputResult(
+                    await _foregroundAutomation.DispatchAsync(pluginId, opened.SessionId, accountId, events, traceId, cancellationToken).ConfigureAwait(false),
+                    accountId);
+            }
+            finally
+            {
+                await _foregroundAutomation.CloseAsync(pluginId, opened.SessionId, restore: true, userInitiated: false).ConfigureAwait(false);
+            }
+        }
+        return AnnotateInputResult(
+            await _foregroundAutomation.DispatchAsync(pluginId, sessionId, accountId, events, traceId, cancellationToken).ConfigureAwait(false),
+            accountId);
+    }
+
 
     private BackgroundInputResult AnnotateInputResult(BackgroundInputResult result, string accountId) => result with
     {
@@ -388,6 +330,61 @@ public sealed class PluginRuntime : IAsyncDisposable
             HandleAccountEventsSubscribe(message.Connection, message.Envelope);
         else if (message.Envelope.Type == "diagnostic.log")
             HandlePluginDiagnostic(message.Connection, message.Envelope);
+        else if (message.Envelope.Type == "input.session.open")
+            _ = HandleSessionOpenAsync(message.Connection, message.Envelope);
+        else if (message.Envelope.Type == "input.session.activate")
+            _ = HandleSessionActivateAsync(message.Connection, message.Envelope);
+        else if (message.Envelope.Type == "input.session.close")
+            _ = HandleSessionCloseAsync(message.Connection, message.Envelope);
+    }
+
+    private async Task HandleSessionOpenAsync(PluginConnection connection, PluginEnvelope envelope)
+    {
+        try
+        {
+            var request = envelope.Payload.Deserialize<ForegroundSessionRequest>(PluginJson.Options)
+                          ?? throw new InvalidDataException("Foreground session payload is invalid.");
+            var result = await _foregroundAutomation.OpenAsync(connection.PluginId, request.AccountIds, CancellationToken.None, request.RestoreForeground).ConfigureAwait(false);
+            await connection.SendAsync("input.session.result", result, envelope.RequestId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException)
+        {
+            await connection.SendAsync("input.session.result",
+                ForegroundAutomationCoordinator.AutomationSessionResult.Fail("invalid-request", ex.Message), envelope.RequestId, CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleSessionActivateAsync(PluginConnection connection, PluginEnvelope envelope)
+    {
+        try
+        {
+            var request = envelope.Payload.Deserialize<ForegroundSessionAccountRequest>(PluginJson.Options)
+                          ?? throw new InvalidDataException("Foreground session activation payload is invalid.");
+            var result = await _foregroundAutomation.ActivateAsync(connection.PluginId, request.SessionId, request.AccountId, CancellationToken.None).ConfigureAwait(false);
+            await connection.SendAsync("input.session.result", result, envelope.RequestId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException)
+        {
+            await connection.SendAsync("input.session.result",
+                ForegroundAutomationCoordinator.AutomationSessionResult.Fail("invalid-request", ex.Message), envelope.RequestId, CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleSessionCloseAsync(PluginConnection connection, PluginEnvelope envelope)
+    {
+        try
+        {
+            var request = envelope.Payload.Deserialize<ForegroundSessionCloseRequest>(PluginJson.Options)
+                          ?? throw new InvalidDataException("Foreground session close payload is invalid.");
+            var result = await _foregroundAutomation.CloseAsync(connection.PluginId, request.SessionId,
+                request.RestoreForeground, request.UserInitiated).ConfigureAwait(false);
+            await connection.SendAsync("input.session.result", result, envelope.RequestId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException)
+        {
+            await connection.SendAsync("input.session.result",
+                ForegroundAutomationCoordinator.AutomationSessionResult.Fail("invalid-request", ex.Message), envelope.RequestId, CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     private void HandleAccountEventsSubscribe(PluginConnection connection, PluginEnvelope envelope)
@@ -426,8 +423,11 @@ public sealed class PluginRuntime : IAsyncDisposable
         }
     }
 
-    private void Host_Disconnected(object? sender, PluginConnection connection) =>
+    private void Host_Disconnected(object? sender, PluginConnection connection)
+    {
         _accountEventSubscribers.TryRemove(connection.PluginId, out _);
+        _ = _foregroundAutomation.CloseAllForPluginAsync(connection.PluginId);
+    }
 
     private void Accounts_AccountChanged(object? sender, ManagedAccountSnapshot snapshot) =>
         BroadcastAccountEvent("account.updated", snapshot);
@@ -603,6 +603,7 @@ public sealed class PluginRuntime : IAsyncDisposable
             // Stop plugin dispatch before terminating clients so no macro can
             // race shutdown and enqueue another input event.
             await _actions.DisposeAsync().ConfigureAwait(false);
+            await _foregroundAutomation.DisposeAsync().ConfigureAwait(false);
             await _host.DisposeAsync().ConfigureAwait(false);
         }
         finally

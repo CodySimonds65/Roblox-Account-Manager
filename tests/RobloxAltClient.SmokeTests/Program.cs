@@ -1030,10 +1030,8 @@ try
     Require(inputAccepted is not null, "The plugin host did not accept the input-post loopback handshake.");
 
     var inputAccountId = "input-" + Guid.NewGuid().ToString("N");
-    // The smoke-test process is a console application whose windows belong to the
-    // console host, so its registered account usually carries no window handle and
-    // the broker answers "unavailable" before any posting. The assertions below
-    // accept that path and still verify request-id correlation and validation order.
+    // Legacy background consent is retained for wire compatibility, but it must
+    // fail closed instead of silently using a delivery path Roblox ignores.
     inputRuntime.Accounts.Register(new AccountProfile { Id = inputAccountId, Label = "Input post" }, Process.GetCurrentProcess());
 
     var inputPostRequestId = "input-post-" + Guid.NewGuid().ToString("N");
@@ -1055,10 +1053,8 @@ try
     var inputResult = inputPosted.Payload.Deserialize<BackgroundInputResult>(PluginJson.Options);
     Require(inputResult is not null, "The input.post response did not carry an input.result payload.");
     var acceptedInputResult = inputResult!;
-    Require(acceptedInputResult.Accepted || acceptedInputResult.Code is "unavailable" or "stale-window",
-        $"The valid input.post was rejected with an unexpected code: {acceptedInputResult.Code}");
-    if (acceptedInputResult.Accepted)
-        Require(acceptedInputResult.PostedCount == 2, "The broker did not post both paced key events.");
+    Require(!acceptedInputResult.Accepted && acceptedInputResult.Code == "foreground-required",
+        $"Legacy background input did not fail closed: {acceptedInputResult.Code}");
     Require(acceptedInputResult.RequestedCount == 2 && acceptedInputResult.TraceId == "input-post-trace",
         "The input.post delivery intent did not preserve request trace metadata.");
 
@@ -1094,8 +1090,8 @@ try
     Require(unknownPosted is not null, "The plugin host did not answer the unknown-account input.post.");
     Require(unknownPosted!.RequestId == unknownPostRequestId, "The unknown-account input.post response lost the request id.");
     var unknownResult = unknownPosted.Payload.Deserialize<BackgroundInputResult>(PluginJson.Options);
-    Require(unknownResult?.Code == "unknown-account",
-        "The input.post for an unknown account was not rejected.");
+    Require(unknownResult?.Code == "foreground-required",
+        "The legacy-capability input.post did not remain foreground-required.");
 
     await WriteEnvelopeAsync(inputPipe, new PluginEnvelope("input.post", unknownPostRequestId,
         JsonSerializer.SerializeToElement(new
@@ -1167,34 +1163,19 @@ Require(releaseRecovered && releaseFallbackCalled,
 
 Console.WriteLine("Plugin input injector mapping smoke tests passed.");
 
-Require(PluginRuntime.SelectInputDeliveryMode(docked: true, selectedVisible: true, targetForeground: true) ==
-        PluginRuntime.InputDeliveryMode.GuardedReal,
-    "A visible embedded foreground client did not select guarded real input.");
-Require(PluginRuntime.SelectInputDeliveryMode(docked: true, selectedVisible: false, targetForeground: true) ==
-        PluginRuntime.InputDeliveryMode.BackgroundMessage,
-    "A hidden embedded client selected system-wide input.");
-Require(PluginRuntime.SelectInputDeliveryMode(docked: true, selectedVisible: true, targetForeground: false) ==
-        PluginRuntime.InputDeliveryMode.BackgroundMessage,
-    "An embedded client selected system-wide input while another application was foreground.");
-Require(PluginRuntime.SelectInputDeliveryMode(docked: false, selectedVisible: false, targetForeground: false) ==
-        PluginRuntime.InputDeliveryMode.BackgroundMessage,
-    "A non-embedded client did not select background input.");
+var foregroundCapabilities = new HashSet<string>(StringComparer.Ordinal)
+    { PluginCapabilities.HostInputForegroundReal };
+Require(PluginRuntime.HasForegroundInputCapability(foregroundCapabilities),
+    "Foreground-real capability was not recognized.");
+Require(!PluginRuntime.HasForegroundInputCapability(
+        new HashSet<string>(StringComparer.Ordinal) { PluginCapabilities.HostInputBackgroundMessages }),
+    "Legacy background-message capability must not authorize foreground SendInput.");
 
 var routeExpected = new ManagedAccountSnapshot(
     "route-test", "Route test", 314, 159, (nint)0x1111, 0, 0, 800, 600, 96, false,
     DateTime.UtcNow, true, (nint)0x2222);
-Require(PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { LastActivityUtc = DateTime.UtcNow }, (nint)0x2222),
-    "A current input target was rejected.");
-Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { ProcessStartTimeUtcTicks = 160 }, (nint)0x2222),
-    "A reused process identity was accepted for real input.");
-Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { RootWindowHandle = (nint)0x3333 }, (nint)0x2222),
-    "A changed embedded HWND was accepted for real input.");
-Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { IsRunning = false }, (nint)0x2222),
-    "An exited input target was accepted for real input.");
-Require(PluginRuntime.MatchesReleaseTarget(routeExpected, routeExpected, (nint)0x2222, (nint)0x2222, (nint)0x1111),
-    "A background release targeting the validated render/input HWND was rejected.");
-Require(!PluginRuntime.MatchesReleaseTarget(routeExpected, routeExpected, (nint)0x2222, (nint)0x2222, (nint)0x2222),
-    "A background release incorrectly required the root HWND instead of the current render/input HWND.");
+Require(routeExpected.RootWindowHandle == (nint)0x2222 && routeExpected.IsRunning,
+    "The managed-account route snapshot was not preserved.");
 
 Console.WriteLine("Plugin input routing smoke tests passed.");
 

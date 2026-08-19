@@ -33,7 +33,7 @@ public sealed class InputSendInjector
         InputDeliveryIntent deliveryIntent = InputDeliveryIntent.Default,
         string? traceId = null)
     {
-        _ = deliveryIntent; // PostMessageProbe is routed by PluginRuntime before this broker.
+        _ = deliveryIntent; // Legacy delivery intents are rejected before reaching this injector.
         if (rootWindow == nint.Zero || events.Count == 0 || !IsWindow(rootWindow))
         {
             return Stamp(BackgroundInputResult.Failure("unavailable", "The docked client window is unavailable.", GetForegroundWindow(), GetForegroundWindow()), rootWindow, events.Count, traceId);
@@ -61,15 +61,24 @@ public sealed class InputSendInjector
                 // switch, and the user can move to another application during a macro.
                 if (!IsSafeTarget(rootWindow, targetValidator))
                 {
-                    await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
+                    var released = await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
                     var after = GetForegroundWindow();
-                    return Stamp(BackgroundInputResult.Failure("focus-lost", "The client lost focus during playback; input was stopped.", foregroundBefore, after, posted), rootWindow, events.Count, traceId);
+                    return Stamp(BackgroundInputResult.Failure("focus-lost", released
+                        ? "The client lost focus during playback; input was stopped and held inputs were released."
+                        : "The client lost focus during playback; input was stopped, but held-input cleanup was unsafe after takeover.",
+                        foregroundBefore, after, posted) with
+                    {
+                        Verification = released ? "guarded" : "cleanup-unavailable"
+                    }, rootWindow, events.Count, traceId);
                 }
                 if (!TryInject(rootWindow, input, out var error))
                 {
-                    await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
+                    var released = await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
                     var after = GetForegroundWindow();
-                    return Stamp(BackgroundInputResult.Failure(error.Code, error.Message, foregroundBefore, after, posted), rootWindow, events.Count, traceId);
+                    return Stamp(BackgroundInputResult.Failure(error.Code, released ? error.Message : $"{error.Message} Held-input cleanup was unsafe.", foregroundBefore, after, posted) with
+                    {
+                        Verification = released ? "guarded" : "cleanup-unavailable"
+                    }, rootWindow, events.Count, traceId);
                 }
                 postedEvents.Add(input);
                 posted++;
@@ -101,18 +110,31 @@ public sealed class InputSendInjector
             TargetRenderWindow = nint.Zero
         };
 
-    private static async Task ReleaseHeldInputsAsync(
+    private static async Task<bool> ReleaseHeldInputsAsync(
         nint rootWindow,
         IReadOnlyList<PluginInputEvent> postedEvents,
         Func<bool>? targetValidator,
         Func<IReadOnlyList<PluginInputEvent>, Task>? releaseFallback)
     {
         var releases = PendingReleases(postedEvents);
-        _ = await ReleasePendingInputsAsync(
+        return await ReleasePendingInputsAsync(
             releases,
-            IsSafeTarget(rootWindow, targetValidator),
+            IsReleaseSafe(rootWindow, targetValidator),
             release => TryInject(rootWindow, release, out _),
             releaseFallback).ConfigureAwait(false);
+    }
+
+    // Releasing events is safe only while the exact validated root is still
+    // foreground. It intentionally does not invoke the full target validator:
+    // identity/focus drift must stop new events, but a still-foreground root can
+    // safely receive the key/button-up cleanup before it is hidden or destroyed.
+    private static bool IsReleaseSafe(nint rootWindow, Func<bool>? targetValidator)
+    {
+        if (!IsWindow(rootWindow) || !IsWindowVisible(rootWindow) ||
+            GetAncestor(rootWindow, GaRoot) != rootWindow || GetForegroundWindow() != rootWindow)
+            return false;
+        try { return targetValidator?.Invoke() ?? true; }
+        catch { return false; }
     }
 
     internal static async Task<bool> ReleasePendingInputsAsync(
