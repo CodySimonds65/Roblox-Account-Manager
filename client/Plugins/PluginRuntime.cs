@@ -41,12 +41,14 @@ public sealed class PluginRuntime : IAsyncDisposable
         _host.MessageReceived += Host_MessageReceived;
         _host.Disconnected += Host_Disconnected;
         _host.InputDispatcher = DispatchInputAsync;
+        _host.InputDispatcherWithIntent = DispatchInputWithIntentAsync;
         _hotkeyMonitor.KeyDown += (_, vk) => _host.BroadcastHotkey("hotkey.pressed", vk);
         _hotkeyMonitor.KeyUp += (_, vk) => _host.BroadcastHotkey("hotkey.released", vk);
         _hotkeyMonitor.Start();
         Accounts.Diagnostic += Accounts_Diagnostic;
         Accounts.AccountChanged += Accounts_AccountChanged;
         Accounts.AccountExited += Accounts_AccountExited;
+        Accounts.AccountStopping += Accounts_AccountStopping;
         RefreshInstalled();
     }
 
@@ -79,7 +81,8 @@ public sealed class PluginRuntime : IAsyncDisposable
         current is not null && current.IsRunning &&
         current.ProcessId == expected.ProcessId &&
         current.ProcessStartTimeUtcTicks == expected.ProcessStartTimeUtcTicks &&
-        current.RootWindowHandle == expectedRoot;
+        current.RootWindowHandle == expectedRoot &&
+        current.WindowHandle != nint.Zero;
 
     internal static bool MatchesReleaseTarget(
         ManagedAccountSnapshot expected,
@@ -90,12 +93,21 @@ public sealed class PluginRuntime : IAsyncDisposable
         MatchesInputTarget(expected, current, expectedRoot) &&
         currentDockedRoot == expectedRoot && current!.WindowHandle == candidateWindow;
 
-    private async Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken)
+    private Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken) =>
+        DispatchInputWithIntentAsync(accountId, events, InputDeliveryIntent.Default, null, cancellationToken);
+
+    private async Task<BackgroundInputResult> DispatchInputWithIntentAsync(string accountId,
+        IReadOnlyList<PluginInputEvent> events, InputDeliveryIntent deliveryIntent, string? traceId,
+        CancellationToken cancellationToken)
     {
         var account = Accounts.Snapshot().FirstOrDefault(snapshot => string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
         if (account is null) return BackgroundInputResult.Failure("unknown-account", "The managed account is not running.", nint.Zero, nint.Zero);
+        if (Accounts.IsStopping(accountId))
+            return BackgroundInputResult.Failure("account-stopping", "The managed account is stopping; input was not delivered.", nint.Zero, nint.Zero);
         var embeddedRoot = ClientEmbeddings.RootFor(accountId);
-        var deliveryMode = SelectInputDeliveryMode(
+        var deliveryMode = deliveryIntent == InputDeliveryIntent.PostMessageProbe
+            ? InputDeliveryMode.BackgroundMessage
+            : SelectInputDeliveryMode(
             embeddedRoot is not null && embeddedRoot != nint.Zero,
             ClientEmbeddings.IsVisible(accountId),
             ClientEmbeddings.TargetOwnsForeground(accountId));
@@ -113,8 +125,7 @@ public sealed class PluginRuntime : IAsyncDisposable
             }
             bool TargetStillValid()
             {
-                var current = Accounts.Snapshot().FirstOrDefault(snapshot =>
-                    string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
+                if (!Accounts.TryResolveLiveAccount(accountId, out var current)) return false;
                 return ClientEmbeddings.IsVisible(accountId) &&
                        ClientEmbeddings.TargetOwnsForeground(accountId) &&
                        ClientEmbeddings.RootFor(accountId) == expectedRoot &&
@@ -123,8 +134,7 @@ public sealed class PluginRuntime : IAsyncDisposable
 
             async Task ReleaseWithoutForegroundAsync(IReadOnlyList<PluginInputEvent> releases)
             {
-                var current = Accounts.Snapshot().FirstOrDefault(snapshot =>
-                    string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
+                var current = Accounts.TryResolveLiveAccount(accountId, out var live) ? live : null;
                 var dockedRoot = ClientEmbeddings.RootFor(accountId) ?? nint.Zero;
                 if (!MatchesReleaseTarget(account, current, expectedRoot, dockedRoot, current?.WindowHandle ?? nint.Zero)) return;
                 _ = await _inputBroker.PostAsync(current!, releases, CancellationToken.None, hwnd =>
@@ -132,21 +142,48 @@ public sealed class PluginRuntime : IAsyncDisposable
                         ClientEmbeddings.RootFor(accountId) ?? nint.Zero, hwnd)).ConfigureAwait(false);
             }
 
-            return await _sendInjector.PostAsync(
+            var realResult = await _sendInjector.PostAsync(
                 expectedRoot,
                 events,
                 cancellationToken,
                 TargetStillValid,
-                ReleaseWithoutForegroundAsync).ConfigureAwait(false);
+                ReleaseWithoutForegroundAsync,
+                deliveryIntent,
+                traceId).ConfigureAwait(false);
+            return AnnotateInputResult(realResult, accountId);
         }
 
-        var result = await _inputBroker.PostAsync(account, events, cancellationToken).ConfigureAwait(false);
+        ManagedAccountSnapshot? ResolveLiveAccount()
+        {
+            if (Accounts.IsStopping(accountId) || !Accounts.TryResolveLiveAccount(accountId, out var live)) return null;
+            return live;
+        }
+
+        bool TargetWindowStillValid(nint hwnd)
+        {
+            var live = ResolveLiveAccount();
+            if (live is null || hwnd == nint.Zero) return false;
+            var root = live.RootWindowHandle;
+            return hwnd == live.WindowHandle || hwnd == root;
+        }
+
+        var result = await _inputBroker.PostAsync(account, events, cancellationToken, TargetWindowStillValid, deliveryIntent, traceId, ResolveLiveAccount).ConfigureAwait(false);
+        result = AnnotateInputResult(result, accountId);
         if (result.Accepted)
         {
             return result with { Message = result.Message + " Delivered as best-effort background input without changing the foreground window or selected tab." };
         }
         return result;
     }
+
+    private BackgroundInputResult AnnotateInputResult(BackgroundInputResult result, string accountId) => result with
+    {
+        SelectedAccountId = accountId,
+        SelectedVisible = ClientEmbeddings.IsVisible(accountId)
+    };
+
+    private void Accounts_AccountStopping(object? sender, string accountId) =>
+        _host.CancelInputDispatchesForAccount(accountId);
 
     public bool IsOfficialUrl(string url) => OfficialCatalog.Any(entry =>
         string.Equals(NormalizeBaseUrl(entry.InstallUrl), NormalizeBaseUrl(url), StringComparison.OrdinalIgnoreCase));
@@ -243,6 +280,7 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     private async Task StopCoreAsync(string pluginId)
     {
+        _host.CancelInputDispatchesForPlugin(pluginId);
         await _supervisor.StopAsync(pluginId).ConfigureAwait(false);
         lock (_gate)
         {
@@ -557,6 +595,7 @@ public sealed class PluginRuntime : IAsyncDisposable
         Accounts.Diagnostic -= Accounts_Diagnostic;
         Accounts.AccountChanged -= Accounts_AccountChanged;
         Accounts.AccountExited -= Accounts_AccountExited;
+        Accounts.AccountStopping -= Accounts_AccountStopping;
         _supervisor.Dispose();
         _hotkeyMonitor.Dispose();
         try

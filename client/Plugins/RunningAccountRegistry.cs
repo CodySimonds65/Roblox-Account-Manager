@@ -25,6 +25,8 @@ public sealed class RunningAccountRegistry : IDisposable
 
     public event EventHandler<ManagedAccountSnapshot>? AccountChanged;
     public event EventHandler<ManagedAccountSnapshot>? AccountExited;
+    /// <summary>Raised as soon as RAM begins stopping an account, before close/kill waits.</summary>
+    public event EventHandler<string>? AccountStopping;
     public event EventHandler<string>? Diagnostic;
 
     public RunningAccountRegistry(string? appDataDirectory = null)
@@ -88,17 +90,81 @@ public sealed class RunningAccountRegistry : IDisposable
     }
 
     /// <summary>
+    /// Resolves the current process/window snapshot without trusting a stale
+    /// HWND supplied by a caller. The persisted PID, start time, and executable
+    /// identity are checked while holding the registry record, so a PID/HWND
+    /// reuse cannot silently retarget background input.
+    /// </summary>
+    public bool TryResolveLiveAccount(string accountId, out ManagedAccountSnapshot snapshot)
+    {
+        snapshot = default!;
+        RunningAccountRecord? expected;
+        lock (_gate)
+        {
+            if (_stopping.Contains(accountId) || !_records.TryGetValue(accountId, out expected)) return false;
+        }
+
+        using var process = TryGetValidatedProcess(expected);
+        if (process is null) return false;
+        // Resolve the render child on demand instead of trusting the timer's
+        // last sample. Roblox can replace that HWND between timer ticks.
+        var previousWindow = (nint)expected.WindowHandle;
+        var registeredRoot = previousWindow != nint.Zero ? GetAncestor(previousWindow, GA_ROOT) : nint.Zero;
+        var liveWindow = nint.Zero;
+        if (registeredRoot != nint.Zero && IsOwnedProcessWindow(registeredRoot, process.Id))
+        {
+            var recreatedRender = FindRenderChild(registeredRoot);
+            liveWindow = recreatedRender != nint.Zero ? recreatedRender :
+                IsOwnedProcessWindow(previousWindow, process.Id) && GetAncestor(previousWindow, GA_ROOT) == registeredRoot
+                    ? previousWindow : nint.Zero;
+        }
+        var liveRecord = expected with { WindowHandle = liveWindow.ToInt64(), MissingWindowSinceUtc = liveWindow == nint.Zero ? expected.MissingWindowSinceUtc : null };
+        lock (_gate)
+        {
+            // Registration/termination may race the process probe. Re-read the
+            // immutable identity before returning so a stale snapshot can never
+            // be handed to an input broker after account replacement.
+            if (_stopping.Contains(accountId) ||
+                !_records.TryGetValue(accountId, out var currentRecord) ||
+                currentRecord.ProcessId != expected.ProcessId ||
+                currentRecord.ProcessStartTimeUtcTicks != expected.ProcessStartTimeUtcTicks)
+                return false;
+            liveRecord = currentRecord with
+            {
+                WindowHandle = liveWindow.ToInt64(),
+                MissingWindowSinceUtc = liveWindow == nint.Zero ? currentRecord.MissingWindowSinceUtc : null
+            };
+            if (currentRecord.WindowHandle != liveRecord.WindowHandle)
+            {
+                _records[accountId] = liveRecord;
+                SaveLocked();
+            }
+        }
+        var current = liveRecord.ToSnapshot();
+        if (!current.IsRunning || current.ProcessId != process.Id ||
+            current.ProcessStartTimeUtcTicks != expected.ProcessStartTimeUtcTicks)
+            return false;
+        snapshot = current;
+        return true;
+    }
+
+    /// <summary>
     /// Stops one managed Roblox process without ever acting on a reused PID.
     /// Watcher callbacks may win the race and publish the exit event once.
     /// </summary>
     public async Task<bool> TerminateAccountAsync(string accountId, CancellationToken cancellationToken = default)
     {
         RunningAccountRecord? expected;
+        var stopping = false;
         lock (_gate)
         {
             if (!_records.TryGetValue(accountId, out expected)) return false;
-            if (!_stopping.Add(accountId)) return false;
+            stopping = _stopping.Add(accountId);
+            if (!stopping) return false;
         }
+
+        try { AccountStopping?.Invoke(this, accountId); }
+        catch (Exception ex) { Diagnostic?.Invoke(this, $"Account-stop handler failed for {expected.Label}: {ex.Message}"); }
 
         try
         {
@@ -159,7 +225,14 @@ public sealed class RunningAccountRegistry : IDisposable
         }
         finally
         {
-            lock (_gate) _stopping.Remove(accountId);
+            // Keep a live, incompletely terminated account in the stopping
+            // state so input dispatch and tab refresh cannot race it. The
+            // watcher/finalization path clears the record and then releases
+            // the stopping marker once the process is truly gone.
+            lock (_gate)
+            {
+                if (!_records.ContainsKey(accountId)) _stopping.Remove(accountId);
+            }
         }
     }
 
@@ -269,6 +342,8 @@ public sealed class RunningAccountRegistry : IDisposable
 
         if (exitedSnapshot is not null)
         {
+            try { AccountStopping?.Invoke(this, accountId); }
+            catch (Exception ex) { Diagnostic?.Invoke(this, $"Account-stop handler failed for {exitedSnapshot.Label}: {ex.Message}"); }
             Diagnostic?.Invoke(this, exitCode is null
                 ? $"Account {exitedSnapshot.Label} (PID {exitedSnapshot.ProcessId}) exited; the process is no longer available."
                 : $"Account {exitedSnapshot.Label} (PID {exitedSnapshot.ProcessId}) exited with code 0x{unchecked((uint)exitCode.Value):X8}.");
@@ -290,6 +365,7 @@ public sealed class RunningAccountRegistry : IDisposable
         List<ManagedAccountSnapshot> exited = [];
         List<Process> wrappersToDetach = [];
         List<string> missingWindowAccounts = [];
+        List<string> invalidatedAccounts = [];
         var now = DateTime.UtcNow;
         lock (_gate)
         {
@@ -303,6 +379,7 @@ public sealed class RunningAccountRegistry : IDisposable
                     if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != record.ProcessStartTimeUtcTicks ||
                         !MatchesExecutable(process, record))
                     {
+                        invalidatedAccounts.Add(record.AccountId);
                         _records.Remove(record.AccountId);
                         _processes.Remove(record.AccountId, out var wrapper);
                         if (wrapper is not null) wrappersToDetach.Add(wrapper);
@@ -381,10 +458,20 @@ public sealed class RunningAccountRegistry : IDisposable
 
         foreach (var wrapper in wrappersToDetach) DetachProcessWatcher(string.Empty, wrapper);
 
+        foreach (var accountId in invalidatedAccounts)
+        {
+            try { AccountStopping?.Invoke(this, accountId); }
+            catch (Exception ex) { Diagnostic?.Invoke(this, $"Account-stop handler failed for {accountId}: {ex.Message}"); }
+        }
+
         foreach (var snapshot in changed) AccountChanged?.Invoke(this, snapshot);
         foreach (var snapshot in exited) RaiseAccountExited(snapshot);
         foreach (var accountId in missingWindowAccounts)
+        {
+            try { AccountStopping?.Invoke(this, accountId); }
+            catch (Exception ex) { Diagnostic?.Invoke(this, $"Account-stop handler failed for {accountId}: {ex.Message}"); }
             _ = TerminateAccountAsync(accountId);
+        }
     }
 
     private void RaiseAccountExited(ManagedAccountSnapshot snapshot)
@@ -406,32 +493,46 @@ public sealed class RunningAccountRegistry : IDisposable
 
     private static nint FindWindow(int processId)
     {
-        nint candidate = nint.Zero;
+        var candidates = new List<(nint Window, nint Render, bool Visible, long Area)>();
         EnumWindows((hwnd, _) =>
         {
+            if (!IsWindow(hwnd)) return true;
             GetWindowThreadProcessId(hwnd, out var ownerPid);
-            if (ownerPid != processId || !IsWindowVisible(hwnd) || IsWindow(hwnd) == false) return true;
-            if (GetWindow(hwnd, GW_OWNER) != nint.Zero) return true;
-            candidate = FindRenderChild(hwnd);
-            if (candidate == nint.Zero) candidate = hwnd;
-            return false;
+            if (ownerPid != processId || GetAncestor(hwnd, GA_ROOT) != hwnd) return true;
+            var render = FindRenderChild(hwnd);
+            var metrics = GetClientMetrics(render != nint.Zero ? render : hwnd);
+            var area = (long)Math.Max(0, metrics.Width) * Math.Max(0, metrics.Height);
+            if (area == 0) return true;
+            // Keep hidden roots eligible: Roblox can hide its tray/render window
+            // while switching places and recreate the child before showing it.
+            candidates.Add((hwnd, render, IsWindowVisible(hwnd), area));
+            return true;
         }, nint.Zero);
-        return candidate;
+        var selected = candidates
+            .OrderByDescending(candidate => candidate.Render != nint.Zero)
+            .ThenByDescending(candidate => candidate.Visible)
+            .ThenByDescending(candidate => candidate.Area)
+            .FirstOrDefault();
+        return selected.Window == nint.Zero ? nint.Zero : selected.Render != nint.Zero ? selected.Render : selected.Window;
     }
 
     private static nint FindRenderChild(nint root)
     {
-        nint selected = nint.Zero; var selectedArea = 0L;
+        nint selected = nint.Zero; var selectedArea = 0L; var selectedVisible = false;
         EnumChildWindows(root, (hwnd, _) =>
         {
-            if (!IsWindowVisible(hwnd) || !GetClientRect(hwnd, out var rect)) return true;
+            if (!IsWindow(hwnd) || !GetClientRect(hwnd, out var rect)) return true;
             var className = new char[128]; var length = GetClassName(hwnd, ref className[0], className.Length);
             var name = length > 0 ? new string(className, 0, length) : string.Empty;
             if (!name.Contains("Chrome_RenderWidgetHostHWND", StringComparison.OrdinalIgnoreCase) &&
                 !name.Contains("Roblox", StringComparison.OrdinalIgnoreCase) &&
                 !name.Contains("SDL_app", StringComparison.OrdinalIgnoreCase)) return true;
             var area = (long)Math.Max(0, rect.Right - rect.Left) * Math.Max(0, rect.Bottom - rect.Top);
-            if (area > selectedArea) { selected = hwnd; selectedArea = area; }
+            var visible = IsWindowVisible(hwnd);
+            if (visible && !selectedVisible || visible == selectedVisible && area > selectedArea)
+            {
+                selected = hwnd; selectedArea = area; selectedVisible = visible;
+            }
             return true;
         }, nint.Zero);
         return selected;

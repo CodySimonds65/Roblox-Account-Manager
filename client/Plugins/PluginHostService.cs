@@ -21,6 +21,10 @@ public sealed class PluginHostService : IAsyncDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _unauthenticatedLimit = new(8, 8);
     private readonly ConcurrentDictionary<Guid, Task> _connectionTasks = new();
+    private readonly ConcurrentDictionary<string, Task> _inputTasks = new(StringComparer.Ordinal);
+    private readonly object _inputDispatchGate = new();
+    private readonly Dictionary<string, ActiveInputDispatch> _activeInputDispatches = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _completedInputRequests = new(StringComparer.Ordinal);
     private readonly Task _acceptLoop;
     private readonly Task _heartbeatLoop;
 
@@ -31,6 +35,32 @@ public sealed class PluginHostService : IAsyncDisposable
     public event EventHandler<(PluginConnection Connection, PluginEnvelope Envelope)>? MessageReceived;
     public PriorityInputLeaseCoordinator InputLeases { get; } = new();
     public Func<string, IReadOnlyList<PluginInputEvent>, CancellationToken, Task<BackgroundInputResult>>? InputDispatcher { get; set; }
+    public Func<string, IReadOnlyList<PluginInputEvent>, InputDeliveryIntent, string?, CancellationToken, Task<BackgroundInputResult>>? InputDispatcherWithIntent { get; set; }
+
+    private const int MaxActiveDispatchesPerPlugin = 8;
+    private const int MaxActiveDispatchesGlobal = 32;
+    private const int MaxActiveEventsPerPlugin = 20_000;
+    private static readonly TimeSpan CompletedRequestRetention = TimeSpan.FromMinutes(2);
+
+    /// <summary>Cancel detached input work before a managed account is terminated.</summary>
+    public void CancelInputDispatchesForAccount(string accountId)
+    {
+        ActiveInputDispatch[] dispatches;
+        lock (_inputDispatchGate)
+            dispatches = _activeInputDispatches.Values.Where(dispatch =>
+                string.Equals(dispatch.AccountId, accountId, StringComparison.Ordinal)).ToArray();
+        foreach (var dispatch in dispatches) TryCancel(dispatch.Cancellation);
+    }
+
+    /// <summary>Cancel detached input work before a plugin process is stopped.</summary>
+    public void CancelInputDispatchesForPlugin(string pluginId)
+    {
+        ActiveInputDispatch[] dispatches;
+        lock (_inputDispatchGate)
+            dispatches = _activeInputDispatches.Values.Where(dispatch =>
+                string.Equals(dispatch.PluginId, pluginId, StringComparison.Ordinal)).ToArray();
+        foreach (var dispatch in dispatches) TryCancel(dispatch.Cancellation);
+    }
 
     public PluginHostService()
     {
@@ -278,6 +308,8 @@ public sealed class PluginHostService : IAsyncDisposable
         }
         finally
         {
+            if (connection is not null)
+                CancelInputDispatchesForPlugin(connection.PluginId);
             if (connection is not null && registered)
             {
                 _connections.TryRemove(connection.PluginId, out _);
@@ -313,15 +345,51 @@ public sealed class PluginHostService : IAsyncDisposable
 
     private async Task DispatchInputAsync(PluginConnection connection, PluginEnvelope envelope)
     {
+        ActiveInputDispatch? dispatch = null;
         try
         {
             var request = envelope.Payload.Deserialize<InputPostRequest>(PluginJson.Options)
                           ?? throw new InvalidDataException("input.post payload is invalid.");
             ValidateInputRequest(request);
-            var lease = await InputLeases.TryAcquireAsync(request.AccountId, connection.PluginId,
-                PriorityForPlugin(connection.PluginId), TimeSpan.FromSeconds(2), _shutdown.Token).ConfigureAwait(false);
+            var intent = ParseDeliveryIntent(request.DeliveryIntent);
+            // The legacy/background capabilities are permanently message-only.
+            // A plugin must explicitly hold the foreground-real capability before
+            // the default route can ever use the guarded foreground injector.
+            if (!connection.GrantedCapabilities.Contains(PluginCapabilities.HostInputForegroundReal))
+                intent = InputDeliveryIntent.PostMessageProbe;
+            var traceId = string.IsNullOrWhiteSpace(request.TraceId) ? envelope.RequestId : request.TraceId;
+            if (!TryReserveInputDispatch(connection.PluginId, envelope.RequestId, request, out dispatch, out var reservationError))
+            {
+                await connection.SendAsync("input.result", BackgroundInputResult.Failure(reservationError.Code,
+                    reservationError.Message, nint.Zero, nint.Zero), envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
+                return;
+            }
+            var activeDispatch = dispatch!;
+            using var leaseCancellation = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, activeDispatch.Cancellation.Token);
+            IAsyncDisposable? lease;
+            try
+            {
+                lease = await InputLeases.TryAcquireAsync(request.AccountId, connection.PluginId,
+                    PriorityForPlugin(connection.PluginId), TimeSpan.FromSeconds(2), leaseCancellation.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
+            {
+                CompleteInputDispatch(activeDispatch);
+                if (!connection.IsDisposed)
+                {
+                    try
+                    {
+                        await connection.SendAsync("input.result",
+                            BackgroundInputResult.Failure("canceled", "Input dispatch was canceled before acquiring the account lease.", nint.Zero, nint.Zero),
+                            envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
+                    }
+                    catch { }
+                }
+                return;
+            }
             if (lease is null)
             {
+                CompleteInputDispatch(activeDispatch);
                 await connection.SendAsync("input.result", BackgroundInputResult.Failure("busy", "The account input lease is busy.", nint.Zero, nint.Zero), envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
                 return;
             }
@@ -329,21 +397,36 @@ public sealed class PluginHostService : IAsyncDisposable
             // other messages keep flowing during a long macro. The lease is held
             // across the whole paced run, and pacing is cancelled if the plugin
             // disconnects or the host shuts down.
-            _ = RunPacedDispatchAsync(connection, envelope.RequestId, request, lease);
+            var dispatchKey = activeDispatch.Key;
+            var run = RunPacedDispatchAsync(connection, envelope.RequestId, request, intent, traceId, lease, activeDispatch);
+            _inputTasks[dispatchKey] = run;
+            _ = run.ContinueWith(completed => _inputTasks.TryRemove(dispatchKey, out var removed), TaskScheduler.Default);
+            dispatch = null;
         }
         catch (Exception ex) when (ex is InvalidDataException or JsonException)
         {
             await connection.SendAsync("input.result", BackgroundInputResult.Failure("invalid-request", ex.Message, nint.Zero, nint.Zero), envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        {
+            // Host shutdown cancels the transport and all outstanding dispatches.
+        }
+        finally
+        {
+            // A reservation handed to the detached run is completed by that run;
+            // validation/lease failures must release it on this path.
+            if (dispatch is not null) CompleteInputDispatch(dispatch);
+        }
     }
 
-    private async Task RunPacedDispatchAsync(PluginConnection connection, string requestId, InputPostRequest request, IAsyncDisposable lease)
+    private async Task RunPacedDispatchAsync(PluginConnection connection, string requestId, InputPostRequest request,
+        InputDeliveryIntent intent, string? traceId, IAsyncDisposable lease, ActiveInputDispatch dispatch)
     {
         await using (lease)
         {
             try
             {
-                using var pacingSource = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+                using var pacingSource = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, dispatch.Cancellation.Token);
                 var monitor = Task.Run(async () =>
                 {
                     try
@@ -356,9 +439,11 @@ public sealed class PluginHostService : IAsyncDisposable
                 });
                 try
                 {
-                    var result = InputDispatcher is null
-                        ? BackgroundInputResult.Failure("unavailable", "The host input broker is unavailable.", nint.Zero, nint.Zero)
-                        : await InputDispatcher(request.AccountId, request.Events, pacingSource.Token).ConfigureAwait(false);
+                    var result = InputDispatcherWithIntent is not null
+                        ? await InputDispatcherWithIntent(request.AccountId, request.Events, intent, traceId, pacingSource.Token).ConfigureAwait(false)
+                        : InputDispatcher is null
+                            ? BackgroundInputResult.Failure("unavailable", "The host input broker is unavailable.", nint.Zero, nint.Zero)
+                            : await InputDispatcher(request.AccountId, request.Events, pacingSource.Token).ConfigureAwait(false);
                     await connection.SendAsync("input.result", result, requestId, _shutdown.Token).ConfigureAwait(false);
                 }
                 finally
@@ -369,9 +454,33 @@ public sealed class PluginHostService : IAsyncDisposable
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
             {
-                // The plugin disconnected or the host is shutting down; there is
-                // no response to send, and the lease releases with the run.
+                // The plugin disconnected or the host is shutting down. A live
+                // connection still receives an explicit cancellation result.
+                if (!connection.IsDisposed && !_shutdown.IsCancellationRequested && !dispatch.Cancellation.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await connection.SendAsync("input.result",
+                            BackgroundInputResult.Failure("canceled", "Input dispatch was canceled.", nint.Zero, nint.Zero),
+                            requestId, _shutdown.Token).ConfigureAwait(false);
+                    }
+                    catch { }
+                }
             }
+            catch (Exception ex)
+            {
+                if (!connection.IsDisposed && !_shutdown.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await connection.SendAsync("input.result",
+                            BackgroundInputResult.Failure("dispatch-error", ex.Message, nint.Zero, nint.Zero),
+                            requestId, _shutdown.Token).ConfigureAwait(false);
+                    }
+                    catch { }
+                }
+            }
+            finally { CompleteInputDispatch(dispatch); }
         }
     }
 
@@ -402,13 +511,82 @@ public sealed class PluginHostService : IAsyncDisposable
         }
     }
 
+    private bool TryReserveInputDispatch(string pluginId, string requestId, InputPostRequest request,
+        out ActiveInputDispatch? dispatch, out (string Code, string Message) error)
+    {
+        dispatch = null;
+        error = default;
+        if (string.IsNullOrWhiteSpace(requestId) || requestId.Length > 200)
+        {
+            error = ("invalid-request", "input.post request id is invalid.");
+            return false;
+        }
+
+        var key = pluginId + "\u001f" + requestId;
+        var now = DateTime.UtcNow;
+        lock (_inputDispatchGate)
+        {
+            foreach (var completed in _completedInputRequests.Where(pair => now - pair.Value >= CompletedRequestRetention).Select(pair => pair.Key).ToArray())
+                _completedInputRequests.Remove(completed);
+
+            if (_activeInputDispatches.ContainsKey(key) || _completedInputRequests.ContainsKey(key))
+            {
+                error = ("duplicate-request", "This input request id was already dispatched.");
+                return false;
+            }
+
+            var pluginDispatches = _activeInputDispatches.Values.Where(active =>
+                string.Equals(active.PluginId, pluginId, StringComparison.Ordinal)).ToArray();
+            var activeEvents = pluginDispatches.Sum(active => active.EventCount);
+            if (_activeInputDispatches.Count >= MaxActiveDispatchesGlobal ||
+                pluginDispatches.Length >= MaxActiveDispatchesPerPlugin ||
+                activeEvents > MaxActiveEventsPerPlugin - request.Events.Count)
+            {
+                error = ("quota", "The plugin input dispatch quota is exhausted.");
+                return false;
+            }
+
+            dispatch = new ActiveInputDispatch(key, pluginId, request.AccountId, request.Events.Count,
+                new CancellationTokenSource());
+            _activeInputDispatches[key] = dispatch;
+            return true;
+        }
+    }
+
+    private void CompleteInputDispatch(ActiveInputDispatch? dispatch)
+    {
+        if (dispatch is null) return;
+        lock (_inputDispatchGate)
+        {
+            if (!_activeInputDispatches.Remove(dispatch.Key)) return;
+            _completedInputRequests[dispatch.Key] = DateTime.UtcNow;
+        }
+        dispatch.Cancellation.Dispose();
+    }
+
+    private static void TryCancel(CancellationTokenSource cancellation)
+    {
+        try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
+    private static InputDeliveryIntent ParseDeliveryIntent(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        null or "" or "default" or "auto" => InputDeliveryIntent.Default,
+        "postmessageprobe" or "post-message-probe" or "post-message" or "message-only" or "background-message" => InputDeliveryIntent.PostMessageProbe,
+        _ => throw new InvalidDataException("input.post deliveryIntent is unsupported.")
+    };
+
     private static void ValidateInputRequest(InputPostRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.AccountId) || request.AccountId.Length > 200)
             throw new InvalidDataException("input.post account id is invalid.");
         if (request.Events is null || request.Events.Count == 0 || request.Events.Count > 10_000)
             throw new InvalidDataException("input.post event count is outside the permitted range.");
+        if (request.TraceId is not null && request.TraceId.Length > 200)
+            throw new InvalidDataException("input.post traceId is invalid.");
         long previousOffset = -1;
+        var burstStart = -1L;
+        var burstCount = 0;
         foreach (var input in request.Events)
         {
             if (!double.IsFinite(input.NormalizedX) || !double.IsFinite(input.NormalizedY) ||
@@ -418,6 +596,13 @@ public sealed class PluginHostService : IAsyncDisposable
                 throw new InvalidDataException("input.post timing is outside the permitted range.");
             if (input.OffsetMicroseconds < previousOffset)
                 throw new InvalidDataException("input.post events must be ordered by offset.");
+            if (burstStart < 0 || input.OffsetMicroseconds - burstStart > 1_000_000)
+            {
+                burstStart = input.OffsetMicroseconds;
+                burstCount = 0;
+            }
+            if (++burstCount > 2_000)
+                throw new InvalidDataException("input.post event rate exceeds the permitted burst limit.");
             previousOffset = input.OffsetMicroseconds;
             if (input.Kind is PluginInputKind.KeyDown or PluginInputKind.KeyUp)
             {
@@ -444,14 +629,22 @@ public sealed class PluginHostService : IAsyncDisposable
         _ => 50
     };
 
-    private sealed record InputPostRequest(string AccountId, IReadOnlyList<PluginInputEvent> Events);
+    private sealed record InputPostRequest(string AccountId, IReadOnlyList<PluginInputEvent> Events,
+        string? DeliveryIntent = null, string? TraceId = null);
+
+    private sealed record ActiveInputDispatch(string Key, string PluginId, string AccountId, int EventCount,
+        CancellationTokenSource Cancellation);
 
     public async ValueTask DisposeAsync()
     {
         _shutdown.Cancel();
+        ActiveInputDispatch[] dispatches;
+        lock (_inputDispatchGate) dispatches = _activeInputDispatches.Values.ToArray();
+        foreach (var dispatch in dispatches) dispatch.Cancellation.Cancel();
         try { await _acceptLoop.ConfigureAwait(false); } catch (OperationCanceledException) { }
         try { await _heartbeatLoop.ConfigureAwait(false); } catch (OperationCanceledException) { }
         try { await Task.WhenAll(_connectionTasks.Values).ConfigureAwait(false); } catch { }
+        try { await Task.WhenAll(_inputTasks.Values.ToArray()).ConfigureAwait(false); } catch { }
         foreach (var connection in _connections.Values) await connection.DisposeAsync().ConfigureAwait(false);
         _unauthenticatedLimit.Dispose();
         _shutdown.Dispose();
@@ -513,7 +706,11 @@ public sealed class PluginConnection : IAsyncDisposable
             "account.events.subscribe" => PluginCapabilities.HostAccountEvents,
             "activity.list" => PluginCapabilities.HostActivityRead,
             "theme.get" or "theme.subscribe" => PluginCapabilities.HostThemeRead,
-            "input.post" or "input.lease.acquire" => PluginCapabilities.HostInputBackground,
+            "input.post" or "input.lease.acquire" =>
+                (GrantedCapabilities.Contains(PluginCapabilities.HostInputBackground) ||
+                 GrantedCapabilities.Contains(PluginCapabilities.HostInputBackgroundMessages) ||
+                 GrantedCapabilities.Contains(PluginCapabilities.HostInputForegroundReal))
+                    ? "__input-authorized__" : null,
             "action.register" => PluginCapabilities.HostActionsRegister,
             "action.invoke" => PluginCapabilities.HostActionsInvoke,
             "screen.capture" => PluginCapabilities.SystemReadScreen,
@@ -521,7 +718,7 @@ public sealed class PluginConnection : IAsyncDisposable
             "action.result" or "action.progress" or "plugin.heartbeat" or "plugin.shutdown" or "diagnostic.log" or "hotkey.subscribe" => "",
             _ => null
         };
-        return required is not null && (required.Length == 0 || GrantedCapabilities.Contains(required));
+        return required is not null && (required.Length == 0 || required == "__input-authorized__" || GrantedCapabilities.Contains(required));
     }
 
     public async Task SendAsync(string type, object payload, string requestId, CancellationToken cancellationToken)
