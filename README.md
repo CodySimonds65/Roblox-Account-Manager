@@ -36,7 +36,7 @@ Output: `release\RobloxAccountManager.exe`. The source is under `client\` and li
 
 ### macOS development build
 
-The cross-platform implementation is under `src/`. It requires macOS 14 or newer because each account uses a persistent, uniquely identified WKWebView data store. Build the shared contracts, macOS adapter, and Avalonia frontend with:
+The cross-platform implementation is under `src/`. It requires macOS 14 or newer because each account uses a persistent, uniquely identified WKWebView data store. The Avalonia frontend includes account profiles, isolated browser sessions, presets, launch queues, external client management, diagnostics, scoped settings, plugin capability status, and update handoff. Build the shared contracts, macOS adapter, and Avalonia frontend with:
 
 ```text
 dotnet run --project tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release
@@ -53,7 +53,7 @@ The package step creates a normal macOS application bundle. Open `Roblox Account
 open "Roblox Account Manager.app"
 ```
 
-Unsigned development bundles may require **System Settings → Privacy & Security → Open Anyway**. The release workflow publishes separate `osx-arm64` and `osx-x64` component PKGs signed with Developer ID Installer, notarized, stapled, and checksum-paired. The package has no installer scripts and installs the signed app under `/Applications`.
+Unsigned development bundles may require **System Settings → Privacy & Security → Open Anyway**. During the unsigned phase, update packages are checksum- and payload-validated before Apple Installer is opened, but macOS approval remains the user's responsibility. The release workflow publishes separate `osx-arm64` and `osx-x64` component PKGs signed with Developer ID Installer, notarized, stapled, and checksum-paired. The package has no installer scripts and installs the signed app under `/Applications`.
 
 While Apple signing credentials are being configured, the repository also provides a manually triggered temporary unsigned release path. Its assets include `-unsigned` in the filename and are never presented as certified. Users must explicitly approve the installer and app through macOS **Privacy & Security → Open Anyway**. These packages are for testing only; use the signed workflow for normal distribution.
 

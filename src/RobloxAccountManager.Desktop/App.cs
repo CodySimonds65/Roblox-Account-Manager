@@ -4,6 +4,7 @@ using Avalonia.Themes.Fluent;
 using RobloxAccountManager.Core.Contracts;
 using RobloxAccountManager.Desktop.ViewModels;
 using RobloxAccountManager.Desktop.Views;
+using RobloxAccountManager.Platform.MacOS;
 
 namespace RobloxAccountManager.Desktop;
 
@@ -21,8 +22,13 @@ public sealed class App : Application
                 platform,
                 TrustedRobloxIdentityConfiguration.LoadTeamIdentifier(),
                 TrustedRobloxIdentityConfiguration.LoadInstallerIdentity());
+            var shell = new DesktopShellViewModel(composition.Capabilities, composition.Accounts, composition.Presets, composition.Settings, composition.Updates, composition.RobloxSettings, composition.Plugins);
+            if (composition.Plugins is MacPluginHostFacade macPlugins)
+            {
+                macPlugins.SetAccountSnapshotProvider(() => shell.Accounts.Select(account => new PluginAccountSnapshot(account.Id, account.Label, RobloxPlatform.MacOS)).ToArray());
+            }
             desktop.MainWindow = new MainWindow(
-                new DesktopShellViewModel(composition.Capabilities, composition.Updates),
+                shell,
                 composition.BrowserSessions,
                 composition.Launches,
                 composition.Clients);

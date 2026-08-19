@@ -1,5 +1,7 @@
 namespace RobloxAccountManager.Core.Contracts;
 
+using RobloxAccountManager.Core.Models;
+
 public interface IAccountBrowserSessionService
 {
     ValueTask<BrowserSessionDescriptor> CreateAsync(string accountId, string profileName, CancellationToken cancellationToken = default);
@@ -68,4 +70,35 @@ public interface IPlatformCapabilities
     RobloxPlatform Platform { get; }
     PlatformCapabilitySnapshot Snapshot { get; }
     CapabilityDescriptor Get(string capabilityName);
+}
+
+public sealed record RobloxSettingCapability(
+    string Name,
+    CapabilityStatus Status,
+    string Description,
+    string? StableFailureCode = null);
+
+public sealed record RobloxSettingsApplyResult(
+    bool Succeeded,
+    IReadOnlyList<string> Applied,
+    IReadOnlyList<string> Skipped,
+    string? DiagnosticCode = null);
+
+public interface IRobloxSettingsAdapter
+{
+    IReadOnlyList<RobloxSettingCapability> Capabilities { get; }
+    ValueTask<RobloxSettingsApplyResult> ApplyAsync(GameSettings settings, CancellationToken cancellationToken = default);
+    ValueTask RecoverAsync(CancellationToken cancellationToken = default);
+}
+
+public interface IPluginHostFacade
+{
+    bool IsAvailable { get; }
+    IReadOnlyList<PluginCapabilityResult> Capabilities { get; }
+    ValueTask<IReadOnlyList<string>> GetInstalledPluginIdsAsync(CancellationToken cancellationToken = default);
+    ValueTask<IReadOnlyList<string>> GetRunningPluginIdsAsync(CancellationToken cancellationToken = default);
+    ValueTask<IReadOnlyList<string>> GetRequestedCapabilitiesAsync(string pluginId, CancellationToken cancellationToken = default);
+    ValueTask<PluginInstallResult> InstallFromDirectoryAsync(string sourceDirectory, bool userConfirmed, CancellationToken cancellationToken = default);
+    ValueTask<PluginLifecycleResult> StartAsync(string pluginId, bool userConfirmed, CancellationToken cancellationToken = default);
+    ValueTask<PluginLifecycleResult> StopAsync(string pluginId, CancellationToken cancellationToken = default);
 }

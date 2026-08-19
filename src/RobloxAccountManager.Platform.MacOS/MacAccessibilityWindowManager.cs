@@ -78,7 +78,7 @@ public sealed partial class MacAccessibilityWindowManager : IClientWindowManager
             return new MacWindowOperationResult(false, capability, "The process identity is stale or was not verified.");
         }
 
-        var script = $"tell application \"System Events\" to tell (first process whose unix id is {process.ProcessId}) to set frontmost to true";
+        var script = BuildVerifiedProcessScript(process, "set frontmost to true");
         var result = await _commandRunner.RunAsync("/usr/bin/osascript", ["-e", script], cancellationToken).ConfigureAwait(false);
         return result.Succeeded
             ? new MacWindowOperationResult(true, capability, null)
@@ -116,11 +116,11 @@ public sealed partial class MacAccessibilityWindowManager : IClientWindowManager
         {
             var layout = MacTileLayout.Default(index, verified.Count, screen.Value.Width, screen.Value.Height);
             layout = layout with { Left = layout.Left + screen.Value.Left, Top = layout.Top + screen.Value.Top };
-            // All interpolated values are locally computed integers. No user/account input is
-            // inserted into AppleScript, and no URI is ever included in this command.
-            var script = $"tell application \"System Events\" to tell (first process whose unix id is {verified[index].ProcessId}) to "
-                + $"set frontmost to true\nif (count windows) > 0 then\nset position of window 1 to {{{layout.Left}, {layout.Top}}}\n"
-                + $"set size of window 1 to {{{layout.Width}, {layout.Height}}}\nend if";
+            // Position and size can be changed without activating the process. Never steal
+            // focus from the user's current application while arranging Roblox windows.
+            var script = BuildVerifiedProcessScript(verified[index],
+                $"if (count windows) > 0 then\nset position of window 1 to {{{layout.Left}, {layout.Top}}}\n"
+                + $"set size of window 1 to {{{layout.Width}, {layout.Height}}}\nend if");
             var result = await _commandRunner.RunAsync("/usr/bin/osascript", ["-e", script], cancellationToken).ConfigureAwait(false);
             if (!result.Succeeded)
             {
@@ -129,6 +129,20 @@ public sealed partial class MacAccessibilityWindowManager : IClientWindowManager
         }
 
         return new MacWindowOperationResult(true, capability, null);
+    }
+
+    private static string BuildVerifiedProcessScript(RobloxProcessIdentity process, string body)
+    {
+        if (string.IsNullOrWhiteSpace(process.BundlePath))
+            throw new InvalidOperationException("A verified bundle path is required for Accessibility operations.");
+        var path = process.BundlePath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
+        return "tell application \"System Events\"\n"
+            + $"set candidates to every process whose unix id is {process.ProcessId}\n"
+            + "if (count candidates) is not 1 then error \"stale-process-identity\"\n"
+            + "set target to item 1 of candidates\n"
+            + $"if POSIX path of (application file of target) is not \"{path}\" then error \"stale-process-identity\"\n"
+            + "tell target\n"
+            + body + "\nend tell\nend tell";
     }
 
     private async Task<MacScreenFrame?> GetVisibleScreenFrameAsync(CancellationToken cancellationToken)
