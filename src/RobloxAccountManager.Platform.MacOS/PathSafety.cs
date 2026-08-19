@@ -81,6 +81,11 @@ internal static class PathSafety
             var attributes = File.GetAttributes(current);
             if ((attributes & FileAttributes.ReparsePoint) != 0)
             {
+                if (IsTrustedMacOSSystemAlias(current))
+                {
+                    continue;
+                }
+
                 throw new InvalidOperationException("A symlink or reparse point was found in a managed path.");
             }
 
@@ -89,6 +94,45 @@ internal static class PathSafety
             {
                 throw new InvalidOperationException("A symbolic link was found in a managed path.");
             }
+        }
+    }
+
+    private static bool IsTrustedMacOSSystemAlias(string path)
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return false;
+        }
+
+        var fullPath = Path.GetFullPath(path)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var expectedTarget = fullPath switch
+        {
+            "/var" => "/private/var",
+            "/tmp" => "/private/tmp",
+            "/etc" => "/private/etc",
+            _ => null
+        };
+        if (expectedTarget is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var resolved = new DirectoryInfo(fullPath).ResolveLinkTarget(returnFinalTarget: true)?.FullName;
+            return string.Equals(
+                Path.GetFullPath(resolved ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar),
+                expectedTarget,
+                StringComparison.Ordinal);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
