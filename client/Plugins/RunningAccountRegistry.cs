@@ -91,7 +91,12 @@ public sealed class RunningAccountRegistry : IDisposable
                     if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != record.ProcessStartTimeUtcTicks)
                     {
                         _records.Remove(record.AccountId);
+                        int? exitCode = null;
+                        try { if (process.HasExited) exitCode = process.ExitCode; } catch { }
                         exited.Add(record.ToSnapshot() with { IsRunning = false });
+                        Diagnostic?.Invoke(this, exitCode is null
+                            ? $"Account {record.Label} (PID {record.ProcessId}) exited; the process is no longer available."
+                            : $"Account {record.Label} (PID {record.ProcessId}) exited with code 0x{unchecked((uint)exitCode.Value):X8}.");
                         continue;
                     }
 

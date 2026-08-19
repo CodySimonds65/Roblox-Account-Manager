@@ -1560,7 +1560,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => Log($"{snapshot.Label} exited.")));
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => Log($"{snapshot.Label} exited (PID {snapshot.ProcessId}).")));
         }
         catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
         {
