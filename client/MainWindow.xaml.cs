@@ -66,20 +66,8 @@ public partial class MainWindow : Window
         Loaded += MainWindow_Loaded;
         SourceInitialized += (_, _) =>
         {
-            var runtime = ((App)Application.Current).PluginRuntime;
             ClientsPanel.AttachToWindow(this);
             ClientsPanel.AccountEmbedded += () => Dispatcher.BeginInvoke(new Action(ShowClientsView));
-            runtime.ClientEmbeddings.EmbeddedRootResolver = accountId => runtime.ClientEmbeddings.RootFor(accountId);
-            runtime.ClientEmbeddings.EmbeddedActivate = accountId =>
-            {
-                if (Dispatcher.HasShutdownStarted) return;
-                Dispatcher.Invoke(new Action(() =>
-                {
-                    ShowClientsView();
-                    ClientsPanel.ActivateAccountForPlayback(accountId);
-                    Activate();
-                }));
-            };
         };
     }
 
@@ -1630,8 +1618,6 @@ public partial class MainWindow : Window
         var runtime = ((App)Application.Current).PluginRuntime;
         runtime.Diagnostic -= PluginRuntime_Diagnostic;
         runtime.Accounts.AccountExited -= Accounts_AccountExited;
-        runtime.ClientEmbeddings.EmbeddedRootResolver = null;
-        runtime.ClientEmbeddings.EmbeddedActivate = null;
         runtime.ClientEmbeddings.UnembedAll();
         ClientsPanel.Detach();
         lock (_pluginDiagnosticQueueGate) _pendingPluginDiagnostics.Clear();

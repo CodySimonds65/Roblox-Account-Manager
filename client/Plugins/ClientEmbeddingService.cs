@@ -14,12 +14,6 @@ public sealed class ClientEmbeddingService
     private string? _visibleAccountId;
     private nint _hostWindow;
 
-    /// <summary>Returns the embedded root HWND for an account when it is visible and selected; null otherwise.</summary>
-    public Func<string, nint?>? EmbeddedRootResolver { get; set; }
-
-    /// <summary>Brings an embedded account to the foreground tab and focuses its window.</summary>
-    public Action<string>? EmbeddedActivate { get; set; }
-
     /// <summary>Decides whether an account is eligible for embedding/tab display; accounts returning false are unembedded.</summary>
     public Func<string, bool>? EmbedFilter { get; set; }
 
@@ -43,6 +37,21 @@ public sealed class ClientEmbeddingService
     public string? VisibleAccountId
     {
         get { lock (_gate) return _visibleAccountId; }
+    }
+
+    public bool IsVisible(string accountId)
+    {
+        lock (_gate)
+        {
+            return string.Equals(_visibleAccountId, accountId, StringComparison.Ordinal) &&
+                   _embedded.ContainsKey(accountId);
+        }
+    }
+
+    public bool HostOwnsForeground()
+    {
+        var hostWindow = _hostWindow;
+        return hostWindow != nint.Zero && IsWindow(hostWindow) && GetForegroundWindow() == hostWindow;
     }
 
     public nint? RootFor(string accountId)
@@ -93,6 +102,7 @@ public sealed class ClientEmbeddingService
         lock (_gate)
         {
             if (!_embedded.Remove(accountId, out rootWindow)) return false;
+            if (string.Equals(_visibleAccountId, accountId, StringComparison.Ordinal)) _visibleAccountId = null;
         }
         if (rootWindow != nint.Zero && IsWindow(rootWindow))
         {
@@ -161,29 +171,6 @@ public sealed class ClientEmbeddingService
         }
     }
 
-    public void Focus(string accountId)
-    {
-        nint root;
-        lock (_gate)
-        {
-            if (!_embedded.TryGetValue(accountId, out root) || root == nint.Zero) return;
-            ShowWindow(root, SwShow);
-        }
-        // SetFocus requires the target window's thread to be attached to ours.
-        var ourThread = GetCurrentThreadId();
-        GetWindowThreadProcessId(root, out var gameThread);
-        var attached = gameThread != 0 && gameThread != ourThread &&
-                       AttachThreadInput(ourThread, gameThread, true);
-        try
-        {
-            SetFocus(root);
-        }
-        finally
-        {
-            if (attached) AttachThreadInput(ourThread, gameThread, false);
-        }
-    }
-
     public string[] EmbeddedAccountIds()
     {
         lock (_gate) return _embedded.Keys.OrderBy(id => id, StringComparer.Ordinal).ToArray();
@@ -194,9 +181,6 @@ public sealed class ClientEmbeddingService
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)] private static extern nint SetWindowLongPtr(nint window, int index, nint value);
     [DllImport("user32.dll")] private static extern bool MoveWindow(nint window, int x, int y, int width, int height, bool repaint);
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint window, int command);
-    [DllImport("user32.dll")] private static extern nint SetFocus(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
-    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
-    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
+    [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
 }

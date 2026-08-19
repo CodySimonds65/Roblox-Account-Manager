@@ -70,24 +70,44 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     public sealed record PluginDiagnostic(string PluginId, string Level, string Message, DateTime Utc);
 
+    internal enum InputDeliveryMode { GuardedReal, BackgroundMessage }
+
+    internal static InputDeliveryMode SelectInputDeliveryMode(bool embedded, bool selectedVisible, bool hostForeground) =>
+        embedded && selectedVisible && hostForeground ? InputDeliveryMode.GuardedReal : InputDeliveryMode.BackgroundMessage;
+
+    internal static bool MatchesInputTarget(ManagedAccountSnapshot expected, ManagedAccountSnapshot? current, nint expectedRoot) =>
+        current is not null && current.IsRunning &&
+        current.ProcessId == expected.ProcessId &&
+        current.ProcessStartTimeUtcTicks == expected.ProcessStartTimeUtcTicks &&
+        current.RootWindowHandle == expectedRoot;
+
     private async Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken)
     {
         var account = Accounts.Snapshot().FirstOrDefault(snapshot => string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
         if (account is null) return BackgroundInputResult.Failure("unknown-account", "The managed account is not running.", nint.Zero, nint.Zero);
-        // Embedded clients (inside the launcher's Clients window) receive REAL input
-        // via SendInput — raw-input consumers such as Roblox ignore posted messages.
-        var embeddedRoot = ClientEmbeddings.EmbeddedRootResolver?.Invoke(accountId);
-        if (embeddedRoot is not null && embeddedRoot != nint.Zero)
+        var embeddedRoot = ClientEmbeddings.RootFor(accountId);
+        var deliveryMode = SelectInputDeliveryMode(
+            embeddedRoot is not null && embeddedRoot != nint.Zero,
+            ClientEmbeddings.IsVisible(accountId),
+            ClientEmbeddings.HostOwnsForeground());
+        if (deliveryMode == InputDeliveryMode.GuardedReal)
         {
-            var activate = ClientEmbeddings.EmbeddedActivate is null
-                ? null
-                : new Action(() => ClientEmbeddings.EmbeddedActivate!.Invoke(accountId));
-            return await _sendInjector.PostAsync(embeddedRoot.Value, events, cancellationToken, activate).ConfigureAwait(false);
+            var expectedRoot = embeddedRoot!.Value;
+            return await _sendInjector.PostAsync(expectedRoot, events, cancellationToken, () =>
+            {
+                var current = Accounts.Snapshot().FirstOrDefault(snapshot =>
+                    string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
+                return ClientEmbeddings.IsVisible(accountId) &&
+                       ClientEmbeddings.HostOwnsForeground() &&
+                       ClientEmbeddings.RootFor(accountId) == expectedRoot &&
+                       MatchesInputTarget(account, current, expectedRoot);
+            }).ConfigureAwait(false);
         }
+
         var result = await _inputBroker.PostAsync(account, events, cancellationToken).ConfigureAwait(false);
-        if (result.Accepted && ClientEmbeddings.EmbeddedRootResolver is not null)
+        if (result.Accepted)
         {
-            return result with { Message = result.Message + " Hint: open the Clients window and select this account for real input injection." };
+            return result with { Message = result.Message + " Delivered as best-effort background input without changing the foreground window or selected tab." };
         }
         return result;
     }

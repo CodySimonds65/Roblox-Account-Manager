@@ -1082,6 +1082,33 @@ Require(unchecked((short)InputSendInjector.WheelData(120)) == 120 && unchecked((
 
 Console.WriteLine("Plugin input injector mapping smoke tests passed.");
 
+Require(PluginRuntime.SelectInputDeliveryMode(embedded: true, selectedVisible: true, hostForeground: true) ==
+        PluginRuntime.InputDeliveryMode.GuardedReal,
+    "A visible embedded foreground client did not select guarded real input.");
+Require(PluginRuntime.SelectInputDeliveryMode(embedded: true, selectedVisible: false, hostForeground: true) ==
+        PluginRuntime.InputDeliveryMode.BackgroundMessage,
+    "A hidden embedded client selected system-wide input.");
+Require(PluginRuntime.SelectInputDeliveryMode(embedded: true, selectedVisible: true, hostForeground: false) ==
+        PluginRuntime.InputDeliveryMode.BackgroundMessage,
+    "An embedded client selected system-wide input while another application was foreground.");
+Require(PluginRuntime.SelectInputDeliveryMode(embedded: false, selectedVisible: false, hostForeground: false) ==
+        PluginRuntime.InputDeliveryMode.BackgroundMessage,
+    "A non-embedded client did not select background input.");
+
+var routeExpected = new ManagedAccountSnapshot(
+    "route-test", "Route test", 314, 159, (nint)0x1111, 0, 0, 800, 600, 96, false,
+    DateTime.UtcNow, true, (nint)0x2222);
+Require(PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { LastActivityUtc = DateTime.UtcNow }, (nint)0x2222),
+    "A current input target was rejected.");
+Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { ProcessStartTimeUtcTicks = 160 }, (nint)0x2222),
+    "A reused process identity was accepted for real input.");
+Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { RootWindowHandle = (nint)0x3333 }, (nint)0x2222),
+    "A changed embedded HWND was accepted for real input.");
+Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { IsRunning = false }, (nint)0x2222),
+    "An exited input target was accepted for real input.");
+
+Console.WriteLine("Plugin input routing smoke tests passed.");
+
 var autopsyRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-autopsy-" + Guid.NewGuid().ToString("N"));
 try
 {

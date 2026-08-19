@@ -80,30 +80,6 @@ public partial class ClientsPanel : UserControl
         }
     }
 
-    public bool ActivateAccount(string accountId)
-    {
-        if (!SelectTab(accountId)) return false;
-        SetViewVisible(true);
-        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
-        {
-            var root = _runtime?.ClientEmbeddings.RootFor(accountId);
-            if (root is not null && root != nint.Zero) EmbeddedInputBridge.FocusEmbedded(root.Value);
-        }));
-        return true;
-    }
-
-    /// <summary>Selects the account, shows the view, and focuses the child
-    /// synchronously — used by playback activation where no WPF click is in
-    /// flight, so injected input must not race the deferred focus.</summary>
-    public bool ActivateAccountForPlayback(string accountId)
-    {
-        if (!SelectTab(accountId)) return false;
-        SetViewVisible(true);
-        var root = _runtime?.ClientEmbeddings.RootFor(accountId);
-        if (root is not null && root != nint.Zero) EmbeddedInputBridge.FocusEmbedded(root.Value);
-        return true;
-    }
-
     public bool IsSelected(string accountId) =>
         ClientTabs.SelectedItem is ManagedAccountSnapshot selected && selected.AccountId == accountId;
 
@@ -207,22 +183,11 @@ public partial class ClientsPanel : UserControl
         Relayout();
         Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
         {
+            if (_runtime?.ClientEmbeddings.HostOwnsForeground() != true ||
+                !_runtime.ClientEmbeddings.IsVisible(selected.AccountId)) return;
             var root = _runtime?.ClientEmbeddings.RootFor(selected.AccountId);
             if (root is not null && root != nint.Zero) EmbeddedInputBridge.FocusEmbedded(root.Value);
         }));
-    }
-
-    private bool SelectTab(string accountId)
-    {
-        for (var i = 0; i < ClientTabs.Items.Count; i++)
-        {
-            if (ClientTabs.Items[i] is ManagedAccountSnapshot item && item.AccountId == accountId)
-            {
-                ClientTabs.SelectedIndex = i;
-                return true;
-            }
-        }
-        return false;
     }
 
     private bool HasTab(string accountId) =>

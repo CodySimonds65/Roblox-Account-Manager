@@ -27,20 +27,16 @@ public sealed class InputSendInjector
         nint rootWindow,
         IReadOnlyList<PluginInputEvent> events,
         CancellationToken cancellationToken,
-        Action? activate = null)
+        Func<bool>? targetValidator = null)
     {
-        if (rootWindow == nint.Zero || events.Count == 0)
+        if (rootWindow == nint.Zero || events.Count == 0 || !IsWindow(rootWindow))
         {
             return BackgroundInputResult.Failure("unavailable", "The embedded client window is unavailable.", GetForegroundWindow(), GetForegroundWindow());
         }
         var foregroundBefore = GetForegroundWindow();
-        try
+        if (!IsSafeTarget(rootWindow, targetValidator))
         {
-            activate?.Invoke();
-        }
-        catch
-        {
-            // Activation failures are not fatal; focus may already be correct.
+            return BackgroundInputResult.Failure("focus-lost", "The embedded client is not the visible foreground target.", foregroundBefore, GetForegroundWindow());
         }
         var posted = 0;
         long previousOffset = 0;
@@ -53,9 +49,9 @@ public sealed class InputSendInjector
             }
             previousOffset = input.OffsetMicroseconds;
             cancellationToken.ThrowIfCancellationRequested();
-            // Never inject into an app the user has switched to: the launcher must
-            // stay foreground and the embedded client visible.
-            if (GetForegroundWindow() != GetAncestor(rootWindow, GaRoot) || !IsWindowVisible(rootWindow))
+            // Revalidate before every event. HWND values can be reused, tabs can
+            // switch, and the user can move to another application during a macro.
+            if (!IsSafeTarget(rootWindow, targetValidator))
             {
                 var after = GetForegroundWindow();
                 return BackgroundInputResult.Failure("focus-lost", "The client lost focus during playback; input was stopped.", foregroundBefore, after, posted);
@@ -71,6 +67,20 @@ public sealed class InputSendInjector
         return new BackgroundInputResult(true, foregroundBefore == foregroundAfter ? "ok" : "foreground-changed",
             foregroundBefore == foregroundAfter ? "All input was injected." : "Input injected; foreground changed externally.",
             posted, foregroundBefore, foregroundAfter);
+    }
+
+    private static bool IsSafeTarget(nint rootWindow, Func<bool>? targetValidator)
+    {
+        if (!IsWindow(rootWindow) || !IsWindowVisible(rootWindow) ||
+            GetForegroundWindow() != GetAncestor(rootWindow, GaRoot)) return false;
+        try
+        {
+            return targetValidator?.Invoke() ?? true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool TryInject(nint rootWindow, PluginInputEvent input, out (string Code, string Message) error)
@@ -171,6 +181,7 @@ public sealed class InputSendInjector
     [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
+    [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(nint window, ref POINT point);
