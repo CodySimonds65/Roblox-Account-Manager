@@ -1,5 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform;
@@ -15,17 +17,36 @@ using RobloxAccountManager.Platform.MacOS;
 using CoreClientWindowManager = RobloxAccountManager.Core.Contracts.IClientWindowManager;
 using CoreRobloxLaunchRequest = RobloxAccountManager.Core.Contracts.RobloxLaunchRequest;
 using CoreRobloxProcessInfo = RobloxAccountManager.Core.Contracts.RobloxProcessInfo;
+using Ellipse = Avalonia.Controls.Shapes.Ellipse;
 
 namespace RobloxAccountManager.Desktop.Views;
 
 public sealed class MainWindow : Window
 {
+    private static readonly SolidColorBrush AppBackgroundBrush = new(Avalonia.Media.Color.Parse("#090B10"));
+    private static readonly SolidColorBrush SurfaceBrush = new(Avalonia.Media.Color.Parse("#11141B"));
+    private static readonly SolidColorBrush ElevatedBrush = new(Avalonia.Media.Color.Parse("#171B24"));
+    private static readonly SolidColorBrush HoverBrush = new(Avalonia.Media.Color.Parse("#1D2230"));
+    private static readonly SolidColorBrush ControlBorderBrush = new(Avalonia.Media.Color.Parse("#272D3A"));
+    private static readonly SolidColorBrush TextBrush = new(Avalonia.Media.Color.Parse("#F5F7FA"));
+    private static readonly SolidColorBrush MutedTextBrush = new(Avalonia.Media.Color.Parse("#929AAD"));
+    private static readonly SolidColorBrush AccentBrush = new(Avalonia.Media.Color.Parse("#7C5CFC"));
+    private static readonly SolidColorBrush AccentHoverBrush = new(Avalonia.Media.Color.Parse("#8C70FF"));
+    private static readonly SolidColorBrush DangerBrush = new(Avalonia.Media.Color.Parse("#281820"));
+    private static readonly SolidColorBrush DangerTextBrush = new(Avalonia.Media.Color.Parse("#FF9BAA"));
+    private static readonly SolidColorBrush SuccessBrush = new(Avalonia.Media.Color.Parse("#35D399"));
+    private static readonly SolidColorBrush InputBrush = new(Avalonia.Media.Color.Parse("#0D1016"));
+    private static readonly SolidColorBrush SelectionSurfaceBrush = new(Avalonia.Media.Color.Parse("#2A234D"));
+    private static readonly SolidColorBrush SelectionBorderBrush = new(Avalonia.Media.Color.Parse("#544394"));
     private readonly DesktopShellViewModel _viewModel;
     private readonly ContentControl _content = new();
     private readonly TextBlock _pageTitle = new();
     private readonly TextBlock _pageDescription = new();
     private readonly TextBox _activity = new();
     private readonly ContentControl _browserHost = new();
+    private readonly ListBox _accountsRail = new();
+    private readonly StackPanel _pageNavigation = new();
+    private readonly Dictionary<string, Button> _pageButtons = new(StringComparer.Ordinal);
     private readonly AvaloniaAccountBrowserSessionService _browserSessions;
     private readonly SerializedLaunchCoordinator? _launches;
     private readonly CoreClientWindowManager? _clients;
@@ -44,56 +65,399 @@ public sealed class MainWindow : Window
         _launches = launches;
         _clients = clients;
         Title = "Roblox Account Manager";
-        Width = 1240;
-        Height = 820;
-        MinWidth = 980;
-        MinHeight = 620;
-
-        var navigation = new ListBox
-        {
-            Width = 205,
-            Margin = new Thickness(12),
-            ItemsSource = _viewModel.Pages,
-            SelectedItem = _viewModel.SelectedPage,
-            Background = Brushes.Transparent
-        };
-        navigation.SelectionChanged += (_, _) =>
-        {
-            if (navigation.SelectedItem is NavigationItemViewModel page)
-            {
-                _viewModel.SelectedPage = page;
-                RenderPage();
-            }
-        };
+        Width = 1380;
+        Height = 860;
+        MinWidth = 1080;
+        MinHeight = 700;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        Background = AppBackgroundBrush;
+        Foreground = TextBrush;
 
         _pageTitle.FontSize = 28;
         _pageTitle.FontWeight = FontWeight.Bold;
+        _pageTitle.Foreground = TextBrush;
         _pageDescription.TextWrapping = TextWrapping.Wrap;
-        _pageDescription.Opacity = 0.8;
+        _pageDescription.Foreground = MutedTextBrush;
         _activity.IsReadOnly = true;
         _activity.AcceptsReturn = true;
         _activity.TextWrapping = TextWrapping.NoWrap;
+        _activity.MinHeight = 96;
+        _activity.Height = 122;
+        _activity.Background = InputBrush;
+        _activity.Foreground = TextBrush;
+        _activity.BorderBrush = ControlBorderBrush;
+        _activity.BorderThickness = new Thickness(1);
+        _activity.Padding = new Thickness(10, 8);
+        _activity.FontSize = 12;
 
-        var header = new StackPanel { Spacing = 5 };
-        header.Children.Add(_pageTitle);
-        header.Children.Add(_pageDescription);
-        header.Children.Add(new TextBlock { Text = _viewModel.PlatformLabel, FontSize = 12, Opacity = 0.6 });
+        var header = BuildWorkspaceHeader();
 
-        var page = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto"), Margin = new Thickness(28) };
+        var page = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,*,Auto"),
+            RowSpacing = 14,
+            Margin = new Thickness(0, 2, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
         page.Children.Add(header);
         Grid.SetRow(_content, 1);
+        _content.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+        _content.VerticalContentAlignment = VerticalAlignment.Stretch;
         page.Children.Add(_content);
-        Grid.SetRow(_activity, 2);
-        _activity.Height = 115;
-        _activity.Margin = new Thickness(0, 16, 0, 0);
-        page.Children.Add(_activity);
+        var activityCard = BuildActivityCard();
+        Grid.SetRow(activityCard, 2);
+        page.Children.Add(activityCard);
 
-        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*") };
-        grid.Children.Add(navigation);
-        Grid.SetColumn(page, 1);
-        grid.Children.Add(new ScrollViewer { Content = page });
+        var workspace = new Border
+        {
+            Background = AppBackgroundBrush,
+            Padding = new Thickness(0, 0, 2, 0),
+            Child = page
+        };
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("286,18,*"),
+            Margin = new Thickness(18),
+            Background = AppBackgroundBrush
+        };
+        grid.Children.Add(BuildSidebar());
+        Grid.SetColumn(workspace, 2);
+        grid.Children.Add(workspace);
         Content = grid;
+        UpdatePageNavigationState();
         Opened += async (_, _) => await InitializeAsync();
+    }
+
+    private Control BuildWorkspaceHeader()
+    {
+        var header = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(2, 3, 2, 0),
+            ColumnSpacing = 18
+        };
+        var copy = new StackPanel { Spacing = 3 };
+        copy.Children.Add(_pageTitle);
+        copy.Children.Add(_pageDescription);
+        copy.Children.Add(new TextBlock { Text = _viewModel.PlatformLabel, FontSize = 11, Foreground = MutedTextBrush });
+        header.Children.Add(copy);
+
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        AddHeaderAction(actions, "Plugins", "plugins");
+        AddHeaderAction(actions, "Settings", "settings");
+        AddHeaderAction(actions, "Diagnostics", "diagnostics");
+        var localOnly = new Border
+        {
+            Background = new SolidColorBrush(Avalonia.Media.Color.Parse("#10261F")),
+            BorderBrush = new SolidColorBrush(Avalonia.Media.Color.Parse("#1C4B3C")),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(11, 8),
+            Child = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 7,
+                Children =
+                {
+                    new Ellipse { Width = 7, Height = 7, Fill = SuccessBrush, VerticalAlignment = VerticalAlignment.Center },
+                    new TextBlock { Text = "LOCAL ONLY", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Avalonia.Media.Color.Parse("#7DE6BC")) }
+                }
+            }
+        };
+        actions.Children.Add(localOnly);
+        Grid.SetColumn(actions, 1);
+        header.Children.Add(actions);
+        return header;
+    }
+
+    private void AddHeaderAction(Panel panel, string title, string pageKey)
+    {
+        var button = new Button { Content = title, Padding = new Thickness(13, 7) };
+        StyleButton(button, secondary: true);
+        button.Click += (_, _) => SelectPage(pageKey);
+        panel.Children.Add(button);
+    }
+
+    private Border BuildSidebar()
+    {
+        _accountsRail.ItemsSource = _viewModel.Accounts;
+        _accountsRail.Height = 254;
+        _accountsRail.Background = Brushes.Transparent;
+        _accountsRail.BorderThickness = new Thickness(0);
+        _accountsRail.SelectionMode = SelectionMode.Single;
+        _accountsRail.ItemTemplate = new FuncDataTemplate<AccountProfile>((account, _) => BuildAccountRailRow(account));
+        _accountsRail.SelectionChanged += async (_, _) =>
+        {
+            if (_accountsRail.SelectedItem is not AccountProfile account) return;
+            _viewModel.SelectedAccount = account;
+            await OpenAccountAsync(account);
+            SelectPage("accounts");
+        };
+
+        var shell = new StackPanel { Spacing = 0 };
+        var brand = new Grid { ColumnDefinitions = new ColumnDefinitions("44,*"), Margin = new Thickness(2, 1, 2, 25) };
+        brand.Children.Add(new Border
+        {
+            Width = 38,
+            Height = 38,
+            CornerRadius = new CornerRadius(11),
+            Background = AccentBrush,
+            Child = new TextBlock { Text = "R", FontSize = 18, FontWeight = FontWeight.Bold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }
+        });
+        var brandText = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+        brandText.Children.Add(new TextBlock { Text = "Account Manager", FontSize = 18, FontWeight = FontWeight.SemiBold });
+        brandText.Children.Add(new TextBlock { Text = "Roblox launcher", FontSize = 12, Foreground = MutedTextBrush });
+        Grid.SetColumn(brandText, 1);
+        brand.Children.Add(brandText);
+        shell.Children.Add(brand);
+
+        var profilesHeader = new Grid { Margin = new Thickness(2, 0, 2, 9) };
+        profilesHeader.Children.Add(new TextBlock { Text = "ACCOUNT PROFILES", FontSize = 11, FontWeight = FontWeight.SemiBold, Foreground = MutedTextBrush });
+        profilesHeader.Children.Add(new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Background = new SolidColorBrush(Avalonia.Media.Color.Parse("#211D38")),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(7, 2),
+            Child = new TextBlock { Text = "MULTI-SELECT", FontSize = 9, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Avalonia.Media.Color.Parse("#B5A7FF")) }
+        });
+        shell.Children.Add(profilesHeader);
+        shell.Children.Add(_accountsRail);
+
+        var accountActions = new StackPanel { Spacing = 8, Margin = new Thickness(0, 14, 0, 0) };
+        var add = new Button { Content = "＋  Add account profile", HorizontalContentAlignment = HorizontalAlignment.Center };
+        StyleButton(add);
+        add.Click += async (_, _) =>
+        {
+            var values = await PromptAsync("New account profile", "Roblox account", string.Empty);
+            if (values is null) return;
+            _viewModel.Accounts.Add(new AccountProfile { Label = values.Value.Label, Group = values.Value.Group, SortOrder = _viewModel.Accounts.Count });
+            await SaveAsync();
+            RenderPage();
+        };
+        accountActions.Children.Add(add);
+
+        var edit = new Button { Content = "Edit profile" };
+        StyleButton(edit, secondary: true);
+        edit.Click += async (_, _) =>
+        {
+            if (_viewModel.SelectedAccount is null) return;
+            var account = _viewModel.SelectedAccount;
+            var values = await PromptAsync("Edit account profile", account.Label, account.Group);
+            if (values is null) return;
+            account.Label = values.Value.Label;
+            account.Group = values.Value.Group;
+            await SaveAsync();
+            RenderPage();
+        };
+        var reorder = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 6 };
+        reorder.Children.Add(edit);
+        var moveUp = new Button { Content = "↑", Width = 34, Padding = new Thickness(6, 5) };
+        StyleButton(moveUp, secondary: true);
+        moveUp.Click += async (_, _) => await MoveSelectedAccountAsync(-1);
+        Grid.SetColumn(moveUp, 1);
+        reorder.Children.Add(moveUp);
+        var moveDown = new Button { Content = "↓", Width = 34, Padding = new Thickness(6, 5) };
+        StyleButton(moveDown, secondary: true);
+        moveDown.Click += async (_, _) => await MoveSelectedAccountAsync(1);
+        Grid.SetColumn(moveDown, 2);
+        reorder.Children.Add(moveDown);
+        accountActions.Children.Add(reorder);
+
+        var remove = new Button { Content = "Remove selected session" };
+        StyleButton(remove, danger: true);
+        remove.Click += async (_, _) =>
+        {
+            if (_viewModel.SelectedAccount is null || !await ConfirmAsync($"Remove '{_viewModel.SelectedAccount.Label}' and clear its browser session?")) return;
+            var account = _viewModel.SelectedAccount;
+            try { await _browserSessions.RemoveAsync(account.Id); }
+            catch (Exception exception) { _viewModel.AppendActivity($"Browser data cleanup skipped: {exception.Message}"); }
+            _viewModel.Accounts.Remove(account);
+            _viewModel.SelectedAccount = null;
+            await SaveAsync();
+            RenderPage();
+        };
+        accountActions.Children.Add(remove);
+        var selectionActions = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 8 };
+        var selectAll = new Button { Content = "Select all", Padding = new Thickness(10, 6) };
+        StyleButton(selectAll, secondary: true);
+        selectAll.Click += (_, _) =>
+        {
+            foreach (var account in _viewModel.Accounts) _queueSelectedAccounts.Add(account.Id);
+            RefreshAccountRail();
+            RenderPage();
+        };
+        selectionActions.Children.Add(selectAll);
+        var selectNone = new Button { Content = "Select none", Padding = new Thickness(10, 6) };
+        StyleButton(selectNone, secondary: true);
+        selectNone.Click += (_, _) =>
+        {
+            _queueSelectedAccounts.Clear();
+            RefreshAccountRail();
+            RenderPage();
+        };
+        Grid.SetColumn(selectNone, 1);
+        selectionActions.Children.Add(selectNone);
+        accountActions.Children.Add(selectionActions);
+
+        var transferActions = new WrapPanel { Orientation = Orientation.Horizontal, ItemWidth = 82, ItemHeight = 32 };
+        var export = new Button { Content = "Export", Padding = new Thickness(10, 6) };
+        StyleButton(export, secondary: true);
+        export.Click += async (_, _) =>
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "roblox-account-manager-profile-export.json");
+            await ProfileTransferService.ExportAsync(path, _viewModel.Accounts, _viewModel.Presets, _viewModel.Settings);
+            _viewModel.AppendActivity($"Exported profiles, presets, and settings to {path}. Browser cookies were not included.");
+        };
+        transferActions.Children.Add(export);
+        var import = new Button { Content = "Import", Padding = new Thickness(10, 6) };
+        StyleButton(import, secondary: true);
+        import.Click += async (_, _) =>
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "roblox-account-manager-profile-export.json");
+            if (!File.Exists(path)) { _viewModel.AppendActivity($"Import file not found: {path}"); return; }
+            try
+            {
+                var package = await ProfileTransferService.ImportAsync(path);
+                foreach (var account in package.Accounts)
+                {
+                    account.Id = Guid.NewGuid().ToString("N");
+                    account.SortOrder = _viewModel.Accounts.Count;
+                    _viewModel.Accounts.Add(account);
+                }
+                foreach (var preset in package.Presets.Where(item => _viewModel.Presets.All(existing => !string.Equals(existing.Name, item.Name, StringComparison.OrdinalIgnoreCase)))) _viewModel.Presets.Add(preset);
+                _viewModel.ImportSettings(package.Settings);
+                await SaveAsync();
+                _viewModel.AppendActivity($"Imported {package.Accounts.Count} profile(s) and {package.Presets.Count} preset(s). Sign in again in each new browser session.");
+                RenderPage();
+            }
+            catch (Exception exception) { _viewModel.AppendActivity($"Profile import rejected: {exception.Message}"); }
+        };
+        transferActions.Children.Add(import);
+        accountActions.Children.Add(transferActions);
+        accountActions.Children.Add(new TextBlock { Text = "Sessions stay isolated and local to this PC.", TextWrapping = TextWrapping.Wrap, FontSize = 11, Foreground = MutedTextBrush, Margin = new Thickness(3, 5, 3, 0) });
+        shell.Children.Add(accountActions);
+
+        shell.Children.Add(new TextBlock { Text = "PAGES", FontSize = 11, FontWeight = FontWeight.SemiBold, Foreground = MutedTextBrush, Margin = new Thickness(2, 22, 2, 9) });
+        foreach (var page in _viewModel.Pages)
+        {
+            var button = new Button
+            {
+                Content = new TextBlock { Text = page.Title, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis },
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Padding = new Thickness(11, 8),
+                Margin = new Thickness(0, 0, 0, 4),
+                Tag = page
+            };
+            StyleButton(button, navigation: true);
+            button.Click += (_, _) => SelectPage(page.Key);
+            _pageButtons[page.Key] = button;
+            _pageNavigation.Children.Add(button);
+        }
+        shell.Children.Add(_pageNavigation);
+
+        return new Border
+        {
+            Background = SurfaceBrush,
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(16),
+            Padding = new Thickness(17),
+            Child = new ScrollViewer
+            {
+                Content = shell,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            }
+        };
+    }
+
+    private Control BuildAccountRailRow(AccountProfile account)
+    {
+        var open = new CheckBox { Content = new StackPanel { Spacing = 1, Children = { new TextBlock { Text = account.Label, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis }, new TextBlock { Text = string.IsNullOrWhiteSpace(account.Group) ? "" : account.Group, FontSize = 10, Foreground = MutedTextBrush, TextTrimming = TextTrimming.CharacterEllipsis } } }, IsChecked = _queueSelectedAccounts.Contains(account.Id), Foreground = TextBrush, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Center };
+        open.Click += async (_, _) =>
+        {
+            if (open.IsChecked == true) _queueSelectedAccounts.Add(account.Id);
+            else _queueSelectedAccounts.Remove(account.Id);
+            _viewModel.SelectedAccount = account;
+            await OpenAccountAsync(account);
+            SelectPage("accounts");
+        };
+        var favorite = new Button { Content = account.IsFavorite ? "★" : "☆", Padding = new Thickness(6, 2), FontSize = 18, Background = Brushes.Transparent, BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0), Foreground = account.IsFavorite ? new SolidColorBrush(Avalonia.Media.Color.Parse("#F5C451")) : MutedTextBrush };
+        favorite.Click += async (_, _) =>
+        {
+            account.IsFavorite = !account.IsFavorite;
+            favorite.Content = account.IsFavorite ? "★" : "☆";
+            favorite.Foreground = account.IsFavorite ? new SolidColorBrush(Avalonia.Media.Color.Parse("#F5C451")) : MutedTextBrush;
+            await SaveAsync();
+        };
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(0, 0, 0, 4) };
+        Grid.SetColumn(favorite, 1);
+        row.Children.Add(open);
+        row.Children.Add(favorite);
+        return new Border { Background = _viewModel.SelectedAccount?.Id == account.Id ? SelectionSurfaceBrush : Brushes.Transparent, BorderBrush = _viewModel.SelectedAccount?.Id == account.Id ? SelectionBorderBrush : Brushes.Transparent, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Child = row };
+    }
+
+    private Border BuildActivityCard()
+    {
+        var layout = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), RowSpacing = 9 };
+        var title = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        title.Children.Add(new TextBlock { Text = "Activity", FontSize = 13, FontWeight = FontWeight.SemiBold });
+        title.Children.Add(new TextBlock { Text = "Live diagnostics", FontSize = 11, Foreground = MutedTextBrush, VerticalAlignment = VerticalAlignment.Center });
+        layout.Children.Add(title);
+        Grid.SetRow(_activity, 1);
+        layout.Children.Add(_activity);
+        return new Border { Background = SurfaceBrush, BorderBrush = ControlBorderBrush, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), Padding = new Thickness(13), Child = layout };
+    }
+
+    private static void StyleButton(Button button, bool secondary = false, bool danger = false, bool navigation = false)
+    {
+        button.FontSize = navigation ? 12 : 13;
+        button.FontWeight = FontWeight.SemiBold;
+        button.Foreground = danger ? DangerTextBrush : TextBrush;
+        button.Background = danger ? DangerBrush : secondary || navigation ? HoverBrush : AccentBrush;
+        button.BorderBrush = danger ? new SolidColorBrush(Avalonia.Media.Color.Parse("#4A2732")) : secondary ? ControlBorderBrush : AccentBrush;
+        button.BorderThickness = new Thickness(1);
+        button.Padding = navigation ? new Thickness(11, 8) : new Thickness(15, 9);
+        if (!navigation) button.HorizontalContentAlignment = HorizontalAlignment.Center;
+        button.PointerEntered += (_, _) =>
+        {
+            if (button.IsEnabled && !navigation) button.Background = danger ? new SolidColorBrush(Avalonia.Media.Color.Parse("#3A2029")) : secondary ? new SolidColorBrush(Avalonia.Media.Color.Parse("#282E3D")) : AccentHoverBrush;
+        };
+        button.PointerExited += (_, _) =>
+        {
+            if (!navigation) button.Background = danger ? DangerBrush : secondary ? HoverBrush : AccentBrush;
+        };
+    }
+
+    private void SelectPage(string pageKey)
+    {
+        var page = _viewModel.Pages.FirstOrDefault(candidate => string.Equals(candidate.Key, pageKey, StringComparison.Ordinal));
+        if (page is null) return;
+        _viewModel.SelectedPage = page;
+        UpdatePageNavigationState();
+        RenderPage();
+    }
+
+    private void UpdatePageNavigationState()
+    {
+        foreach (var item in _pageButtons)
+        {
+            var selected = item.Key == _viewModel.SelectedPage.Key;
+            item.Value.Background = selected ? SelectionSurfaceBrush : Brushes.Transparent;
+            item.Value.BorderBrush = selected ? SelectionBorderBrush : Brushes.Transparent;
+        }
+    }
+
+    private void RefreshAccountRail()
+    {
+        var selected = _accountsRail.SelectedItem;
+        _accountsRail.ItemsSource = null;
+        _accountsRail.ItemsSource = _viewModel.Accounts;
+        _accountsRail.SelectedItem = selected;
     }
 
     private async Task InitializeAsync()
@@ -110,7 +474,9 @@ public sealed class MainWindow : Window
             if (_viewModel.Accounts.Count > 0)
             {
                 _viewModel.SelectedAccount = _viewModel.Accounts[0];
+                _accountsRail.SelectedItem = _viewModel.SelectedAccount;
                 await OpenAccountAsync(_viewModel.SelectedAccount);
+                RenderPage();
             }
         }
         catch (Exception exception)
@@ -122,12 +488,13 @@ public sealed class MainWindow : Window
 
     private void RenderPage()
     {
-        _pageTitle.Text = _viewModel.SelectedPage.Title;
-        _pageDescription.Text = _viewModel.PageStatus;
+        DetachBrowserHost();
+        var isWorkspace = _viewModel.SelectedPage.Key is "accounts" or "browser";
+        _pageTitle.Text = isWorkspace ? "Launch workspace" : _viewModel.SelectedPage.Title;
+        _pageDescription.Text = isWorkspace ? "Choose profiles, pick a game, and launch every client in sequence." : _viewModel.PageStatus;
         _content.Content = _viewModel.SelectedPage.Key switch
         {
-            "accounts" => BuildAccountsPage(),
-            "browser" => BuildBrowserPage(),
+            "accounts" or "browser" => BuildLaunchWorkspacePage(),
             "presets" => BuildPresetsPage(),
             "queue" => BuildQueuePage(),
             "clients" => BuildClientsPage(),
@@ -138,6 +505,165 @@ public sealed class MainWindow : Window
             "diagnostics" => BuildDiagnosticsPage(),
             _ => new TextBlock { Text = "Select a page." }
         };
+    }
+
+    private void DetachBrowserHost()
+    {
+        switch (_browserHost.Parent)
+        {
+            case Panel panel:
+                panel.Children.Remove(_browserHost);
+                break;
+            case ContentControl content when ReferenceEquals(content.Content, _browserHost):
+                content.Content = null;
+                break;
+            case Decorator decorator when ReferenceEquals(decorator.Child, _browserHost):
+                decorator.Child = null;
+                break;
+        }
+    }
+
+    private Control BuildLaunchWorkspacePage()
+    {
+        var selectedPreset = _viewModel.SelectedPreset ?? _viewModel.Presets.FirstOrDefault();
+        var presetPicker = new ComboBox
+        {
+            ItemsSource = _viewModel.Presets,
+            SelectedItem = selectedPreset,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            MinWidth = 260,
+            Background = InputBrush,
+            Foreground = TextBrush,
+            BorderBrush = ControlBorderBrush,
+            Padding = new Thickness(11, 8)
+        };
+        presetPicker.SelectionChanged += (_, _) => _viewModel.SelectedPreset = presetPicker.SelectedItem as GamePreset;
+
+        var consent = new CheckBox
+        {
+            Content = "I consent to macOS multi-instance semaphore changes",
+            IsChecked = _viewModel.Settings.MultiInstanceConsentGranted,
+            Foreground = TextBrush,
+            Margin = new Thickness(0, 7, 0, 0)
+        };
+        var presetControls = new StackPanel { Spacing = 5 };
+        presetControls.Children.Add(new TextBlock { Text = "GAME PRESET", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush });
+        presetControls.Children.Add(presetPicker);
+        presetControls.Children.Add(consent);
+
+        var customUrl = new Border
+        {
+            Background = InputBrush,
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(11, 10),
+            Child = new TextBlock
+            {
+                Text = selectedPreset is null ? "Choose a game preset" : selectedPreset.Url,
+                Foreground = MutedTextBrush,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                MaxWidth = 260
+            }
+        };
+        var customUrlPanel = new StackPanel { Spacing = 5, Margin = new Thickness(12, 0, 0, 0) };
+        customUrlPanel.Children.Add(new TextBlock { Text = "CUSTOM ROBLOX URL", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush });
+        customUrlPanel.Children.Add(customUrl);
+
+        var login = new Button { Content = "Login / Home", Margin = new Thickness(12, 16, 8, 0), VerticalAlignment = VerticalAlignment.Top };
+        StyleButton(login, secondary: true);
+        login.Click += async (_, _) =>
+        {
+            SelectPage("browser");
+            if (_viewModel.SelectedAccount is not null)
+                await _browserSessions.NavigateAsync(_viewModel.SelectedAccount.Id, new Uri("https://www.roblox.com/home"));
+        };
+        var accounts = _viewModel.Accounts.Where(account => _queueSelectedAccounts.Contains(account.Id)).ToList();
+        if (accounts.Count == 0 && _viewModel.SelectedAccount is not null) accounts.Add(_viewModel.SelectedAccount);
+        var launch = new Button { Content = "▶  Auto-launch selected", IsEnabled = _launches is not null, Margin = new Thickness(0, 16, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+        StyleButton(launch);
+        launch.Click += async (_, _) => await RunLaunchQueueAsync(consent.IsChecked == true, presetPicker.SelectedItem as GamePreset, accounts);
+
+        var presetBar = new Border
+        {
+            Background = SurfaceBrush,
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            Padding = new Thickness(15),
+            Margin = new Thickness(0, 0, 0, 0),
+            Child = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,*,Auto,Auto"),
+                ColumnSpacing = 0,
+                Children = { presetControls, customUrlPanel, login, launch }
+            }
+        };
+        Grid.SetColumn(customUrlPanel, 1);
+        Grid.SetColumn(login, 2);
+        Grid.SetColumn(launch, 3);
+
+        var sessionHeader = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Background = ElevatedBrush, MinHeight = 46 };
+        var sessionName = _viewModel.SelectedAccount?.Label ?? "No profile selected";
+        var sessionTitle = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(15, 0) };
+        sessionTitle.Children.Add(new Ellipse { Width = 8, Height = 8, Fill = AccentBrush });
+        sessionTitle.Children.Add(new TextBlock { Text = sessionName, FontSize = 13, FontWeight = FontWeight.SemiBold });
+        sessionTitle.Children.Add(new TextBlock { Text = "•  SESSION", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush, VerticalAlignment = VerticalAlignment.Center });
+        sessionHeader.Children.Add(sessionTitle);
+        var sessionActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
+        var browse = new Button { Content = "Browse", Padding = new Thickness(14, 5) };
+        StyleButton(browse, secondary: true);
+        browse.Click += (_, _) => SelectPage("browser");
+        var clients = new Button { Content = "Clients", Padding = new Thickness(14, 5) };
+        StyleButton(clients, secondary: true);
+        clients.Click += (_, _) => SelectPage("clients");
+        sessionActions.Children.Add(browse);
+        sessionActions.Children.Add(clients);
+        Grid.SetColumn(sessionActions, 1);
+        sessionHeader.Children.Add(sessionActions);
+
+        _browserHost.MinHeight = 320;
+        _browserHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _browserHost.VerticalAlignment = VerticalAlignment.Stretch;
+        _browserHost.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+        _browserHost.VerticalContentAlignment = VerticalAlignment.Stretch;
+        _browserHost.Margin = new Thickness(0);
+        if (_viewModel.SelectedAccount is null)
+        {
+            _browserHost.Content = new StackPanel
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Spacing = 5,
+                Children =
+                {
+                    new TextBlock { Text = "Select an account profile", FontSize = 16, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Center },
+                    new TextBlock { Text = "Its private Roblox session will open here.", Foreground = MutedTextBrush, HorizontalAlignment = HorizontalAlignment.Center }
+                }
+            };
+        }
+        else
+        {
+            _ = OpenAccountAsync(_viewModel.SelectedAccount);
+        }
+
+        var browserBody = new Grid { RowDefinitions = new RowDefinitions("46,3,*"), Background = InputBrush, ClipToBounds = true };
+        browserBody.Children.Add(sessionHeader);
+        var progress = new Border { Background = AccentBrush, Height = 3, HorizontalAlignment = HorizontalAlignment.Stretch };
+        Grid.SetRow(progress, 1);
+        browserBody.Children.Add(progress);
+        Grid.SetRow(_browserHost, 2);
+        browserBody.Children.Add(_browserHost);
+        var browserCard = new Border { Background = SurfaceBrush, BorderBrush = ControlBorderBrush, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), ClipToBounds = true, Child = browserBody };
+
+        var workspace = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto"), RowSpacing = 14, ClipToBounds = true };
+        workspace.Children.Add(presetBar);
+        Grid.SetRow(browserCard, 1);
+        workspace.Children.Add(browserCard);
+        var hint = new TextBlock { Text = "Sessions stay isolated and local to this PC. Browser data is never included in exports.", FontSize = 11, Foreground = MutedTextBrush, Margin = new Thickness(3, 0, 3, 0) };
+        Grid.SetRow(hint, 2);
+        workspace.Children.Add(hint);
+        return workspace;
     }
 
     private Control BuildAccountsPage()
@@ -586,7 +1112,28 @@ public sealed class MainWindow : Window
         catch (Exception exception) { _viewModel.AppendActivity($"Could not save local data: {exception.Message}"); }
     }
 
-    private static Border Card(Control child) => new() { Padding = new Thickness(18), Margin = new Thickness(0, 18, 0, 0), BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Child = child };
+    private async Task MoveSelectedAccountAsync(int offset)
+    {
+        if (_viewModel.SelectedAccount is null) return;
+        var index = _viewModel.Accounts.IndexOf(_viewModel.SelectedAccount);
+        var target = index + offset;
+        if (index < 0 || target < 0 || target >= _viewModel.Accounts.Count) return;
+        _viewModel.Accounts.Move(index, target);
+        for (var i = 0; i < _viewModel.Accounts.Count; i++) _viewModel.Accounts[i].SortOrder = i;
+        await SaveAsync();
+    }
+
+    private static Border Card(Control child) => new()
+    {
+        Background = SurfaceBrush,
+        Padding = new Thickness(18),
+        Margin = new Thickness(0, 0, 0, 0),
+        BorderBrush = ControlBorderBrush,
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(14),
+        HorizontalAlignment = HorizontalAlignment.Stretch,
+        Child = child
+    };
 
     private async Task<(string Label, string Group)?> PromptAsync(string title, string labelValue, string groupValue)
     {
