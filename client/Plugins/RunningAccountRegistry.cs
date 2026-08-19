@@ -53,8 +53,12 @@ public sealed class RunningAccountRegistry : IDisposable
         ArgumentNullException.ThrowIfNull(account);
         ArgumentNullException.ThrowIfNull(process);
         process.Refresh();
+        if (process.HasExited)
+            throw new InvalidOperationException("A process that has already exited cannot be registered.");
         var startTicks = process.StartTime.ToUniversalTime().Ticks;
-        var executablePath = TryGetExecutablePath(process) ?? string.Empty;
+        var executablePath = TryGetExecutablePath(process);
+        if (string.IsNullOrWhiteSpace(executablePath))
+            throw new InvalidOperationException("The process executable identity could not be verified.");
         lock (_gate)
         {
             _stopping.Remove(account.Id);

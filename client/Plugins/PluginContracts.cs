@@ -44,7 +44,9 @@ public sealed record ManagedAccountSnapshot(
     DateTime LastActivityUtc,
     bool IsRunning,
     nint RootWindowHandle = 0,
-    int? ExitCode = null);
+    int? ExitCode = null,
+    string? Platform = null,
+    string? WindowIdentifier = null);
 
 public sealed record ThemePalette(
     string Background,
@@ -136,7 +138,12 @@ public sealed record PluginManifest(
     string? Icon = null,
     string? UpdateFeed = null,
     string? MinHostVersion = null,
-    bool AutostartDefault = false);
+    bool AutostartDefault = false,
+    IReadOnlyDictionary<string, string>? EntryPoints = null,
+    string? SelectedRuntimeIdentifier = null)
+{
+    public bool IsAvailableOnCurrentPlatform => !string.IsNullOrWhiteSpace(EntryPoint);
+}
 
 public sealed record InstalledPlugin(
     PluginManifest Manifest,
@@ -207,7 +214,11 @@ internal sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<Manage
             value.GetProperty("lastActivityUtc").GetDateTime(),
             value.GetProperty("isRunning").GetBoolean(),
             value.TryGetProperty("rootWindowHandle", out var root) ? (nint)root.GetInt64() : nint.Zero,
-            value.TryGetProperty("exitCode", out var exitCode) && exitCode.ValueKind != JsonValueKind.Null ? exitCode.GetInt32() : null);
+            value.TryGetProperty("exitCode", out var exitCode) && exitCode.ValueKind != JsonValueKind.Null ? exitCode.GetInt32() : null,
+            value.TryGetProperty("platform", out var platform) && platform.ValueKind == JsonValueKind.String ? platform.GetString() : null,
+            value.TryGetProperty("windowIdentifier", out var windowIdentifier) && windowIdentifier.ValueKind == JsonValueKind.String
+                ? windowIdentifier.GetString()
+                : null);
     }
 
     public override void Write(Utf8JsonWriter writer, ManagedAccountSnapshot value, JsonSerializerOptions options)
@@ -231,6 +242,8 @@ internal sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<Manage
         {
             writer.WriteNumber("exitCode", exitCode);
         }
+        if (value.Platform is not null) writer.WriteString("platform", value.Platform);
+        if (value.WindowIdentifier is not null) writer.WriteString("windowIdentifier", value.WindowIdentifier);
         writer.WriteEndObject();
     }
 }

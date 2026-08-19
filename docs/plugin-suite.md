@@ -22,6 +22,30 @@ The host, SDK, installer, foreground coordinator, action bridge, lifecycle super
 
 The remaining non-blocking polish is restoring minimized/maximized state on RESET and distributing GRID across multiple work areas. Neither item may introduce activation or a foreground-input fallback.
 
+## Cross-platform manifests
+
+Schema 1 remains Windows-compatible. Schema 2 selects an exact runtime entrypoint and accepts only `win-x64`, `osx-arm64`, and `osx-x64` keys:
+
+```json
+{
+  "schemaVersion": 2,
+  "id": "io.github.example.plugin",
+  "name": "Example",
+  "version": "2.0.0",
+  "contractVersion": "1.0",
+  "publisher": "Example",
+  "description": "Portable plugin",
+  "capabilities": ["host.accounts.read"],
+  "entryPoints": {
+    "win-x64": "windows/plugin.exe",
+    "osx-arm64": "macos-arm64/plugin",
+    "osx-x64": "macos-x64/plugin"
+  }
+}
+```
+
+A plugin without an entrypoint for the current RID stays visible but is unavailable. macOS does not silently substitute synthetic input, screen reading, or global input; those requests return the stable `platform-not-supported` result. Account snapshots may include `platform` and `windowIdentifier`; numeric Windows handles remain for legacy consumers.
+
 ## Release publishing
 
 Launcher releases are published after a merged PR whose title starts with `release:` or whose labels include `release` (the existing `fix`, `feat`, `chore`, `minor`, and `major` conventions remain supported). Each RAM plugin repository has an independent tag/manual-dispatch workflow that builds `plugin.json`, `plugin.zip`, `plugin.sha256`, and `plugin.sig`; it fails closed unless the Ed25519 private/public signing secrets are configured and the public key matches the launcher trust anchor.

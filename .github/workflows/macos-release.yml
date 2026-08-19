@@ -1,0 +1,218 @@
+name: Signed macOS release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing draft release tag
+        required: true
+        type: string
+      functional_matrix_passed:
+        description: Confirm both real-Mac functional matrices passed
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - name: Resolve verified draft tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "Invalid release tag." >&2; exit 1;
+          }
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$REQUESTED_TAG")"
+          test "$(jq -r .draft <<<"$release_json")" = "true" || {
+            echo "The selected release is not a draft." >&2; exit 1;
+          }
+          test "$(jq -r .tag_name <<<"$release_json")" = "$REQUESTED_TAG" || {
+            echo "Release tag mismatch." >&2; exit 1;
+          }
+          release_target="$(jq -r .target_commitish <<<"$release_json")"
+          git init verified-release
+          git -C verified-release remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C verified-release fetch --no-tags origin \
+            "refs/tags/$REQUESTED_TAG:refs/tags/$REQUESTED_TAG"
+          git -C verified-release fetch --no-tags origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          commit_sha="$(git -C verified-release rev-parse "$REQUESTED_TAG^{commit}")"
+          [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Unable to resolve immutable release commit." >&2; exit 1; }
+          test "$release_target" = "$commit_sha" || {
+            echo "Draft release target does not match its tag commit." >&2; exit 1;
+          }
+          git -C verified-release merge-base --is-ancestor "$commit_sha" refs/remotes/origin/main || {
+            echo "Draft release commit is not reachable from main." >&2; exit 1;
+          }
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+
+  package:
+    if: inputs.functional_matrix_passed == true
+    needs: resolve
+    environment: macos-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            rid: osx-arm64
+          - runner: macos-15-intel
+            rid: osx-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - name: Require signing and notarization credentials
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          INSTALLER_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_PASSWORD }}
+          INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+          APPLE_ID: ${{ secrets.APPLE_NOTARY_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          ROBLOX_TEAM_ID: ${{ secrets.ROBLOX_DEVELOPER_TEAM_ID }}
+        run: |
+          for name in CERTIFICATE CERTIFICATE_PASSWORD SIGNING_IDENTITY INSTALLER_CERTIFICATE INSTALLER_CERTIFICATE_PASSWORD INSTALLER_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_PASSWORD ROBLOX_TEAM_ID; do
+            test -n "${!name}" || { echo "Missing required secret: $name" >&2; exit 1; }
+          done
+          [[ "$SIGNING_IDENTITY" =~ ^Developer[[:space:]]ID[[:space:]]Application:[[:space:]].+\(${APPLE_TEAM_ID}\)$ ]] || {
+            echo "Developer ID Application identity is not pinned to APPLE_TEAM_ID." >&2; exit 1;
+          }
+          [[ "$INSTALLER_IDENTITY" =~ ^Developer[[:space:]]ID[[:space:]]Installer:[[:space:]].+\(${APPLE_TEAM_ID}\)$ ]] || {
+            echo "Developer ID Installer identity is not pinned to APPLE_TEAM_ID." >&2; exit 1;
+          }
+      - name: Test and publish
+        run: |
+          dotnet run --project tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release
+          dotnet run --project tests/RobloxAccountManager.Platform.MacOS.Tests/RobloxAccountManager.Platform.MacOS.Tests.csproj -c Release
+          version="${{ needs.resolve.outputs.release_tag }}"
+          version="${version#v}"
+          dotnet publish src/RobloxAccountManager.Desktop/RobloxAccountManager.Desktop.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -p:Version="$version" -o publish
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          INSTALLER_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/ram-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          printf '%s' "$INSTALLER_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/developer-id-installer.p12"
+          security import "$RUNNER_TEMP/developer-id-installer.p12" -P "$INSTALLER_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+      - name: Build, sign, notarize, and staple PKG
+        env:
+          SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+          APPLE_ID: ${{ secrets.APPLE_NOTARY_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          RAM_TRUSTED_ROBLOX_TEAM_ID: ${{ secrets.ROBLOX_DEVELOPER_TEAM_ID }}
+          RAM_TRUSTED_INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve.outputs.release_tag }}"; version="${version#v}"
+          app_version="${version%%-*}"
+          package_version="${GITHUB_RUN_NUMBER}"
+          [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "The release tag must have a numeric 3-part base version for macOS packaging." >&2
+            exit 1
+          }
+          mkdir -p dist
+          app="dist/Roblox Account Manager.app"
+          bash build/macos/package-app.sh publish "$app" "$app_version"
+          printf '%s\n' "$RAM_TRUSTED_ROBLOX_TEAM_ID" > "$app/Contents/Resources/RobloxDeveloperTeamIdentifier"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$app/Contents/Info.plist"
+          find "$app/Contents/MacOS" -type f \( -name '*.dylib' -o -perm -111 \) -print0 | while IFS= read -r -d '' item; do
+            codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$item"
+          done
+          codesign --force --timestamp --options runtime --entitlements build/macos/RobloxAccountManager.entitlements --sign "$SIGNING_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/app.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/app.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+
+          pkg="dist/RobloxAccountManager-${version}-${{ matrix.rid }}.pkg"
+          bash build/macos/package-pkg.sh "$app" "$pkg" "${{ matrix.rid }}" "$package_version" "$INSTALLER_IDENTITY" "$SIGNING_IDENTITY"
+          xcrun notarytool submit "$pkg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait
+          xcrun stapler staple "$pkg"
+          bash build/macos/package-pkg.sh --verify "$pkg" "$INSTALLER_IDENTITY"
+          (cd dist && shasum -a 256 "$(basename "$pkg")" > "$(basename "$pkg").sha256")
+      - name: Stage architecture artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.rid }}
+          path: |
+            dist/*.pkg
+            dist/*.pkg.sha256
+          if-no-files-found: error
+
+  publish:
+    if: inputs.functional_matrix_passed == true
+    needs: [resolve, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download both architecture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*
+          path: dist
+          merge-multiple: true
+      - name: Publish only to the still-draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          is_draft="$(gh release view "${{ needs.resolve.outputs.release_tag }}" --json isDraft --jq .isDraft)"
+          test "$is_draft" = "true" || { echo "Refusing to mutate a published release." >&2; exit 1; }
+          shopt -s nullglob
+          release_tag="${{ needs.resolve.outputs.release_tag }}"
+          version="${release_tag#v}"
+          artifacts=(dist/*.pkg dist/*.pkg.sha256)
+          expected=(
+            "dist/RobloxAccountManager-${version}-osx-arm64.pkg"
+            "dist/RobloxAccountManager-${version}-osx-arm64.pkg.sha256"
+            "dist/RobloxAccountManager-${version}-osx-x64.pkg"
+            "dist/RobloxAccountManager-${version}-osx-x64.pkg.sha256"
+          )
+          ((${#artifacts[@]} == 4)) || { echo "Expected exactly four staged macOS artifacts." >&2; exit 1; }
+          for artifact in "${expected[@]}"; do
+            test -f "$artifact" || { echo "Missing expected artifact: $artifact" >&2; exit 1; }
+          done
+          (cd dist && shasum -a 256 -c \
+            "RobloxAccountManager-${version}-osx-arm64.pkg.sha256" \
+            "RobloxAccountManager-${version}-osx-x64.pkg.sha256")
+          gh release upload "${{ needs.resolve.outputs.release_tag }}" "${artifacts[@]}" --clobber
+          is_draft="$(gh release view "${{ needs.resolve.outputs.release_tag }}" --json isDraft --jq .isDraft)"
+          test "$is_draft" = "true" || { echo "Release changed while artifacts were staged; refusing to publish." >&2; exit 1; }
+          gh release edit "${{ needs.resolve.outputs.release_tag }}" --draft=false

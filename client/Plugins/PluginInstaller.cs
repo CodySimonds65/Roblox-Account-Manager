@@ -114,6 +114,9 @@ public sealed class PluginInstaller
         }
 
         var installDirectory = _paths.GetInstallDirectory(manifest.Id);
+        if (!manifest.IsAvailableOnCurrentPlatform)
+            throw new PlatformNotSupportedException(
+                $"Plugin '{manifest.Id}' has no entrypoint for {manifest.SelectedRuntimeIdentifier ?? "this platform"} (platform-not-supported).");
         using var installRootLock = OpenDirectoryChain(_paths.InstallRoot);
         EnsureNoReparsePointsInPath(_paths.InstallRoot);
         EnsureNoReparsePointsInPath(installDirectory);
@@ -180,6 +183,8 @@ public sealed class PluginInstaller
         var backupManifest = PluginManifestReader.Parse(await File.ReadAllTextAsync(backupManifestPath, cancellationToken));
         if (!string.Equals(backupManifest.Id, pluginId, StringComparison.Ordinal))
             throw new InvalidDataException("The rollback package identity does not match the requested plugin.");
+        if (!backupManifest.IsAvailableOnCurrentPlatform)
+            throw new PlatformNotSupportedException("The rollback plugin has no entrypoint for this platform (platform-not-supported).");
         var backupEntrypoint = Path.GetFullPath(Path.Combine(backupDirectory, backupManifest.EntryPoint));
         var backupRoot = Path.GetFullPath(backupDirectory) + Path.DirectorySeparatorChar;
         if (!backupEntrypoint.StartsWith(backupRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(backupEntrypoint))
@@ -213,10 +218,17 @@ public sealed class PluginInstaller
         string.Equals(expected.Description, actual.Description, StringComparison.Ordinal) &&
         expected.Capabilities.SequenceEqual(actual.Capabilities, StringComparer.Ordinal) &&
         string.Equals(expected.EntryPoint, actual.EntryPoint, StringComparison.Ordinal) &&
+        EntryPointsMatch(expected.EntryPoints, actual.EntryPoints) &&
         string.Equals(expected.Icon, actual.Icon, StringComparison.Ordinal) &&
         string.Equals(expected.UpdateFeed, actual.UpdateFeed, StringComparison.Ordinal) &&
         string.Equals(expected.MinHostVersion, actual.MinHostVersion, StringComparison.Ordinal) &&
         expected.AutostartDefault == actual.AutostartDefault;
+
+    private static bool EntryPointsMatch(
+        IReadOnlyDictionary<string, string>? expected,
+        IReadOnlyDictionary<string, string>? actual) =>
+        expected is null ? actual is null : actual is not null && expected.Count == actual.Count &&
+        expected.All(pair => actual.TryGetValue(pair.Key, out var path) && string.Equals(pair.Value, path, StringComparison.Ordinal));
 
     public static string ParseHash(string text)
     {

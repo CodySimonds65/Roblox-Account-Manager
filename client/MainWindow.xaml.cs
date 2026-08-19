@@ -43,6 +43,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _launchCancellation;
     private string? _lastLaunchUrl;
     private bool _isLaunching;
+    private bool _singletonSettleRequired;
     private LauncherSettings _settings = new();
     private Point _accountDragStart;
     private bool _startupComplete;
@@ -771,12 +772,31 @@ public partial class MainWindow : Window
                 }
 
                 firstItem = false;
-                var (success, detail) = await LaunchAccountAsync(item, gameUrl, timeout, cancellationToken);
+                var settleSingletonAfterStart = items.Any(candidate =>
+                    !ReferenceEquals(candidate, item) && candidate.State == LaunchQueueState.Waiting);
+                var (success, detail) = await LaunchAccountAsync(
+                    item,
+                    gameUrl,
+                    timeout,
+                    settleSingletonAfterStart,
+                    cancellationToken);
                 item.Detail = detail;
 
                 if (success)
                 {
                     item.State = LaunchQueueState.Running;
+                    var waitingItems = items.Where(remaining => remaining.State == LaunchQueueState.Waiting).ToArray();
+                    if (_singletonSettleRequired && waitingItems.Length > 0)
+                    {
+                        foreach (var blockedItem in waitingItems)
+                        {
+                            blockedItem.State = LaunchQueueState.Canceled;
+                            blockedItem.Detail = "Blocked until singleton handles settle";
+                        }
+
+                        Log("Launch queue stopped: singleton handles did not remain clear through the required startup settling window.");
+                        break;
+                    }
                 }
                 else
                 {
@@ -828,6 +848,7 @@ public partial class MainWindow : Window
         LaunchQueueItem item,
         string gameUrl,
         TimeSpan processTimeout,
+        bool settleSingletonAfterStart,
         CancellationToken cancellationToken)
     {
         item.State = LaunchQueueState.Preparing;
@@ -849,11 +870,18 @@ public partial class MainWindow : Window
             return (false, "Session unavailable");
         }
 
-        var previousProcessIds = GetRobloxProcessIds();
-        if (previousProcessIds.Count > 0)
+        var previousProcesses = GetRobloxProcessSnapshot();
+        if (previousProcesses.ProcessIds.Count > 0)
         {
+            if (previousProcesses.Identities.Count < previousProcesses.ProcessIds.Count)
+            {
+                Log("One or more existing Roblox processes could not be fully identified; they will be used for singleton cleanup but never assigned to this launch.");
+            }
             item.Detail = "Releasing singleton";
-            var result = await ReleaseSingletonAsync(item.Label, cancellationToken);
+            var result = await ReleaseSingletonAsync(
+                item.Label,
+                cancellationToken,
+                settleWindow: _singletonSettleRequired ? TimeSpan.FromSeconds(8) : null);
             foreach (var message in result.Messages)
             {
                 Log(message);
@@ -865,6 +893,8 @@ public partial class MainWindow : Window
                 Log($"Could not prepare {item.Label}: singleton release failed.");
                 return (false, "Singleton release failed");
             }
+
+            _singletonSettleRequired = false;
         }
         else
         {
@@ -893,11 +923,16 @@ public partial class MainWindow : Window
         }
 
         item.Detail = "Waiting for process";
-        using var newRobloxProcess = await WaitForAdditionalRobloxProcessAsync(previousProcessIds, processTimeout, cancellationToken);
+        using var newRobloxProcess = await WaitForAdditionalRobloxProcessAsync(previousProcesses, processTimeout, cancellationToken);
         if (newRobloxProcess is null)
         {
             Log($"No new Roblox process appeared for {item.Label} within {processTimeout.TotalSeconds:0} seconds.");
             return (false, "Process timed out");
+        }
+        if (!TryObserveRobloxProcess(newRobloxProcess, out var launchedIdentity))
+        {
+            Log($"The new Roblox process for {item.Label} could not be identified safely.");
+            return (false, "Process identity unavailable");
         }
 
         if (engineSettingsTransaction.IsActive)
@@ -913,18 +948,65 @@ public partial class MainWindow : Window
             // The process can exist before it has consumed UserGameSettings.
             // Wait for its window/readiness signal, with a bounded warm-up
             // fallback for clients that do not expose a window immediately.
-            await WaitForRobloxStartupReadyAsync(newRobloxProcess, cancellationToken);
+            if (!await WaitForRobloxStartupReadyAsync(newRobloxProcess, cancellationToken))
+            {
+                Log($"The Roblox process for {item.Label} exited before it became ready.");
+                return (false, "Process exited early");
+            }
+        }
+
+        if (!TryObserveRobloxProcess(newRobloxProcess, out var finalIdentity) || finalIdentity != launchedIdentity)
+        {
+            Log($"The Roblox process identity for {item.Label} changed before registration.");
+            return (false, "Process identity changed");
         }
 
         // Persist the PID and process start time before the local process wrapper is
         // disposed. The registry reattaches safely after restart and rejects PID reuse.
         ((App)Application.Current).PluginRuntime.Accounts.Register(item.Account, newRobloxProcess);
 
+        // Roblox can recreate its named event/mutex after the first unlock pass
+        // while the client transitions from startup to a stable game. Sweep once
+        // more after identity verification and registration so the next queue
+        // item never inherits a reappeared singleton. This is deliberately a
+        // handle-only operation; it never terminates or signals a Roblox process.
+        if (settleSingletonAfterStart)
+        {
+            var postRegistrationRelease = await ReleaseSingletonAsync(
+                $"{item.Label} post-start",
+                cancellationToken,
+                settleWindow: TimeSpan.FromSeconds(8));
+            foreach (var message in postRegistrationRelease.Messages)
+            {
+                Log(message);
+            }
+
+            if (!postRegistrationRelease.Success)
+            {
+                Log($"A singleton handle could not be cleared after {item.Label} started; the remaining queue is blocked until a clean settling window is observed.");
+                _singletonSettleRequired = true;
+            }
+            else
+            {
+                _singletonSettleRequired = false;
+            }
+        }
+        else
+        {
+            // Even the final queue item may still recreate its singleton a
+            // moment later. Carry this requirement into the next queue so a
+            // future account gets a full quiet-window sweep before launch.
+            _singletonSettleRequired = true;
+        }
+
         Log($"{item.Label} is running.");
         return (true, "Roblox started");
     }
 
-    private async Task<UnlockResult> ReleaseSingletonAsync(string accountLabel, CancellationToken cancellationToken)
+    private async Task<UnlockResult> ReleaseSingletonAsync(
+        string accountLabel,
+        CancellationToken cancellationToken,
+        TimeSpan? settleWindow = null)
     {
         if (_singletonUnlockSession is null)
         {
@@ -950,7 +1032,7 @@ public partial class MainWindow : Window
         // new instance create fresh objects that nobody else holds, so no
         // takeover signal is ever delivered. (Roblox clients tolerate the
         // externally closed handles; RAM's multi-instance unlock relies on it.)
-        return await _singletonUnlockSession.ReleaseAsync(cancellationToken);
+        return await _singletonUnlockSession.ReleaseAsync(cancellationToken, settleWindow);
     }
 
     private TimeSpan GetLaunchTimeout()
@@ -1295,94 +1377,129 @@ public partial class MainWindow : Window
             browser.CoreWebView2.NavigationCompleted -= NavigationCompleted;
         }
 
-        _externalLaunchRequest = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var clicked = false;
-        for (var attempt = 0; attempt < 30 && ReferenceEquals(browser, _browser); attempt++)
+        var pendingLaunch = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _externalLaunchRequest = pendingLaunch;
+        try
         {
-            var result = await browser.CoreWebView2.ExecuteScriptAsync("""
-                (() => {
-                    const button = document.querySelector('button[data-testid="play-button"]');
-                    if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') {
-                        return false;
-                    }
-                    button.click();
-                    return true;
-                })();
-                """);
-
-            if (string.Equals(result, "true", StringComparison.OrdinalIgnoreCase))
+            var clicked = false;
+            for (var attempt = 0; attempt < 30 && ReferenceEquals(browser, _browser); attempt++)
             {
-                clicked = true;
-                Log($"Activated Roblox's Play button for {_activeAccount!.Label}.");
-                break;
+                var result = await browser.CoreWebView2.ExecuteScriptAsync("""
+                    (() => {
+                        const button = document.querySelector('button[data-testid="play-button"]');
+                        if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') {
+                            return false;
+                        }
+                        button.click();
+                        return true;
+                    })();
+                    """);
+
+                if (string.Equals(result, "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    clicked = true;
+                    Log($"Activated Roblox's Play button for {_activeAccount!.Label}.");
+                    break;
+                }
+
+                await Task.Delay(500, cancellationToken);
             }
 
-            await Task.Delay(500, cancellationToken);
-        }
+            if (!clicked)
+            {
+                Log("Roblox's Play button was not available. Confirm this account is signed in, then try again.");
+                return false;
+            }
 
-        if (!clicked)
-        {
-            Log("Roblox's Play button was not available. Confirm this account is signed in, then try again.");
-            return false;
-        }
+            var launchResult = await Task.WhenAny(pendingLaunch.Task, Task.Delay(TimeSpan.FromSeconds(12), cancellationToken));
+            cancellationToken.ThrowIfCancellationRequested();
+            if (launchResult == pendingLaunch.Task && await pendingLaunch.Task)
+            {
+                Log($"Launch request sent for {_activeAccount!.Label}.");
+                return true;
+            }
+            if (browser.Source?.AbsolutePath.Contains("login", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                Log($"{_activeAccount!.Label} is not signed in. Complete Roblox login and try again.");
+                return false;
+            }
 
-        var launchResult = await Task.WhenAny(_externalLaunchRequest.Task, Task.Delay(TimeSpan.FromSeconds(12), cancellationToken));
-        cancellationToken.ThrowIfCancellationRequested();
-        if (launchResult == _externalLaunchRequest.Task && await _externalLaunchRequest.Task)
-        {
-            Log($"Launch request sent for {_activeAccount!.Label}.");
-            return true;
-        }
-        else if (browser.Source?.AbsolutePath.Contains("login", StringComparison.OrdinalIgnoreCase) == true)
-        {
-            Log($"{_activeAccount!.Label} is not signed in. Complete Roblox login and try again.");
-            return false;
-        }
-        else
-        {
             Log("Roblox did not produce a player launch request. Use the visible Play button as a fallback.");
             return false;
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref _externalLaunchRequest, null, pendingLaunch);
         }
     }
 
     private static async Task<Process?> WaitForAdditionalRobloxProcessAsync(
-        IReadOnlySet<int> previousProcessIds,
+        RobloxProcessSnapshot previousProcesses,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
         var deadline = DateTime.UtcNow.Add(timeout);
+        ObservedRobloxProcess? stableCandidate = null;
+        var stableObservations = 0;
         while (DateTime.UtcNow < deadline)
         {
-            await Task.Delay(500, cancellationToken);
+            await Task.Delay(300, cancellationToken);
             var processes = Process.GetProcessesByName("RobloxPlayerBeta");
-            var newProcess = processes.FirstOrDefault(process => !previousProcessIds.Contains(process.Id));
-            if (newProcess is not null)
+            var candidates = new List<(Process Process, ObservedRobloxProcess Identity)>();
+            foreach (var process in processes)
             {
-                foreach (var process in processes.Where(process => process.Id != newProcess.Id))
+                if (TryObserveRobloxProcess(process, out var identity) &&
+                    !previousProcesses.Identities.Contains(identity) &&
+                    identity.StartTimeUtcTicks >= previousProcesses.CapturedAtUtc.Ticks)
+                {
+                    candidates.Add((process, identity));
+                }
+                else
                 {
                     process.Dispose();
                 }
-
-                return newProcess;
             }
 
-            foreach (var process in processes)
+            if (candidates.Count == 1)
             {
-                process.Dispose();
+                var candidate = candidates[0];
+                if (candidate.Identity == stableCandidate)
+                    stableObservations++;
+                else
+                {
+                    stableCandidate = candidate.Identity;
+                    stableObservations = 1;
+                }
+
+                if (stableObservations >= 3)
+                    return candidate.Process;
+                candidate.Process.Dispose();
+            }
+            else
+            {
+                stableCandidate = null;
+                stableObservations = 0;
+                foreach (var candidate in candidates) candidate.Process.Dispose();
             }
         }
 
         return null;
     }
 
-    private static HashSet<int> GetRobloxProcessIds()
+    private static RobloxProcessSnapshot GetRobloxProcessSnapshot()
     {
+        var capturedAtUtc = DateTime.UtcNow;
+        var identities = new HashSet<ObservedRobloxProcess>();
         var processIds = new HashSet<int>();
         foreach (var process in Process.GetProcessesByName("RobloxPlayerBeta"))
         {
             try
             {
+                if (process.HasExited)
+                    continue;
+
                 processIds.Add(process.Id);
+                if (TryObserveRobloxProcess(process, out var identity)) identities.Add(identity);
             }
             finally
             {
@@ -1390,10 +1507,48 @@ public partial class MainWindow : Window
             }
         }
 
-        return processIds;
+        return new RobloxProcessSnapshot(capturedAtUtc, identities, processIds);
     }
 
-    private static async Task WaitForRobloxStartupReadyAsync(Process process, CancellationToken cancellationToken)
+    private static bool TryObserveRobloxProcess(Process process, out ObservedRobloxProcess identity)
+    {
+        try
+        {
+            process.Refresh();
+            if (process.HasExited)
+            {
+                identity = default;
+                return false;
+            }
+            var executablePath = process.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(executablePath) ||
+                !string.Equals(Path.GetFileName(executablePath), "RobloxPlayerBeta.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                identity = default;
+                return false;
+            }
+
+            identity = new ObservedRobloxProcess(
+                process.Id,
+                process.StartTime.ToUniversalTime().Ticks,
+                Path.GetFullPath(executablePath).ToUpperInvariant());
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+        {
+            identity = default;
+            return false;
+        }
+    }
+
+    private readonly record struct ObservedRobloxProcess(int Pid, long StartTimeUtcTicks, string ExecutablePath);
+
+    private sealed record RobloxProcessSnapshot(
+        DateTime CapturedAtUtc,
+        HashSet<ObservedRobloxProcess> Identities,
+        HashSet<int> ProcessIds);
+
+    private static async Task<bool> WaitForRobloxStartupReadyAsync(Process process, CancellationToken cancellationToken)
     {
         var deadline = DateTime.UtcNow.AddSeconds(6);
         while (DateTime.UtcNow < deadline)
@@ -1404,47 +1559,65 @@ public partial class MainWindow : Window
                 process.Refresh();
                 if (process.HasExited)
                 {
-                    return;
+                    return false;
                 }
 
                 if (process.MainWindowHandle != IntPtr.Zero)
                 {
                     await Task.Delay(750, cancellationToken);
-                    return;
+                    process.Refresh();
+                    return !process.HasExited;
                 }
             }
             catch (InvalidOperationException)
             {
-                return;
+                return false;
             }
 
             await Task.Delay(250, cancellationToken);
         }
 
         await Task.Delay(1500, cancellationToken);
+        try
+        {
+            process.Refresh();
+            return !process.HasExited;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private void Browser_LaunchingExternalUriScheme(object? sender, CoreWebView2LaunchingExternalUriSchemeEventArgs args)
     {
         args.Cancel = true;
-        if (!Uri.TryCreate(args.Uri, UriKind.Absolute, out var launchUri) ||
+        var pendingLaunch = _externalLaunchRequest;
+        if (pendingLaunch is null ||
+            !Uri.TryCreate(args.Uri, UriKind.Absolute, out var launchUri) ||
             !IsRobloxPlayerScheme(launchUri.Scheme) ||
-            !IsTrustedRobloxOrigin(args.InitiatingOrigin))
+            !IsTrustedRobloxOrigin(args.InitiatingOrigin) ||
+            !IsTrustedRobloxPage(_browser?.Source))
         {
             Log("Blocked an untrusted external protocol request from the embedded browser.");
-            _externalLaunchRequest?.TrySetResult(false);
+            return;
+        }
+
+        if (!ReferenceEquals(Interlocked.CompareExchange(ref _externalLaunchRequest, null, pendingLaunch), pendingLaunch))
+        {
+            Log("Blocked a duplicate external protocol request from the embedded browser.");
             return;
         }
 
         try
         {
             _robloxLauncherService.Start(args.Uri, _settings.PreferredLauncher);
-            _externalLaunchRequest?.TrySetResult(true);
+            pendingLaunch.TrySetResult(true);
         }
         catch (Exception exception)
         {
             Log($"Windows could not start Roblox: {exception.Message}");
-            _externalLaunchRequest?.TrySetResult(false);
+            pendingLaunch.TrySetResult(false);
         }
     }
 
@@ -1462,6 +1635,11 @@ public partial class MainWindow : Window
         return string.Equals(uri.Host, "roblox.com", StringComparison.OrdinalIgnoreCase) ||
                uri.Host.EndsWith(".roblox.com", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsTrustedRobloxPage(Uri? uri) =>
+        uri is not null && uri.Scheme == Uri.UriSchemeHttps &&
+        (string.Equals(uri.Host, "roblox.com", StringComparison.OrdinalIgnoreCase) ||
+         uri.Host.EndsWith(".roblox.com", StringComparison.OrdinalIgnoreCase));
 
     private bool EnsureBrowserSelected()
     {
