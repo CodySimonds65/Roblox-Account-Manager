@@ -1140,14 +1140,19 @@ using (var firstRoot = NativeEmbeddingTestWindow.CreateRoot(-31900, -31900, 800,
 using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 1024, 768))
 {
     var firstOriginalStyle = firstRoot.Style;
+    var firstOriginalExStyle = firstRoot.ExStyle;
     var firstOriginalBounds = firstRoot.Bounds;
     var secondOriginalStyle = secondRoot.Style;
+    var secondOriginalExStyle = secondRoot.ExStyle;
     var secondOriginalBounds = secondRoot.Bounds;
     var embeddings = new ClientEmbeddingService();
     embeddings.SetHostWindow(nativeHost.Handle);
 
     Require(!embeddings.TryEmbed("stale-process", firstRoot.Handle, Environment.ProcessId + 1),
         "Embedding accepted a window owned by an unexpected process.");
+    var currentProcessStartTicks = Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks;
+    Require(!embeddings.TryEmbed("stale-start", firstRoot.Handle, Environment.ProcessId, currentProcessStartTicks + 1),
+        "Embedding accepted a window with a stale process start identity.");
     Require(embeddings.TryEmbed("native-first", firstRoot.Handle, Environment.ProcessId),
         "The first native test window could not be embedded.");
     Require(embeddings.TryEmbed("native-second", secondRoot.Handle, Environment.ProcessId),
@@ -1156,6 +1161,8 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
         "Embedded windows were not parented beneath the native Clients host.");
     Require(firstRoot.HasChildStyle && secondRoot.HasChildStyle,
         "Embedded windows did not receive the native child-window style.");
+    Require((firstRoot.ExStyle & 0x08000000) == 0 && (secondRoot.ExStyle & 0x08000000) == 0,
+        "Embedded windows retained WS_EX_NOACTIVATE and could reject physical clicks.");
 
     embeddings.ShowOnly("native-first");
     Require(embeddings.IsVisible("native-first") && firstRoot.Visible && !secondRoot.Visible,
@@ -1166,13 +1173,15 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
 
     Require(embeddings.TryUnembed("native-first"), "The first native test window could not be unembedded.");
     Require(firstRoot.Parent == nint.Zero && firstRoot.Style == firstOriginalStyle &&
+            firstRoot.ExStyle == firstOriginalExStyle &&
             firstRoot.Bounds == firstOriginalBounds && firstRoot.Visible,
-        "Unembedding did not restore the first window's parent, style, placement, and visibility.");
+        "Unembedding did not restore the first window's parent, styles, placement, and visibility.");
 
     embeddings.ReleaseHostWindow(nativeHost.Handle);
     Require(secondRoot.Parent == nint.Zero && secondRoot.Style == secondOriginalStyle &&
+            secondRoot.ExStyle == secondOriginalExStyle &&
             secondRoot.Bounds == secondOriginalBounds && secondRoot.Visible,
-        "Destroying the native host did not restore its remaining embedded window.");
+        "Destroying the native host did not restore its remaining embedded window and styles.");
     Require(embeddings.EmbeddedAccountIds().Length == 0,
         "Releasing the native host left stale embedded-account state.");
 }

@@ -22,7 +22,6 @@ public sealed class RunningAccountRegistry : IDisposable
     // transient HWND loss is not mistaken for a dead process, while still
     // cleaning up clients that have been closed natively.
     private static readonly TimeSpan MissingWindowGracePeriod = TimeSpan.FromSeconds(10);
-    private const uint WmClose = 0x0010;
 
     public event EventHandler<ManagedAccountSnapshot>? AccountChanged;
     public event EventHandler<ManagedAccountSnapshot>? AccountExited;
@@ -83,6 +82,11 @@ public sealed class RunningAccountRegistry : IDisposable
         return true;
     }
 
+    public bool IsStopping(string accountId)
+    {
+        lock (_gate) return _stopping.Contains(accountId);
+    }
+
     /// <summary>
     /// Stops one managed Roblox process without ever acting on a reused PID.
     /// Watcher callbacks may win the race and publish the exit event once.
@@ -108,7 +112,7 @@ public sealed class RunningAccountRegistry : IDisposable
                 return true;
             }
 
-            TryRequestGracefulClose(process, expected);
+            TryRequestGracefulClose(process);
             if (!await WaitForExitAsync(process, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -569,22 +573,21 @@ public sealed class RunningAccountRegistry : IDisposable
         return string.Equals(process.ProcessName, "RobloxPlayerBeta", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void TryRequestGracefulClose(Process process, RunningAccountRecord expected)
+    private static void TryRequestGracefulClose(Process process)
     {
         try
         {
             process.Refresh();
-            if (!process.HasExited && process.CloseMainWindow()) return;
+            // CloseMainWindow is the only graceful-close path used here. It
+            // respects the process's own window/message loop without adding a
+            // second window-message input path outside the safety broker.
+            _ = !process.HasExited && process.CloseMainWindow();
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
         {
             // Embedded clients do not always expose a conventional main window;
-            // fall through to a validated WM_CLOSE on the managed root.
+            // the validated force-termination path below remains available.
         }
-
-        var window = GetProcessRootWindow((nint)expected.WindowHandle, expected.ProcessId);
-        if (window != nint.Zero && IsOwnedProcessWindow(window, expected.ProcessId))
-            PostMessage(window, WmClose, nint.Zero, nint.Zero);
     }
 
     private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
@@ -675,7 +678,6 @@ public sealed class RunningAccountRegistry : IDisposable
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint hwnd, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint hwnd, ref char className, int maxCount);
     [DllImport("user32.dll")] private static extern bool IsIconic(nint hWnd);
-    [DllImport("user32.dll")] private static extern bool PostMessage(nint hWnd, uint message, nint wParam, nint lParam);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint hWnd, out RECT rect);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(nint hWnd, ref POINT point);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint hWnd);

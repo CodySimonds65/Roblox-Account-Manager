@@ -83,7 +83,7 @@ public static class EmbeddedInputBridge
         }
         var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
         if (gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) &&
-            IsFocusWithin(root, info.hwndFocus) && IsFocusWithin(root, info.hwndActive)) return true;
+            IsFocusWithin(root, info.hwndFocus)) return true;
 
         var ourThread = GetCurrentThreadId();
         var attached = gameThread != 0 && gameThread != ourThread &&

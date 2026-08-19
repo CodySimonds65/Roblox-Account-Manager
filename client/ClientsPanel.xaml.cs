@@ -100,6 +100,7 @@ public partial class ClientsPanel : UserControl
     private void EnsureTab(ManagedAccountSnapshot account)
     {
         if (_runtime is null) return;
+        if (_runtime.Accounts.IsStopping(account.AccountId)) return;
         if (_runtime.ClientEmbeddings.EmbedFilter?.Invoke(account.AccountId) == false)
         {
             _runtime.ClientEmbeddings.TryUnembed(account.AccountId);
@@ -119,7 +120,19 @@ public partial class ClientsPanel : UserControl
                          account.ClientWidth >= 400 && account.ClientHeight >= 300;
         if (embedReady)
         {
-            _runtime.ClientEmbeddings.TryEmbed(account.AccountId, root, account.ProcessId);
+            var hostIntegrity = ProcessIntegrity.Current;
+            var clientIntegrity = ProcessIntegrity.ForWindow(root);
+            if (hostIntegrity != ProcessIntegrityLevel.Unknown &&
+                clientIntegrity != ProcessIntegrityLevel.Unknown && hostIntegrity != clientIntegrity)
+                Log($"{account.Label}: RAM integrity is {hostIntegrity}; Roblox is {clientIntegrity}. Native input will be validated at focus time.");
+
+            _runtime.ClientEmbeddings.TryEmbed(
+                account.AccountId,
+                root,
+                account.ProcessId,
+                account.ProcessStartTimeUtcTicks,
+                "RobloxPlayerBeta",
+                account.WindowHandle);
             if (_runtime.ClientEmbeddings.IsEmbedded(account.AccountId))
             {
                 _embedTimes[account.AccountId] = DateTime.UtcNow;
@@ -217,10 +230,11 @@ public partial class ClientsPanel : UserControl
         // Remove the native embedding before asking the registry to stop the
         // identity-checked Roblox process so its final exit cannot leave a
         // hidden tray client behind.
+        var termination = _runtime.Accounts.TerminateAccountAsync(account.AccountId);
         _runtime.ClientEmbeddings.TryUnembed(account.AccountId);
         try
         {
-            var stopped = await _runtime.Accounts.TerminateAccountAsync(account.AccountId);
+            var stopped = await termination;
             if (!stopped)
                 Log($"RAM could not close {account.Label}; the client remains running.");
         }

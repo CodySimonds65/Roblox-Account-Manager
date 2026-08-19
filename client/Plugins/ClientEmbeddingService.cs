@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 
 namespace RobloxAltClient.Plugins;
 
@@ -39,6 +40,7 @@ public sealed class ClientEmbeddingService
     private const long WsExDlgModalFrame = 0x00000001L;
     private const long WsExClientEdge = 0x00000200L;
     private const long WsExStaticEdge = 0x00020000L;
+    private const long WsExNoActivate = 0x08000000L;
     private const int GwlExStyle = -20;
     private const int GwlpHwndParent = -8;
     private const uint GwOwner = 4;
@@ -55,7 +57,7 @@ public sealed class ClientEmbeddingService
     private const long FrameStyles = WsPopup | WsCaption | WsThickFrame | WsMinimizeBox |
                                       WsMaximizeBox | WsSysMenu | WsDlgFrame | WsBorder;
     private const long EmbeddedExStyles = WsExAppWindow | WsExWindowEdge | WsExDlgModalFrame |
-                                          WsExClientEdge | WsExStaticEdge;
+                                          WsExClientEdge | WsExStaticEdge | WsExNoActivate;
 
     public bool IsEmbedded(string accountId)
     {
@@ -104,7 +106,8 @@ public sealed class ClientEmbeddingService
         {
             if (!_embedded.TryGetValue(accountId, out var embedded) || !IsCurrent(embedded, _hostWindow))
                 return null;
-            embedded.InputTarget = ResolveInputTarget(embedded.Root, embedded.ProcessId);
+            if (!IsValidInputTarget(embedded.Root, embedded.InputTarget, embedded.ProcessId))
+                embedded.InputTarget = ResolveInputTarget(embedded.Root, embedded.ProcessId);
             return embedded.InputTarget;
         }
     }
@@ -134,11 +137,18 @@ public sealed class ClientEmbeddingService
         }
     }
 
-    public bool TryEmbed(string accountId, nint rootWindow, int expectedProcessId)
+    public bool TryEmbed(
+        string accountId,
+        nint rootWindow,
+        int expectedProcessId,
+        long expectedProcessStartTimeUtcTicks = 0,
+        string? expectedProcessName = null,
+        nint preferredInputWindow = default)
     {
         if (rootWindow == nint.Zero || expectedProcessId <= 0 || !IsWindow(rootWindow)) return false;
         GetWindowThreadProcessId(rootWindow, out var actualProcessId);
         if (actualProcessId != (uint)expectedProcessId) return false;
+        if (!ValidateProcessIdentity(expectedProcessId, expectedProcessStartTimeUtcTicks, expectedProcessName)) return false;
 
         EmbeddedWindow? existing;
         nint hostWindow;
@@ -157,9 +167,9 @@ public sealed class ClientEmbeddingService
         var originalOwner = GetWindow(rootWindow, GwOwner);
         if (!GetWindowRect(rootWindow, out var originalBounds)) return false;
         var originalPlacement = new WINDOWPLACEMENT { Length = Marshal.SizeOf<WINDOWPLACEMENT>() };
-        _ = GetWindowPlacement(rootWindow, ref originalPlacement);
+        var hasOriginalPlacement = GetWindowPlacement(rootWindow, ref originalPlacement);
         var originalVisible = IsWindowVisible(rootWindow);
-        var childStyle = (originalStyle & ~FrameStyles) | WsChild | WsClipChildren | WsClipSiblings;
+        var childStyle = (originalStyle & ~FrameStyles) | WsChild | WsVisible | WsClipChildren | WsClipSiblings;
         var childExStyle = originalExStyle & ~EmbeddedExStyles;
         if (!TrySetStyle(rootWindow, childStyle)) return false;
         if (!TrySetExStyle(rootWindow, childExStyle))
@@ -191,6 +201,9 @@ public sealed class ClientEmbeddingService
             originalExStyle,
             originalBounds,
             originalPlacement,
+            hasOriginalPlacement,
+            expectedProcessStartTimeUtcTicks,
+            expectedProcessName,
             originalVisible);
         lock (_gate)
         {
@@ -199,7 +212,9 @@ public sealed class ClientEmbeddingService
                 RestoreWindow(embedded);
                 return false;
             }
-            embedded.InputTarget = ResolveInputTarget(rootWindow, (uint)expectedProcessId);
+            embedded.InputTarget = IsValidInputTarget(rootWindow, preferredInputWindow, (uint)expectedProcessId)
+                ? preferredInputWindow
+                : ResolveInputTarget(rootWindow, (uint)expectedProcessId);
             _embedded[accountId] = embedded;
         }
 
@@ -243,7 +258,8 @@ public sealed class ClientEmbeddingService
         foreach (var window in embedded)
         {
             if (!IsCurrent(window, hostWindow)) continue;
-            SetWindowPos(window.Root, nint.Zero, 0, 0, width, height, SwpNoActivate | SwpNoZOrder);
+            SetWindowPos(window.Root, nint.Zero, 0, 0, width, height,
+                SwpNoActivate | SwpNoZOrder | SwpFrameChanged);
         }
     }
 
@@ -262,7 +278,11 @@ public sealed class ClientEmbeddingService
                 : null;
             foreach (var (id, embedded) in _embedded)
             {
-                if (!IsCurrent(embedded, _hostWindow)) continue;
+                if (!IsCurrent(embedded, _hostWindow))
+                {
+                    HideStaleWindow(embedded);
+                    continue;
+                }
                 // Activate only on the already-foreground RAM path; the
                 // external-foreground path remains strictly no-activate.
                 ShowWindow(embedded.Root,
@@ -309,7 +329,33 @@ public sealed class ClientEmbeddingService
     {
         if (hostWindow == nint.Zero || embedded.Root == nint.Zero || !IsWindow(embedded.Root)) return false;
         GetWindowThreadProcessId(embedded.Root, out var processId);
-        return processId == embedded.ProcessId && GetParent(embedded.Root) == hostWindow;
+        return processId == embedded.ProcessId && GetParent(embedded.Root) == hostWindow &&
+               ValidateProcessIdentity((int)embedded.ProcessId, embedded.ProcessStartTimeUtcTicks, embedded.ExpectedProcessName);
+    }
+
+    private static bool ValidateProcessIdentity(int processId, long expectedStartTicks, string? expectedProcessName)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            if (process.HasExited) return false;
+            if (expectedStartTicks > 0 && process.StartTime.ToUniversalTime().Ticks != expectedStartTicks) return false;
+            return string.IsNullOrWhiteSpace(expectedProcessName) ||
+                   string.Equals(process.ProcessName, expectedProcessName, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static void HideStaleWindow(EmbeddedWindow embedded)
+    {
+        if (embedded.Root == nint.Zero || !IsWindow(embedded.Root)) return;
+        GetWindowThreadProcessId(embedded.Root, out var processId);
+        if (processId == embedded.ProcessId &&
+            ValidateProcessIdentity((int)embedded.ProcessId, embedded.ProcessStartTimeUtcTicks, embedded.ExpectedProcessName))
+            ShowWindow(embedded.Root, SwHide);
     }
 
     private static nint ResolveInputTarget(nint root, uint processId)
@@ -328,6 +374,14 @@ public sealed class ClientEmbeddingService
             child = GetWindow(child, GwNext);
         }
         return best;
+    }
+
+    private static bool IsValidInputTarget(nint root, nint target, uint processId)
+    {
+        if (target == nint.Zero || !IsWindow(target) || !IsWindowVisible(target) || !IsWindowEnabled(target) ||
+            (target != root && !IsChild(root, target))) return false;
+        GetWindowThreadProcessId(target, out var targetPid);
+        return targetPid == processId;
     }
 
     private static bool TrySetStyle(nint window, long style)
@@ -357,7 +411,7 @@ public sealed class ClientEmbeddingService
         TrySetExStyle(embedded.Root, embedded.OriginalExStyle);
         if (embedded.OriginalParent == nint.Zero)
             _ = SetWindowLongPtr(embedded.Root, GwlpHwndParent, embedded.OriginalOwner);
-        if (embedded.OriginalPlacement.Length != 0)
+        if (embedded.HasOriginalPlacement)
             _ = SetWindowPlacement(embedded.Root, ref embedded.OriginalPlacement);
         var width = Math.Max(1, embedded.OriginalBounds.Right - embedded.OriginalBounds.Left);
         var height = Math.Max(1, embedded.OriginalBounds.Bottom - embedded.OriginalBounds.Top);
@@ -400,6 +454,9 @@ public sealed class ClientEmbeddingService
             long originalExStyle,
             RECT originalBounds,
             WINDOWPLACEMENT originalPlacement,
+            bool hasOriginalPlacement,
+            long processStartTimeUtcTicks,
+            string? expectedProcessName,
             bool originalVisible)
         {
             Root = root;
@@ -410,6 +467,9 @@ public sealed class ClientEmbeddingService
             OriginalExStyle = originalExStyle;
             OriginalBounds = originalBounds;
             OriginalPlacement = originalPlacement;
+            HasOriginalPlacement = hasOriginalPlacement;
+            ProcessStartTimeUtcTicks = processStartTimeUtcTicks;
+            ExpectedProcessName = expectedProcessName;
             OriginalVisible = originalVisible;
             InputTarget = root;
         }
@@ -422,6 +482,9 @@ public sealed class ClientEmbeddingService
         public long OriginalExStyle { get; }
         public RECT OriginalBounds { get; }
         public WINDOWPLACEMENT OriginalPlacement;
+        public bool HasOriginalPlacement { get; }
+        public long ProcessStartTimeUtcTicks { get; }
+        public string? ExpectedProcessName { get; }
         public bool OriginalVisible { get; }
         public nint InputTarget { get; set; }
     }

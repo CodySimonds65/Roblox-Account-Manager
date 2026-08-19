@@ -4,7 +4,11 @@ $sourceFiles = @(Get-ChildItem -Path $sourceRoot -Recurse -File -Include *.cs,*.
 $violations = [System.Collections.Generic.List[string]]::new()
 
 function Get-RelativeSourcePath([string]$path) {
-    [IO.Path]::GetRelativePath($sourceRoot, $path).Replace('\', '/')
+    $rootWithSeparator = $sourceRoot.TrimEnd('\') + '\'
+    if ($path.StartsWith($rootWithSeparator, [StringComparison]::OrdinalIgnoreCase)) {
+        return $path.Substring($rootWithSeparator.Length).Replace('\', '/')
+    }
+    return [IO.Path]::GetFileName($path).Replace('\', '/')
 }
 
 function Find-ForbiddenReference([string]$pattern, [string[]]$allowedPaths = @()) {
@@ -56,6 +60,12 @@ $nativeHost = Get-Content (Join-Path $sourceRoot 'EmbeddedClientHost.cs') -Raw
 if ($nativeHost -notmatch 'class\s+EmbeddedClientHost\s*:\s*HwndHost' -or
     $nativeHost -notmatch 'WsChild\s*\|\s*WsVisible\s*\|\s*WsClipChildren') {
     $violations.Add('The Clients viewport must use a native HwndHost child window for direct user input.')
+}
+if ($nativeHost -notmatch 'RegisterClassEx' -or
+    $nativeHost -notmatch 'WmNcHitTest' -or
+    $nativeHost -notmatch 'WmMouseActivate' -or
+    $nativeHost -match '\b(PostMessage|SendInput|SetCursorPos|mouse_event|keybd_event)\b') {
+    $violations.Add('EmbeddedClientHost must use a registered native hit-test/activation path and must not synthesize input.')
 }
 
 $embedding = Get-Content (Join-Path $sourceRoot 'Plugins\ClientEmbeddingService.cs') -Raw

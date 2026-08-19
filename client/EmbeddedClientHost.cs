@@ -17,14 +17,17 @@ public sealed class EmbeddedClientHost : HwndHost
     private const int WsVisible = 0x10000000;
     private const int WsClipChildren = 0x02000000;
     private const int WsClipSiblings = 0x04000000;
+    private const int WsTabStop = 0x00010000;
     private const int CsOwnDc = 0x0020;
     private const int WmNcCreate = 0x0081;
     private const int WmNcDestroy = 0x0082;
     private const int WmSize = 0x0005;
     private const int WmSetFocus = 0x0007;
+    private const int WmKillFocus = 0x0008;
     private const int WmMouseActivate = 0x0021;
     private const int WmNcHitTest = 0x0084;
     private const int WmSetCursor = 0x0020;
+    private const int WmCaptureChanged = 0x0215;
     private const int HtClient = 1;
     private const int MaActivate = 1;
     private const int GwlpUserData = -21;
@@ -54,7 +57,7 @@ public sealed class EmbeddedClientHost : HwndHost
             0,
             NativeClassName,
             string.Empty,
-            WsChild | WsVisible | WsClipChildren | WsClipSiblings,
+            WsChild | WsVisible | WsClipChildren | WsClipSiblings | WsTabStop,
             0,
             0,
             1,
@@ -108,6 +111,12 @@ public sealed class EmbeddedClientHost : HwndHost
 
             case WmSetFocus:
                 ScheduleFocus();
+                break;
+
+            case WmKillFocus:
+            case WmCaptureChanged:
+                // Let DefWindowProc preserve the native focus/capture
+                // transition. Roblox remains the direct owner of its input.
                 break;
 
             case WmSize:

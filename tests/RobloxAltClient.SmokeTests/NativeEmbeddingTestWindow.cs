@@ -8,6 +8,7 @@ internal sealed class NativeEmbeddingTestWindow : IDisposable
     private const int WsChild = 0x40000000;
     private const int WsClipChildren = 0x02000000;
     private const int GwlStyle = -16;
+    private const int GwlExStyle = -20;
     private const int WsExNoActivate = 0x08000000;
 
     private NativeEmbeddingTestWindow(nint handle)
@@ -17,6 +18,7 @@ internal sealed class NativeEmbeddingTestWindow : IDisposable
 
     public nint Handle { get; private set; }
     public long Style => GetWindowLongPtr(Handle, GwlStyle).ToInt64();
+    public long ExStyle => GetWindowLongPtr(Handle, GwlExStyle).ToInt64();
     public nint Parent => GetParent(Handle);
     public bool Visible => IsWindowVisible(Handle);
     public WindowBounds Bounds
