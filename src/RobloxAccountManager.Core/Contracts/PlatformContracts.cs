@@ -107,7 +107,8 @@ public sealed record RobloxLaunchRequest(
     int MaxAttempts = 3,
     MacLaunchLevel? PreferredMacLevel = null,
     string? RobloxBundlePath = null,
-    bool UserConsentedToMultiInstanceChanges = false);
+    bool UserConsentedToMultiInstanceChanges = false,
+    TimeSpan? VerificationTimeout = null);
 
 public sealed record SingletonReleaseResult(
     SingletonReleaseStatus Status,
@@ -241,3 +242,20 @@ public sealed record PluginCapabilityResult(
     string Capability,
     CapabilityStatus Status,
     string? StableFailureCode = null);
+
+public sealed record PluginInstallResult(
+    bool Succeeded,
+    string? PluginId,
+    string DiagnosticCode)
+{
+    public static PluginInstallResult Rejected(string code) => new(false, null, code);
+    public static PluginInstallResult Success(string pluginId) => new(true, pluginId, "installed");
+}
+
+public sealed record PluginLifecycleResult(
+    bool Succeeded,
+    string DiagnosticCode)
+{
+    public static PluginLifecycleResult Success() => new(true, "running");
+    public static PluginLifecycleResult Rejected(string code) => new(false, code);
+}

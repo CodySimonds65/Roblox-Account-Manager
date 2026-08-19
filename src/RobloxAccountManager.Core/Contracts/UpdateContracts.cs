@@ -8,7 +8,8 @@ public sealed record UpdatePackage(
     string PackageVersion,
     Uri PackageUri,
     string Sha256,
-    string LocalPath);
+    string LocalPath,
+    bool IsUnsigned = false);
 
 public sealed record UpdateInstallResult(
     bool Accepted,

@@ -3,6 +3,8 @@ using RobloxAccountManager.Core.Contracts;
 using RobloxAccountManager.Core.Capabilities;
 using RobloxAccountManager.Core.Launch;
 using RobloxAccountManager.Core.Navigation;
+using RobloxAccountManager.Core.Data;
+using RobloxAccountManager.Core.Models;
 
 static void Require(bool condition, string message)
 {
@@ -56,6 +58,52 @@ var result = await coordinator.LaunchAsync(new RobloxLaunchRequest(
 Require(result.Succeeded, "The retry coordinator did not return the verified second process.");
 Require(uriCalls == 2 && launcher.LaunchCount == 2, "A retry reused a launch URI or skipped an attempt.");
 Require(locator.SnapshotCount == 2, "The process baseline was not refreshed before every launch attempt.");
+
+Require(GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/games/123/example", out var normalized)
+        && normalized.Contains("/games/123/", StringComparison.Ordinal),
+    "A valid Roblox game URL was not normalized.");
+Require(!GamePreset.TryNormalizeRobloxGameUrl("https://roblox.com.evil.example/games/123", out _),
+    "A lookalike Roblox game URL was accepted.");
+var resolvedSettings = GameSettings.Resolve(
+    new GameSettings { GraphicsQuality = 3, FpsLimit = 60 },
+    new GameSettings { GraphicsQuality = 6 },
+    new GameSettings { MasterVolumeLevel = 4 });
+Require(resolvedSettings.GraphicsQuality == 6 && resolvedSettings.FpsLimit == 60 && resolvedSettings.MasterVolumeLevel == 4,
+    "Scoped Roblox settings did not resolve profile over game over global values.");
+
+var storeRoot = Path.Combine(Path.GetTempPath(), "ram-core-store-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var paths = new LauncherDataPaths(storeRoot);
+    var accounts = new AccountStore(paths);
+    await accounts.SaveAsync([new AccountProfile { Id = Guid.NewGuid().ToString("N"), Label = "Imported" }]);
+    var loadedAccounts = await accounts.LoadAsync();
+    Require(loadedAccounts.Count == 1 && loadedAccounts[0].Label == "Imported", "Portable account storage did not round-trip.");
+
+    var exportPath = Path.Combine(storeRoot, "profile-export.json");
+    var transferSettings = new LauncherSettings
+    {
+        MultiInstanceConsentGranted = true,
+        RobloxSettingsConsentGranted = true,
+        UnsignedUpdatesConsentGranted = true,
+        ClearBrowserDataOnNextStart = true
+    };
+    await ProfileTransferService.ExportAsync(
+        exportPath,
+        loadedAccounts,
+        [new GamePreset("Test", "https://www.roblox.com/games/123/test")],
+        transferSettings);
+    var imported = await ProfileTransferService.ImportAsync(exportPath);
+    Require(!imported.Settings.MultiInstanceConsentGranted
+            && !imported.Settings.RobloxSettingsConsentGranted
+            && !imported.Settings.UnsignedUpdatesConsentGranted
+            && !imported.Settings.ClearBrowserDataOnNextStart,
+        "Profile import carried sensitive local consent into the current installation.");
+}
+finally
+{
+    if (Directory.Exists(storeRoot)) Directory.Delete(storeRoot, recursive: true);
+}
 
 Console.WriteLine("Core security and launch-coordination tests passed.");
 

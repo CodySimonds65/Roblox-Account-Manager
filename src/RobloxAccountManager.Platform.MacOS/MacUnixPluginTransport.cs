@@ -46,17 +46,21 @@ public sealed partial class MacUnixPluginTransport : IAsyncDisposable
 
     public string SocketPath => _socketPath;
 
+    public static string CreateAuthenticationToken() =>
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+
     public string ExpectConnection(
         string pluginId,
         int processId,
         DateTimeOffset processStartTime,
         string manifestSha256,
-        IReadOnlyList<string> declaredCapabilities)
+        IReadOnlyList<string> declaredCapabilities,
+        string? authenticationToken = null)
     {
         if (string.IsNullOrWhiteSpace(pluginId) || processId <= 0 || processStartTime == default ||
             manifestSha256.Length != 64 || !manifestSha256.All(Uri.IsHexDigit))
             throw new ArgumentException("A complete verified plugin identity is required.");
-        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        var token = string.IsNullOrWhiteSpace(authenticationToken) ? CreateAuthenticationToken() : authenticationToken;
         var expected = new ExpectedConnection(
             pluginId,
             processId,

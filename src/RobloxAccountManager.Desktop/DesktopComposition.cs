@@ -1,6 +1,7 @@
 using RobloxAccountManager.Core.Capabilities;
 using RobloxAccountManager.Core.Contracts;
 using RobloxAccountManager.Core.Launch;
+using RobloxAccountManager.Core.Data;
 using RobloxAccountManager.Desktop.Services;
 using RobloxAccountManager.Platform.MacOS;
 
@@ -11,7 +12,12 @@ public sealed record DesktopComposition(
     AvaloniaAccountBrowserSessionService BrowserSessions,
     SerializedLaunchCoordinator? Launches,
     RobloxAccountManager.Core.Contracts.IClientWindowManager? Clients,
-    RobloxAccountManager.Core.Contracts.IPlatformUpdateInstaller? Updates)
+    RobloxAccountManager.Core.Contracts.IPlatformUpdateInstaller? Updates,
+    AccountStore Accounts,
+    GamePresetStore Presets,
+    SettingsStore Settings,
+    RobloxAccountManager.Core.Contracts.IRobloxSettingsAdapter? RobloxSettings,
+    RobloxAccountManager.Core.Contracts.IPluginHostFacade? Plugins)
 {
     public static DesktopComposition Create(
         RobloxPlatform platform,
@@ -22,9 +28,15 @@ public sealed record DesktopComposition(
             ? new MacAccountBrowserDataStoreRemover()
             : new UnsupportedWebsiteDataStoreRemover();
         var browserSessions = new AvaloniaAccountBrowserSessionService(dataStoreRemover);
+        var paths = new LauncherDataPaths();
+        var accounts = new AccountStore(paths);
+        var presets = new GamePresetStore(paths);
+        var settings = new SettingsStore(paths);
         SerializedLaunchCoordinator? launches = null;
         RobloxAccountManager.Core.Contracts.IClientWindowManager? clients = null;
         RobloxAccountManager.Core.Contracts.IPlatformUpdateInstaller? updates = null;
+        RobloxAccountManager.Core.Contracts.IRobloxSettingsAdapter? robloxSettings = null;
+        RobloxAccountManager.Core.Contracts.IPluginHostFacade? plugins = null;
         if (platform == RobloxPlatform.MacOS)
         {
             var registry = new MacManagedProcessRegistry();
@@ -42,17 +54,21 @@ public sealed record DesktopComposition(
                 }
             }
             clients = new MacCoreClientWindowManager(new MacAccessibilityWindowManager(nativeLocator), coreLocator);
-            if (!string.IsNullOrWhiteSpace(trustedInstallerIdentity))
+            robloxSettings = new MacRobloxSettingsAdapter();
+            plugins = new MacPluginHostFacade();
+            if (!string.IsNullOrWhiteSpace(trustedInstallerIdentity) || OperatingSystem.IsMacOS())
             {
                 try
                 {
+                    var unsignedMode = string.IsNullOrWhiteSpace(trustedInstallerIdentity);
                     updates = new MacPkgUpdateInstaller(
                         expectedRid: MacPkgUpdateInstaller.GetCurrentRid(),
                         trust: new MacPkgTrustConfiguration(
-                            trustedInstallerIdentity,
+                            trustedInstallerIdentity ?? "unsigned-development",
                             "io.github.codysimonds65.roblox-account-manager",
                             "io.github.codysimonds65.roblox-account-manager",
-                            "RobloxAccountManager"));
+                            "RobloxAccountManager",
+                            AllowUnsignedPackages: unsignedMode));
                 }
                 catch (ArgumentException)
                 {
@@ -64,7 +80,9 @@ public sealed record DesktopComposition(
 
         var capabilities = new DefaultPlatformCapabilities(
             platform,
+            pluginHostAvailable: plugins?.IsAvailable == true,
+            nativeSettingsAvailable: robloxSettings is not null,
             browserProfileDeletionAvailable: dataStoreRemover.IsSupported);
-        return new DesktopComposition(capabilities, browserSessions, launches, clients, updates);
+        return new DesktopComposition(capabilities, browserSessions, launches, clients, updates, accounts, presets, settings, robloxSettings, plugins);
     }
 }

@@ -41,7 +41,7 @@ public sealed class MacCoreProcessLocator : Contracts.IRobloxProcessLocator
         var result = await new MacLaunchVerificationService(_inner).WaitForNewProcessAsync(
             beforeSnapshot,
             expectedBundle,
-            TimeSpan.FromSeconds(30),
+            request.VerificationTimeout ?? TimeSpan.FromSeconds(30),
             cancellationToken).ConfigureAwait(false);
         if (result.Succeeded && result.NewProcess is not null)
         {

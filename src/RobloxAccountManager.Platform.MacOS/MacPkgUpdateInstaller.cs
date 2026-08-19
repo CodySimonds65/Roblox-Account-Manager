@@ -9,11 +9,12 @@ public sealed record MacPkgTrustConfiguration(
     string ExpectedInstallerIdentity,
     string ExpectedPackageIdentifier,
     string ExpectedBundleIdentifier,
-    string ExpectedExecutableName)
+    string ExpectedExecutableName,
+    bool AllowUnsignedPackages = false)
 {
     public void Validate()
     {
-        if (string.IsNullOrWhiteSpace(ExpectedInstallerIdentity)
+        if ((!AllowUnsignedPackages && string.IsNullOrWhiteSpace(ExpectedInstallerIdentity))
             || string.IsNullOrWhiteSpace(ExpectedPackageIdentifier)
             || string.IsNullOrWhiteSpace(ExpectedBundleIdentifier)
             || string.IsNullOrWhiteSpace(ExpectedExecutableName)
@@ -229,21 +230,32 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
             ["--check-signature", "--", fullPath],
             cancellationToken).ConfigureAwait(false);
         var signatureOutput = signature.StandardOutput + "\n" + signature.StandardError;
-        if (!signature.Succeeded
-            || !signatureOutput.Contains("Status: signed by a certificate trusted by Gatekeeper", StringComparison.OrdinalIgnoreCase)
-            || !signatureOutput.Contains("Developer ID Installer:", StringComparison.OrdinalIgnoreCase))
+        var signatureIsTrusted = signature.Succeeded
+            && signatureOutput.Contains("Status: signed by a certificate trusted by Gatekeeper", StringComparison.OrdinalIgnoreCase)
+            && signatureOutput.Contains("Developer ID Installer:", StringComparison.OrdinalIgnoreCase);
+        if (!signatureIsTrusted)
         {
-            return "pkg-signature-invalid";
+            if (!(package.IsUnsigned && _trust.AllowUnsignedPackages))
+                return "pkg-signature-invalid";
         }
-
-        var expectedSignerLine = _trust.ExpectedInstallerIdentity.StartsWith(
-            "Developer ID Installer:",
-            StringComparison.Ordinal)
-            ? _trust.ExpectedInstallerIdentity.Trim()
-            : "Developer ID Installer: " + _trust.ExpectedInstallerIdentity;
-        if (!signatureOutput.Split('\n').Any(line => string.Equals(line.Trim(), expectedSignerLine, StringComparison.Ordinal)))
+        else
         {
-            return "installer-identity-mismatch";
+            // Development mode only permits a genuinely unsigned package when the
+            // manifest explicitly labels it unsigned. It must never turn off the
+            // signer-identity check for a package that does carry a trusted signature.
+            if (string.IsNullOrWhiteSpace(_trust.ExpectedInstallerIdentity)
+                || string.Equals(_trust.ExpectedInstallerIdentity, "unsigned-development", StringComparison.OrdinalIgnoreCase))
+            {
+                return "installer-identity-mismatch";
+            }
+
+            var expectedSignerLine = _trust.ExpectedInstallerIdentity.StartsWith(
+                "Developer ID Installer:",
+                StringComparison.Ordinal)
+                ? _trust.ExpectedInstallerIdentity.Trim()
+                : "Developer ID Installer: " + _trust.ExpectedInstallerIdentity;
+            if (!signatureOutput.Split('\n').Any(line => string.Equals(line.Trim(), expectedSignerLine, StringComparison.Ordinal)))
+                return "installer-identity-mismatch";
         }
 
         var expanded = await InspectExpandedPackageAsync(fullPath, package, cancellationToken).ConfigureAwait(false);
@@ -356,10 +368,25 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
                 return "pkg-payload-uninspectable";
             }
 
-            var packageInfos = Directory.EnumerateFiles(expansionRoot, "PackageInfo", SearchOption.AllDirectories).ToArray();
-            if (packageInfos.Length == 0)
+            var unsafePayload = RejectUnsafeExpandedEntries(expansionRoot);
+            if (unsafePayload is not null)
             {
-                return "pkg-identity-missing";
+                return unsafePayload;
+            }
+
+            if (Directory.EnumerateDirectories(expansionRoot, "*", SearchOption.AllDirectories)
+                    .Any(path => string.Equals(Path.GetFileName(path), "Scripts", StringComparison.OrdinalIgnoreCase))
+                || Directory.EnumerateFiles(expansionRoot, "*.sh", SearchOption.AllDirectories).Any()
+                || Directory.EnumerateFiles(expansionRoot, "preinstall", SearchOption.AllDirectories).Any()
+                || Directory.EnumerateFiles(expansionRoot, "postinstall", SearchOption.AllDirectories).Any())
+            {
+                return "pkg-installer-scripts-not-allowed";
+            }
+
+            var packageInfos = Directory.EnumerateFiles(expansionRoot, "PackageInfo", SearchOption.AllDirectories).ToArray();
+            if (packageInfos.Length != 1)
+            {
+                return packageInfos.Length == 0 ? "pkg-identity-missing" : "pkg-multiple-components-not-allowed";
             }
 
             var matchedIdentity = false;
@@ -370,10 +397,22 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
                 {
                     var document = XDocument.Parse(xml, LoadOptions.PreserveWhitespace);
                     var root = document.Root;
+                    if (document.Descendants().Any(element =>
+                            string.Equals(element.Name.LocalName, "scripts", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(element.Name.LocalName, "script", StringComparison.OrdinalIgnoreCase)
+                            || element.Name.LocalName.EndsWith("install", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return "pkg-installer-scripts-not-allowed";
+                    }
                     matchedIdentity |= string.Equals(root?.Attribute("identifier")?.Value,
                         _trust.ExpectedPackageIdentifier, StringComparison.Ordinal);
                     if (matchedIdentity)
                     {
+                        if (!string.Equals(root?.Attribute("install-location")?.Value, "/Applications", StringComparison.Ordinal))
+                        {
+                            return "pkg-install-location-mismatch";
+                        }
+
                         // The package's internal version is checked below against the signed
                         // update manifest's requested version; do not accept a versionless node.
                         if (root?.Attribute("version") is null)
@@ -413,12 +452,13 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
                 return "pkg-version-mismatch";
             }
 
-            var plistPath = Path.Combine(
-                expansionRoot,
-                "Payload",
-                "Roblox Account Manager.app",
-                "Contents",
-                "Info.plist");
+            var payloadValidation = ValidatePayloadTree(expansionRoot);
+            if (payloadValidation.Error is not null)
+            {
+                return payloadValidation.Error;
+            }
+
+            var plistPath = Path.Combine(payloadValidation.AppRoot!, "Contents", "Info.plist");
             if (!File.Exists(plistPath))
             {
                 return "pkg-payload-app-missing";
@@ -458,9 +498,7 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
             }
 
             var executable = Path.Combine(
-                expansionRoot,
-                "Payload",
-                "Roblox Account Manager.app",
+                payloadValidation.AppRoot!,
                 "Contents",
                 "MacOS",
                 _trust.ExpectedExecutableName);
@@ -484,7 +522,7 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
 
             return null;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.Xml.XmlException)
         {
             return "pkg-payload-uninspectable";
         }
@@ -495,6 +533,74 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
                 try { Directory.Delete(expansionParent, recursive: true); } catch { }
             }
         }
+    }
+
+    private static string? RejectUnsafeExpandedEntries(string root)
+    {
+        var pending = new Stack<string>([root]);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            PathSafety.RejectSymlinkDirectory(directory);
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory, "*", SearchOption.TopDirectoryOnly))
+            {
+                PathSafety.RejectSymlink(entry);
+                if (Directory.Exists(entry)) pending.Push(entry);
+            }
+        }
+
+        return null;
+    }
+
+    private static (string? AppRoot, string? Error) ValidatePayloadTree(string expansionRoot)
+    {
+        var payloadRoot = Path.Combine(expansionRoot, "Payload");
+        if (!Directory.Exists(payloadRoot))
+        {
+            return (null, "pkg-payload-missing");
+        }
+
+        var appRoots = new[]
+        {
+            Path.Combine(payloadRoot, "Applications", "Roblox Account Manager.app"),
+            Path.Combine(payloadRoot, "Roblox Account Manager.app")
+        };
+        var appRoot = appRoots.FirstOrDefault(Directory.Exists);
+        if (appRoot is null)
+        {
+            return (null, "pkg-payload-app-missing");
+        }
+
+        var allowedRoots = appRoots
+            .Where(Directory.Exists)
+            .Select(path => Path.GetRelativePath(payloadRoot, path).Replace(Path.DirectorySeparatorChar, '/'))
+            .ToArray();
+        var pending = new Stack<string>([payloadRoot]);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory, "*", SearchOption.TopDirectoryOnly))
+            {
+                var relative = Path.GetRelativePath(payloadRoot, entry).Replace(Path.DirectorySeparatorChar, '/');
+                if (relative.StartsWith("/", StringComparison.Ordinal)
+                    || relative.Split('/').Any(part => part is "" or "." or ".."))
+                {
+                    return (null, "pkg-payload-path-invalid");
+                }
+
+                var isAllowed = allowedRoots.Any(root => relative.Equals(root, StringComparison.Ordinal)
+                    || relative.StartsWith(root + "/", StringComparison.Ordinal))
+                    || string.Equals(relative, "Applications", StringComparison.Ordinal);
+                if (!isAllowed)
+                {
+                    return (null, "pkg-payload-unexpected-path");
+                }
+
+                if (Directory.Exists(entry)) pending.Push(entry);
+            }
+        }
+
+        return (appRoot, null);
     }
 
     public static string GetCurrentRid()

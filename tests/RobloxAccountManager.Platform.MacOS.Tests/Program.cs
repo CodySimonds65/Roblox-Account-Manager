@@ -1,5 +1,6 @@
 using RobloxAccountManager.Platform.MacOS;
 using Contracts = RobloxAccountManager.Core.Contracts;
+using RobloxAccountManager.Core.Models;
 using System.Security.Cryptography;
 
 var passed = 0;
@@ -127,6 +128,50 @@ try
     Check(registry.IsRegistered(identity), "An explicitly registered identity was not retained.");
     registry.Unregister(identity);
     Check(!registry.IsRegistered(identity), "An unregistered identity remained managed.");
+
+    var robloxSettingsPath = Path.Combine(tempRoot, "GlobalBasicSettings_13.xml");
+    var robloxEnginePath = Path.Combine(tempRoot, "ClientAppSettings.json");
+    await File.WriteAllTextAsync(robloxSettingsPath,
+        "<Roblox><Item class=\"UserGameSettings\"><Properties>" +
+        "<Item name=\"GraphicsQuality\"><int name=\"value\">3</int></Item>" +
+        "<Item name=\"FramerateCap\"><int name=\"value\">60</int></Item>" +
+        "</Properties></Item></Roblox>");
+    await File.WriteAllTextAsync(robloxEnginePath, "{\"ExistingFlag\": true}");
+    var settingsAdapter = new MacRobloxSettingsAdapter(robloxSettingsPath, robloxEnginePath);
+    var settingsResult = await settingsAdapter.ApplyAsync(new GameSettings { GraphicsQuality = 7, FpsLimit = 120, TextureQuality = 2 });
+    Check(settingsResult.Applied.Contains("graphics-quality") && settingsResult.Applied.Contains("fps") && settingsResult.Applied.Contains("engine-flags"),
+        "The macOS Roblox settings adapter did not apply supported settings.");
+    Check((await File.ReadAllTextAsync(robloxEnginePath)).Contains("DFIntTextureQualityOverride", StringComparison.Ordinal),
+        "The macOS Roblox settings adapter did not persist engine flags atomically.");
+
+    var partialSettingsPath = Path.Combine(tempRoot, "PartialGlobalBasicSettings_13.xml");
+    var partialEnginePath = Path.Combine(tempRoot, "PartialClientAppSettings.json");
+    await File.WriteAllTextAsync(partialSettingsPath,
+        "<Roblox><Item class=\"UserGameSettings\"><Properties>" +
+        "<Item name=\"GraphicsQuality\"><int name=\"value\">3</int></Item>" +
+        "</Properties></Item></Roblox>");
+    await File.WriteAllTextAsync(partialEnginePath, "{\"ExistingFlag\": true}");
+    var partialAdapter = new MacRobloxSettingsAdapter(partialSettingsPath, partialEnginePath);
+    var partialResult = await partialAdapter.ApplyAsync(new GameSettings { GraphicsQuality = 7, FpsLimit = 120, TextureQuality = 2 });
+    Check(!partialResult.Succeeded && partialResult.Skipped.Count > 0,
+        "The macOS settings adapter reported partial unsupported settings as successful.");
+    Check(!(await File.ReadAllTextAsync(partialEnginePath)).Contains("DFIntTextureQualityOverride", StringComparison.Ordinal),
+        "The macOS settings adapter committed engine flags after an unsupported scoped setting.");
+
+    var pluginRoot = Path.Combine(tempRoot, "plugins");
+    var pluginDirectory = Path.Combine(pluginRoot, "sample.plugin");
+    Directory.CreateDirectory(pluginDirectory);
+    await File.WriteAllTextAsync(Path.Combine(pluginDirectory, "plugin.json"),
+        "{\"schemaVersion\":2,\"id\":\"sample.plugin\",\"capabilities\":[\"host.accounts.read\"],\"entryPoints\":{\"osx-x64\":\"plugin\"}}");
+    await File.WriteAllBytesAsync(Path.Combine(pluginDirectory, "plugin"), [1, 2, 3]);
+    var pluginHost = new MacPluginHostFacade(pluginRoot);
+    var pluginIds = await pluginHost.GetInstalledPluginIdsAsync();
+    Check(pluginIds.Contains("sample.plugin", StringComparer.Ordinal),
+        "A macOS RID-matched plugin was not discovered.");
+    var unsupportedStart = await pluginHost.StartAsync("sample.plugin", userConfirmed: true);
+    if (!OperatingSystem.IsMacOS())
+        Check(!unsupportedStart.Succeeded && unsupportedStart.DiagnosticCode == "platform-not-supported",
+            "The macOS plugin host attempted to start a plugin off-host.");
 }
 finally
 {
@@ -247,6 +292,36 @@ try
     Check(await wrongArchitecture.ValidateAsync(validPackage) == "pkg-architecture-mismatch",
         "A PKG with the wrong payload architecture was accepted.");
 
+    var unexpectedPayload = new MacPkgUpdateInstaller(
+        new RecordingCommandRunner(signedRunner.SignatureResult, includeUnexpectedPayload: true),
+        expectedRid: "osx-arm64",
+        trust,
+        updateRoot,
+        "2",
+        "2.0");
+    Check(await unexpectedPayload.ValidateAsync(validPackage) == "pkg-payload-unexpected-path",
+        "A PKG with an unexpected payload path was accepted.");
+
+    var scriptedPayload = new MacPkgUpdateInstaller(
+        new RecordingCommandRunner(signedRunner.SignatureResult, includeScripts: true),
+        expectedRid: "osx-arm64",
+        trust,
+        updateRoot,
+        "2",
+        "2.0");
+    Check(await scriptedPayload.ValidateAsync(validPackage) == "pkg-installer-scripts-not-allowed",
+        "A PKG with installer scripts was accepted.");
+
+    var declaredScript = new MacPkgUpdateInstaller(
+        new RecordingCommandRunner(signedRunner.SignatureResult, includeScriptDeclaration: true),
+        expectedRid: "osx-arm64",
+        trust,
+        updateRoot,
+        "2",
+        "2.0");
+    Check(await declaredScript.ValidateAsync(validPackage) == "pkg-installer-scripts-not-allowed",
+        "A PKG with a PackageInfo script declaration was accepted.");
+
     var unsigned = new MacPkgUpdateInstaller(
         new RecordingCommandRunner(new MacProcessCommandResult(1, string.Empty, "signature invalid")),
         expectedRid: "osx-arm64",
@@ -256,6 +331,27 @@ try
         "2.0");
     Check(await unsigned.ValidateAsync(validPackage) == "pkg-signature-invalid",
         "An invalid pkgutil signature was accepted.");
+
+    var unsignedDevelopmentTrust = trust with { ExpectedInstallerIdentity = "unsigned-development", AllowUnsignedPackages = true };
+    var unsignedDevelopment = new MacPkgUpdateInstaller(
+        new RecordingCommandRunner(new MacProcessCommandResult(1, string.Empty, "unsigned package")),
+        expectedRid: "osx-arm64",
+        unsignedDevelopmentTrust,
+        updateRoot,
+        "2",
+        "2.0");
+    Check(await unsignedDevelopment.ValidateAsync(validPackage with { IsUnsigned = true }) is null,
+        "The explicitly labeled unsigned development PKG was not accepted after checksum and payload validation.");
+
+    var signedInUnsignedMode = new MacPkgUpdateInstaller(
+        signedRunner,
+        expectedRid: "osx-arm64",
+        unsignedDevelopmentTrust,
+        updateRoot,
+        "2",
+        "2.0");
+    Check(await signedInUnsignedMode.ValidateAsync(validPackage) == "installer-identity-mismatch",
+        "Unsigned development mode disabled trusted signer identity validation.");
 
     var openArguments = MacPkgUpdateInstaller.BuildOpenArguments(validPackage);
     Check(openArguments.Count == 4
@@ -287,7 +383,10 @@ sealed class RecordingCommandRunner(
     MacProcessCommandResult signatureResult,
     string packageIdentifier = "com.example.roblox.pkg",
     string packageVersion = "3",
-    string architecture = "arm64") : IMacProcessCommandRunner
+    string architecture = "arm64",
+    bool includeUnexpectedPayload = false,
+    bool includeScripts = false,
+    bool includeScriptDeclaration = false) : IMacProcessCommandRunner
 {
     public List<(string Executable, IReadOnlyList<string> Arguments)> Calls { get; } = [];
     public MacProcessCommandResult SignatureResult => signatureResult;
@@ -313,8 +412,9 @@ sealed class RecordingCommandRunner(
             var appContents = Path.Combine(expansionRoot, "Payload", "Roblox Account Manager.app", "Contents");
             var payload = Path.Combine(appContents, "MacOS");
             Directory.CreateDirectory(payload);
+            var scriptXml = includeScriptDeclaration ? "<scripts><custom file=\"run-me\" /></scripts>" : string.Empty;
             File.WriteAllText(Path.Combine(expansionRoot, "PackageInfo"),
-                $"<pkg-info identifier=\"{packageIdentifier}\" version=\"{packageVersion}\" />");
+                $"<pkg-info identifier=\"{packageIdentifier}\" version=\"{packageVersion}\" install-location=\"/Applications\">{scriptXml}</pkg-info>");
             File.WriteAllText(Path.Combine(appContents, "Info.plist"),
                 "<?xml version=\"1.0\"?><plist><dict>" +
                 "<key>CFBundleIdentifier</key><string>io.github.codysimonds65.roblox-account-manager</string>" +
@@ -322,6 +422,18 @@ sealed class RecordingCommandRunner(
                 "<key>CFBundleShortVersionString</key><string>3.0</string>" +
                 "</dict></plist>");
             File.WriteAllBytes(Path.Combine(payload, "RobloxAccountManager"), [1, 2, 3]);
+            if (includeUnexpectedPayload)
+            {
+                var unexpected = Path.Combine(expansionRoot, "Payload", "Library", "LaunchDaemons");
+                Directory.CreateDirectory(unexpected);
+                File.WriteAllText(Path.Combine(unexpected, "unexpected.plist"), "not allowed");
+            }
+            if (includeScripts)
+            {
+                var scripts = Path.Combine(expansionRoot, "Scripts");
+                Directory.CreateDirectory(scripts);
+                File.WriteAllText(Path.Combine(scripts, "postinstall"), "#!/bin/sh");
+            }
             return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
         }
 
