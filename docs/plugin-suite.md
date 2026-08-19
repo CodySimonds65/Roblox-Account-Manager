@@ -2,11 +2,15 @@
 
 The launcher owns account identity, activity timestamps, HWND/process validation, authenticated plugin IPC, input arbitration, action routing, installation, and lifecycle supervision. RAM Macros, RAM OCR, and RAM AFK are separate medium-integrity processes. They receive only the capabilities explicitly accepted in the Plugins window.
 
-## Focus-safety gate
+## Foreground automation and safety
 
-Production code is statically rejected if it contains `SendInput`, `SetForegroundWindow`, `BringWindowToTop`, or `AttachThreadInput`. Input is posted only to a freshly validated managed-client HWND. The validator checks `IsWindow`, process ID, process start time, minimized state, and client metrics immediately before each message. Window arrangement always uses `SWP_NOACTIVATE` and stores identity-qualified snapshots.
+Roblox does not consume the legacy background `PostMessage` path for gameplay input. Production automation therefore uses one host-owned `ForegroundAutomationCoordinator` and the guarded `SendInput` injector. Macro, AFK, and OCR actions are serialized through one desktop-wide session: the selected client is foregrounded, its process/HWND/start-time identity is revalidated before every event, and the original foreground client/tab is restored once the batch finishes when Windows still permits it.
 
-The automated gate is `build/verify-focus-safety.ps1`. A live acceptance run still must use real Roblox clients: keep another app foreground, move/resize clients across mixed-DPI monitors, test keyboard/mouse delivery, and record both foreground transitions and in-game consumption. A queued `PostMessage` is not treated as proof that Roblox consumed the input; an ignored message is reported and skipped.
+This is intentionally visible automation. The user may see a short focus/foreground change and mouse macros may move the cursor. A user Alt-Tab or click takeover cancels the session and RAM does not fight to reclaim focus. Stale/exited clients, denied activation, plugin disconnects, and shutdown fail closed; held-input cleanup is attempted only while the validated target remains safe.
+
+Official plugins request `host.input.foreground.real`. Legacy `host.input.background` and `host.input.background.messages` remain wire-compatible but fail with `foreground-required`; they never upgrade to real input and no production `PostMessage` delivery remains. The automated gate is `build/verify-focus-safety.ps1`, which restricts activation to the coordinator and injection to the guarded injector while rejecting activation/input APIs elsewhere. Window arrangement continues to use `SWP_NOACTIVATE`.
+
+A live acceptance run must use real Roblox clients: keep another app foreground, test two managed clients in order, verify user takeover cancellation, move/resize across mixed-DPI monitors, and record foreground transitions, cursor behavior, held-input release, and in-game consumption. A successful `SendInput` call proves delivery to Windows only—not a particular game action.
 
 ## Installation trust
 
@@ -14,7 +18,7 @@ Official catalog URLs require a pinned Ed25519 signature and an embedded manifes
 
 ## Release gate status
 
-The host, SDK, installer, broker, action bridge, lifecycle supervision, and the three standalone plugin cores are implemented and covered by local build, test, and static gates. The official catalog points at future signed release assets; those assets are not published until the pinned signing key is provisioned and the live Roblox acceptance run passes. RAM OCR currently exposes the capture/matching boundary and trigger engine; the Windows Graphics Capture and Windows OCR runtime adapter remains a release task rather than an assumption.
+The host, SDK, installer, foreground coordinator, action bridge, lifecycle supervision, and the three standalone plugin cores are implemented and covered by local build, test, and static gates. The official catalog points at future signed release assets; those assets are not published until the pinned signing key is provisioned and the live Roblox acceptance run passes. RAM OCR exposes the capture/matching boundary and trigger engine; a platform OCR adapter can be supplied without changing the foreground-session contract.
 
 The remaining non-blocking polish is restoring minimized/maximized state on RESET and distributing GRID across multiple work areas. Neither item may introduce activation or a foreground-input fallback.
 

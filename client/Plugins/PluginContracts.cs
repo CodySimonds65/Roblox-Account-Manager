@@ -18,8 +18,9 @@ public static class PluginCapabilities
     public const string HostActivityRead = "host.queries.account-activity";
     public const string HostThemeRead = "host.theme.read";
     public const string HostInputBackground = "host.input.background";
-    // Keep the legacy capability accepted for already released plugins. New
-    // manifests can expose the explicit message-only boundary in consent.
+    // Retained so already-installed manifests can receive an explicit
+    // foreground-required failure instead of silently falling back to a
+    // delivery mechanism Roblox does not consume.
     public const string HostInputBackgroundMessages = "host.input.background.messages";
     public const string HostInputForegroundReal = "host.input.foreground.real";
     public const string HostActionsRegister = "host.actions.register";
@@ -72,10 +73,7 @@ public enum PluginInputKind
     MouseWheel
 }
 
-/// <summary>
-/// An input request's delivery preference. Default preserves the existing
-/// guarded foreground route; PostMessageProbe is an opt-in diagnostic path.
-/// </summary>
+/// <summary>Legacy delivery preference retained for wire compatibility.</summary>
 public enum InputDeliveryIntent
 {
     Default,
@@ -92,6 +90,18 @@ public sealed record PluginInputEvent(
     double NormalizedX,
     double NormalizedY,
     long OffsetMicroseconds);
+
+public sealed record ForegroundSessionRequest(
+    string[] AccountIds,
+    string Purpose = "automation",
+    bool RestoreForeground = true);
+
+public sealed record ForegroundSessionAccountRequest(string SessionId, string AccountId);
+
+public sealed record ForegroundSessionCloseRequest(
+    string SessionId,
+    bool RestoreForeground = true,
+    bool UserInitiated = false);
 
 public sealed record ActionDescriptor(
     string ActionId,

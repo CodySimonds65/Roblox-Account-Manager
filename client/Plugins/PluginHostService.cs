@@ -36,6 +36,7 @@ public sealed class PluginHostService : IAsyncDisposable
     public PriorityInputLeaseCoordinator InputLeases { get; } = new();
     public Func<string, IReadOnlyList<PluginInputEvent>, CancellationToken, Task<BackgroundInputResult>>? InputDispatcher { get; set; }
     public Func<string, IReadOnlyList<PluginInputEvent>, InputDeliveryIntent, string?, CancellationToken, Task<BackgroundInputResult>>? InputDispatcherWithIntent { get; set; }
+    public Func<string, string, string?, IReadOnlyList<PluginInputEvent>, InputDeliveryIntent, string?, CancellationToken, Task<BackgroundInputResult>>? InputDispatcherWithSession { get; set; }
 
     private const int MaxActiveDispatchesPerPlugin = 8;
     private const int MaxActiveDispatchesGlobal = 32;
@@ -295,6 +296,11 @@ public sealed class PluginHostService : IAsyncDisposable
                     HandleHotkeySubscribe(connection, envelope);
                     continue;
                 }
+                if (envelope.Type is "input.session.open" or "input.session.activate" or "input.session.close")
+                {
+                    MessageReceived?.Invoke(this, (connection, envelope));
+                    continue;
+                }
                 MessageReceived?.Invoke(this, (connection, envelope));
             }
         }
@@ -352,16 +358,24 @@ public sealed class PluginHostService : IAsyncDisposable
                           ?? throw new InvalidDataException("input.post payload is invalid.");
             ValidateInputRequest(request);
             var intent = ParseDeliveryIntent(request.DeliveryIntent);
-            // The legacy/background capabilities are permanently message-only.
-            // A plugin must explicitly hold the foreground-real capability before
-            // the default route can ever use the guarded foreground injector.
-            if (!connection.GrantedCapabilities.Contains(PluginCapabilities.HostInputForegroundReal))
-                intent = InputDeliveryIntent.PostMessageProbe;
             var traceId = string.IsNullOrWhiteSpace(request.TraceId) ? envelope.RequestId : request.TraceId;
             if (!TryReserveInputDispatch(connection.PluginId, envelope.RequestId, request, out dispatch, out var reservationError))
             {
                 await connection.SendAsync("input.result", BackgroundInputResult.Failure(reservationError.Code,
                     reservationError.Message, nint.Zero, nint.Zero), envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
+                return;
+            }
+            if (!connection.GrantedCapabilities.Contains(PluginCapabilities.HostInputForegroundReal))
+            {
+                CompleteInputDispatch(dispatch);
+                await connection.SendAsync("input.result", BackgroundInputResult.Failure(
+                    "foreground-required",
+                    "This input capability is message-only and Roblox foreground automation requires explicit foreground-real consent.",
+                    nint.Zero, nint.Zero) with
+                {
+                    RequestedCount = request.Events.Count,
+                    TraceId = traceId
+                }, envelope.RequestId, _shutdown.Token).ConfigureAwait(false);
                 return;
             }
             var activeDispatch = dispatch!;
@@ -439,8 +453,10 @@ public sealed class PluginHostService : IAsyncDisposable
                 });
                 try
                 {
-                    var result = InputDispatcherWithIntent is not null
-                        ? await InputDispatcherWithIntent(request.AccountId, request.Events, intent, traceId, pacingSource.Token).ConfigureAwait(false)
+                    var result = InputDispatcherWithSession is not null
+                        ? await InputDispatcherWithSession(connection.PluginId, request.AccountId, request.SessionId, request.Events, intent, traceId, pacingSource.Token).ConfigureAwait(false)
+                        : InputDispatcherWithIntent is not null
+                            ? await InputDispatcherWithIntent(request.AccountId, request.Events, intent, traceId, pacingSource.Token).ConfigureAwait(false)
                         : InputDispatcher is null
                             ? BackgroundInputResult.Failure("unavailable", "The host input broker is unavailable.", nint.Zero, nint.Zero)
                             : await InputDispatcher(request.AccountId, request.Events, pacingSource.Token).ConfigureAwait(false);
@@ -571,7 +587,7 @@ public sealed class PluginHostService : IAsyncDisposable
 
     private static InputDeliveryIntent ParseDeliveryIntent(string? value) => value?.Trim().ToLowerInvariant() switch
     {
-        null or "" or "default" or "auto" => InputDeliveryIntent.Default,
+        null or "" or "default" or "auto" or "foreground" or "foreground-real" => InputDeliveryIntent.Default,
         "postmessageprobe" or "post-message-probe" or "post-message" or "message-only" or "background-message" => InputDeliveryIntent.PostMessageProbe,
         _ => throw new InvalidDataException("input.post deliveryIntent is unsupported.")
     };
@@ -611,8 +627,7 @@ public sealed class PluginHostService : IAsyncDisposable
             }
             else if (input.Kind is PluginInputKind.MouseButtonDown or PluginInputKind.MouseButtonUp)
             {
-                // RAM's stable wire encoding is 0=left, 1=right, 2=middle;
-                // this matches FocusSafeInputBroker's WM_* mapping.
+                // RAM's stable wire encoding is 0=left, 1=right, 2=middle.
                 if (input.Button is < 0 or > 2)
                     throw new InvalidDataException("input.post mouse button is invalid.");
             }
@@ -630,7 +645,7 @@ public sealed class PluginHostService : IAsyncDisposable
     };
 
     private sealed record InputPostRequest(string AccountId, IReadOnlyList<PluginInputEvent> Events,
-        string? DeliveryIntent = null, string? TraceId = null);
+        string? DeliveryIntent = null, string? TraceId = null, string? SessionId = null);
 
     private sealed record ActiveInputDispatch(string Key, string PluginId, string AccountId, int EventCount,
         CancellationTokenSource Cancellation);
@@ -711,6 +726,8 @@ public sealed class PluginConnection : IAsyncDisposable
                  GrantedCapabilities.Contains(PluginCapabilities.HostInputBackgroundMessages) ||
                  GrantedCapabilities.Contains(PluginCapabilities.HostInputForegroundReal))
                     ? "__input-authorized__" : null,
+            "input.session.open" or "input.session.activate" or "input.session.close" =>
+                GrantedCapabilities.Contains(PluginCapabilities.HostInputForegroundReal) ? "__foreground-input__" : null,
             "action.register" => PluginCapabilities.HostActionsRegister,
             "action.invoke" => PluginCapabilities.HostActionsInvoke,
             "screen.capture" => PluginCapabilities.SystemReadScreen,
@@ -718,7 +735,7 @@ public sealed class PluginConnection : IAsyncDisposable
             "action.result" or "action.progress" or "plugin.heartbeat" or "plugin.shutdown" or "diagnostic.log" or "hotkey.subscribe" => "",
             _ => null
         };
-        return required is not null && (required.Length == 0 || required == "__input-authorized__" || GrantedCapabilities.Contains(required));
+        return required is not null && (required.Length == 0 || required == "__input-authorized__" || required == "__foreground-input__" || GrantedCapabilities.Contains(required));
     }
 
     public async Task SendAsync(string type, object payload, string requestId, CancellationToken cancellationToken)

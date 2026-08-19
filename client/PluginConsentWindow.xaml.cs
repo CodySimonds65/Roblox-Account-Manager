@@ -35,7 +35,9 @@ public partial class PluginConsentWindow : Window
 
     private static string CapabilityDescription(string capability) => capability switch
     {
-        PluginCapabilities.HostInputBackground => "Send background key and mouse messages to managed Roblox windows",
+        PluginCapabilities.HostInputBackground => "Legacy background input (disabled; requests fail foreground-required)",
+        PluginCapabilities.HostInputBackgroundMessages => "Legacy background messages (disabled; requests fail foreground-required)",
+        PluginCapabilities.HostInputForegroundReal => "Automate managed Roblox clients with real foreground input; focus may switch briefly and mouse actions may move the cursor",
         PluginCapabilities.SystemWatchGlobalInput => "Observe global input while recording",
         PluginCapabilities.SystemReadScreen => "Capture screen regions for OCR/color matching",
         PluginCapabilities.HostActionsRegister => "Register actions for other plugins",
