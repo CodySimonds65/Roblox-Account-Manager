@@ -227,6 +227,28 @@ finally
     if (Directory.Exists(exitStateRoot)) Directory.Delete(exitStateRoot, recursive: true);
 }
 
+var terminationStateRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-terminate-" + Guid.NewGuid().ToString("N"));
+try
+{
+    using var terminationRegistry = new RunningAccountRegistry(terminationStateRoot);
+    using var managedProcess = Process.Start(new ProcessStartInfo("cmd.exe", "/c ping 127.0.0.1 -n 30 > nul")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true
+    }) ?? throw new InvalidOperationException("The termination helper process did not start.");
+    terminationRegistry.Register(new AccountProfile { Id = "terminate-test", Label = "Terminate test" }, managedProcess);
+    Require(await terminationRegistry.TerminateAccountAsync("terminate-test"),
+        "The registry did not terminate the managed helper process.");
+    Require(managedProcess.HasExited, "The managed helper process remained alive after termination.");
+    Require(terminationRegistry.Snapshot().Count == 0, "The terminated account remained registered.");
+}
+finally
+{
+    if (Directory.Exists(terminationStateRoot)) Directory.Delete(terminationStateRoot, recursive: true);
+}
+
+Console.WriteLine("Managed-account termination smoke tests passed.");
+
 var legacySettings = JsonSerializer.Deserialize<LauncherSettings>("{}");
 Require(legacySettings?.GameSettings is not null && legacySettings.GameOverrides is not null,
     "Legacy launcher settings did not receive game-settings defaults.");
@@ -1060,6 +1082,10 @@ try
     Require(subscribeRejected is not null, "The plugin host did not reject an invalid hotkey subscription.");
     var rejectReason = subscribeRejected!.Payload.TryGetProperty("reason", out var reasonElement) ? reasonElement.GetString() : null;
     Require(rejectReason == "invalid-request", "The invalid hotkey subscription was not rejected as invalid-request.");
+    // The loopback account uses this smoke-test process as a stand-in client;
+    // unregister it before PluginRuntime.DisposeAsync performs managed-client
+    // shutdown so the test runner itself is never terminated.
+    Require(inputRuntime.Accounts.Remove(inputAccountId), "The loopback input account was not removed.");
 }
 finally
 {
@@ -1079,19 +1105,41 @@ Require(InputSendInjector.ButtonFlag(1, down: true) == 0x0008 && InputSendInject
 Require(InputSendInjector.ButtonFlag(4, down: true) == 0, "An unsupported button must map to no flag.");
 Require(unchecked((short)InputSendInjector.WheelData(120)) == 120 && unchecked((short)InputSendInjector.WheelData(-120)) == -120,
     "Wheel delta mapping is wrong.");
+var virtualOrigin = InputSendInjector.NormalizeAbsolutePoint(-1920, 0, -1920, 0, 3840, 1080);
+var virtualEnd = InputSendInjector.NormalizeAbsolutePoint(1919, 1079, -1920, 0, 3840, 1080);
+Require(virtualOrigin == (0, 0) && virtualEnd == (65535, 65535),
+    "Virtual-desktop coordinates were not normalized for atomic SendInput mouse delivery.");
+var heldSequence = new[]
+{
+    new PluginInputEvent(PluginInputKind.KeyDown, 0x41, 0x1E, false, 0, 0, 0, 0, 0),
+    new PluginInputEvent(PluginInputKind.MouseButtonDown, 0, 0, false, 0, 0, 0.5, 0.5, 100),
+    new PluginInputEvent(PluginInputKind.KeyUp, 0x41, 0x1E, false, 0, 0, 0, 0, 200)
+};
+var heldReleases = InputSendInjector.PendingReleases(heldSequence);
+Require(heldReleases.Count == 1 && heldReleases[0].Kind == PluginInputKind.MouseButtonUp &&
+        heldReleases[0].Button == 0 && heldReleases[0].OffsetMicroseconds == 0,
+    "Interrupted macro playback did not derive a targeted release for held input.");
+var releaseFallbackCalled = false;
+var releaseRecovered = await InputSendInjector.ReleasePendingInputsAsync(
+    heldReleases,
+    realTargetSafe: true,
+    _ => false,
+    _ => { releaseFallbackCalled = true; return Task.CompletedTask; });
+Require(releaseRecovered && releaseFallbackCalled,
+    "A failed real held-input release did not invoke the targeted background fallback.");
 
 Console.WriteLine("Plugin input injector mapping smoke tests passed.");
 
-Require(PluginRuntime.SelectInputDeliveryMode(embedded: true, selectedVisible: true, hostForeground: true) ==
+Require(PluginRuntime.SelectInputDeliveryMode(docked: true, selectedVisible: true, targetForeground: true) ==
         PluginRuntime.InputDeliveryMode.GuardedReal,
     "A visible embedded foreground client did not select guarded real input.");
-Require(PluginRuntime.SelectInputDeliveryMode(embedded: true, selectedVisible: false, hostForeground: true) ==
+Require(PluginRuntime.SelectInputDeliveryMode(docked: true, selectedVisible: false, targetForeground: true) ==
         PluginRuntime.InputDeliveryMode.BackgroundMessage,
     "A hidden embedded client selected system-wide input.");
-Require(PluginRuntime.SelectInputDeliveryMode(embedded: true, selectedVisible: true, hostForeground: false) ==
+Require(PluginRuntime.SelectInputDeliveryMode(docked: true, selectedVisible: true, targetForeground: false) ==
         PluginRuntime.InputDeliveryMode.BackgroundMessage,
     "An embedded client selected system-wide input while another application was foreground.");
-Require(PluginRuntime.SelectInputDeliveryMode(embedded: false, selectedVisible: false, hostForeground: false) ==
+Require(PluginRuntime.SelectInputDeliveryMode(docked: false, selectedVisible: false, targetForeground: false) ==
         PluginRuntime.InputDeliveryMode.BackgroundMessage,
     "A non-embedded client did not select background input.");
 
@@ -1106,52 +1154,88 @@ Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { Ro
     "A changed embedded HWND was accepted for real input.");
 Require(!PluginRuntime.MatchesInputTarget(routeExpected, routeExpected with { IsRunning = false }, (nint)0x2222),
     "An exited input target was accepted for real input.");
+Require(PluginRuntime.MatchesReleaseTarget(routeExpected, routeExpected, (nint)0x2222, (nint)0x2222, (nint)0x1111),
+    "A background release targeting the validated render/input HWND was rejected.");
+Require(!PluginRuntime.MatchesReleaseTarget(routeExpected, routeExpected, (nint)0x2222, (nint)0x2222, (nint)0x2222),
+    "A background release incorrectly required the root HWND instead of the current render/input HWND.");
 
 Console.WriteLine("Plugin input routing smoke tests passed.");
 
 using (var nativeHost = NativeEmbeddingTestWindow.CreateHost())
-using (var firstRoot = NativeEmbeddingTestWindow.CreateRoot(-31900, -31900, 800, 600))
+using (var firstOwner = NativeEmbeddingTestWindow.CreateOwner())
+using (var firstRoot = NativeEmbeddingTestWindow.CreateRoot(-31900, -31900, 800, 600, firstOwner.Handle))
 using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 1024, 768))
 {
     var firstOriginalStyle = firstRoot.Style;
+    var firstOriginalExStyle = firstRoot.ExStyle;
+    var firstOriginalParent = firstRoot.Parent;
+    var firstOriginalOwner = firstRoot.Owner;
     var firstOriginalBounds = firstRoot.Bounds;
     var secondOriginalStyle = secondRoot.Style;
+    var secondOriginalExStyle = secondRoot.ExStyle;
+    var secondOriginalParent = secondRoot.Parent;
+    var secondOriginalOwner = secondRoot.Owner;
     var secondOriginalBounds = secondRoot.Bounds;
     var embeddings = new ClientEmbeddingService();
     embeddings.SetHostWindow(nativeHost.Handle);
 
     Require(!embeddings.TryEmbed("stale-process", firstRoot.Handle, Environment.ProcessId + 1),
         "Embedding accepted a window owned by an unexpected process.");
+    var currentProcessStartTicks = Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks;
+    Require(!embeddings.TryEmbed("stale-start", firstRoot.Handle, Environment.ProcessId, currentProcessStartTicks + 1),
+        "Embedding accepted a window with a stale process start identity.");
     Require(embeddings.TryEmbed("native-first", firstRoot.Handle, Environment.ProcessId),
         "The first native test window could not be embedded.");
     Require(embeddings.TryEmbed("native-second", secondRoot.Handle, Environment.ProcessId),
         "The second native test window could not be embedded.");
-    Require(firstRoot.Parent == nativeHost.Handle && secondRoot.Parent == nativeHost.Handle,
-        "Embedded windows were not parented beneath the native Clients host.");
-    Require(firstRoot.HasChildStyle && secondRoot.HasChildStyle,
-        "Embedded windows did not receive the native child-window style.");
+    Require(firstRoot.Root == firstRoot.Handle && secondRoot.Root == secondRoot.Handle,
+        "Docked Roblox windows must remain top-level windows so their own GUI threads can receive activation.");
+    Require(!firstRoot.HasChildStyle && !secondRoot.HasChildStyle &&
+            firstRoot.HasPopupStyle && secondRoot.HasPopupStyle,
+        "Docked windows were converted to child windows instead of remaining top-level overlays.");
+    Require(firstRoot.Owner == nativeHost.Root && secondRoot.Owner == nativeHost.Root,
+        "Docked windows must be owned by the host's top-level window for deterministic z-order.");
+    Require((firstRoot.ExStyle & 0x08000000) == 0 && (secondRoot.ExStyle & 0x08000000) == 0,
+        "Docked windows retained WS_EX_NOACTIVATE and could reject physical clicks.");
 
     embeddings.ShowOnly("native-first");
     Require(embeddings.IsVisible("native-first") && firstRoot.Visible && !secondRoot.Visible,
-        "Selecting the first native client did not hide every other embedded client.");
+        "Selecting the first native client did not hide every other docked client.");
+    Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
+        "Docking displayed more than one Roblox client at once.");
+    secondRoot.Show();
+    secondRoot.SetOwner(firstOwner.Handle);
+    Require(firstRoot.Visible && secondRoot.Visible,
+        "The test fixture could not simulate an externally re-shown hidden client.");
+    embeddings.Layout();
+    Require(firstRoot.Visible && !secondRoot.Visible,
+        "Layout did not hide an identity-valid non-selected client after external visibility and owner drift.");
+    secondRoot.SetOwner(nativeHost.Root);
     embeddings.ShowOnly("native-second");
     Require(embeddings.IsVisible("native-second") && secondRoot.Visible && !firstRoot.Visible,
         "Selecting the second native client did not transfer exclusive visibility.");
+    Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
+        "Switching tabs displayed more than one Roblox client at once.");
 
-    Require(embeddings.TryUnembed("native-first"), "The first native test window could not be unembedded.");
-    Require(firstRoot.Parent == nint.Zero && firstRoot.Style == firstOriginalStyle &&
+    firstRoot.SetOwner(secondRoot.Handle);
+    Require(embeddings.TryUnembed("native-first"), "The first native test window could not be undocked.");
+    Require(firstRoot.Parent == firstOriginalParent && firstRoot.Owner == firstOriginalOwner &&
+            firstRoot.Root == firstRoot.Handle && firstRoot.Style == firstOriginalStyle &&
+            firstRoot.ExStyle == firstOriginalExStyle &&
             firstRoot.Bounds == firstOriginalBounds && firstRoot.Visible,
-        "Unembedding did not restore the first window's parent, style, placement, and visibility.");
+        "Undocking did not restore the first window's parent, owner, styles, placement, and visibility.");
 
     embeddings.ReleaseHostWindow(nativeHost.Handle);
-    Require(secondRoot.Parent == nint.Zero && secondRoot.Style == secondOriginalStyle &&
+    Require(secondRoot.Parent == secondOriginalParent && secondRoot.Owner == secondOriginalOwner &&
+            secondRoot.Root == secondRoot.Handle && secondRoot.Style == secondOriginalStyle &&
+            secondRoot.ExStyle == secondOriginalExStyle &&
             secondRoot.Bounds == secondOriginalBounds && secondRoot.Visible,
-        "Destroying the native host did not restore its remaining embedded window.");
+        "Destroying the native host did not restore its remaining docked window and styles.");
     Require(embeddings.EmbeddedAccountIds().Length == 0,
         "Releasing the native host left stale embedded-account state.");
 }
 
-Console.WriteLine("Native client host lifecycle smoke tests passed.");
+Console.WriteLine("Native top-level client docking lifecycle smoke tests passed.");
 
 var autopsyRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-autopsy-" + Guid.NewGuid().ToString("N"));
 try

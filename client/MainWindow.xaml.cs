@@ -1620,6 +1620,17 @@ public partial class MainWindow : Window
         runtime.Accounts.AccountExited -= Accounts_AccountExited;
         runtime.ClientEmbeddings.UnembedAll();
         ClientsPanel.Detach();
+        try
+        {
+            // Close every Roblox process owned by this RAM session before the
+            // window disappears.  Registry validation protects against PID
+            // reuse and leaves unrelated Roblox clients alone.
+            runtime.Accounts.TerminateAllManagedAccountsAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine($"Managed Roblox shutdown failed: {exception}");
+        }
         lock (_pluginDiagnosticQueueGate) _pendingPluginDiagnostics.Clear();
         _launchCancellation?.Cancel();
         _launchCancellation?.Dispose();

@@ -72,14 +72,23 @@ public sealed class PluginRuntime : IAsyncDisposable
 
     internal enum InputDeliveryMode { GuardedReal, BackgroundMessage }
 
-    internal static InputDeliveryMode SelectInputDeliveryMode(bool embedded, bool selectedVisible, bool hostForeground) =>
-        embedded && selectedVisible && hostForeground ? InputDeliveryMode.GuardedReal : InputDeliveryMode.BackgroundMessage;
+    internal static InputDeliveryMode SelectInputDeliveryMode(bool docked, bool selectedVisible, bool targetForeground) =>
+        docked && selectedVisible && targetForeground ? InputDeliveryMode.GuardedReal : InputDeliveryMode.BackgroundMessage;
 
     internal static bool MatchesInputTarget(ManagedAccountSnapshot expected, ManagedAccountSnapshot? current, nint expectedRoot) =>
         current is not null && current.IsRunning &&
         current.ProcessId == expected.ProcessId &&
         current.ProcessStartTimeUtcTicks == expected.ProcessStartTimeUtcTicks &&
         current.RootWindowHandle == expectedRoot;
+
+    internal static bool MatchesReleaseTarget(
+        ManagedAccountSnapshot expected,
+        ManagedAccountSnapshot? current,
+        nint expectedRoot,
+        nint currentDockedRoot,
+        nint candidateWindow) =>
+        MatchesInputTarget(expected, current, expectedRoot) &&
+        currentDockedRoot == expectedRoot && current!.WindowHandle == candidateWindow;
 
     private async Task<BackgroundInputResult> DispatchInputAsync(string accountId, IReadOnlyList<PluginInputEvent> events, CancellationToken cancellationToken)
     {
@@ -89,19 +98,46 @@ public sealed class PluginRuntime : IAsyncDisposable
         var deliveryMode = SelectInputDeliveryMode(
             embeddedRoot is not null && embeddedRoot != nint.Zero,
             ClientEmbeddings.IsVisible(accountId),
-            ClientEmbeddings.HostOwnsForeground());
+            ClientEmbeddings.TargetOwnsForeground(accountId));
         if (deliveryMode == InputDeliveryMode.GuardedReal)
         {
             var expectedRoot = embeddedRoot!.Value;
-            return await _sendInjector.PostAsync(expectedRoot, events, cancellationToken, () =>
+            var hostIntegrity = ProcessIntegrity.Current;
+            var targetIntegrity = ProcessIntegrity.ForWindow(expectedRoot);
+            if (hostIntegrity != ProcessIntegrityLevel.Unknown &&
+                targetIntegrity != ProcessIntegrityLevel.Unknown && targetIntegrity > hostIntegrity)
+            {
+                return BackgroundInputResult.Failure("integrity-mismatch",
+                    $"The docked client is {targetIntegrity} integrity while RAM is {hostIntegrity}; input was not injected.",
+                    nint.Zero, nint.Zero);
+            }
+            bool TargetStillValid()
             {
                 var current = Accounts.Snapshot().FirstOrDefault(snapshot =>
                     string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
                 return ClientEmbeddings.IsVisible(accountId) &&
-                       ClientEmbeddings.HostOwnsForeground() &&
+                       ClientEmbeddings.TargetOwnsForeground(accountId) &&
                        ClientEmbeddings.RootFor(accountId) == expectedRoot &&
                        MatchesInputTarget(account, current, expectedRoot);
-            }).ConfigureAwait(false);
+            }
+
+            async Task ReleaseWithoutForegroundAsync(IReadOnlyList<PluginInputEvent> releases)
+            {
+                var current = Accounts.Snapshot().FirstOrDefault(snapshot =>
+                    string.Equals(snapshot.AccountId, accountId, StringComparison.Ordinal));
+                var dockedRoot = ClientEmbeddings.RootFor(accountId) ?? nint.Zero;
+                if (!MatchesReleaseTarget(account, current, expectedRoot, dockedRoot, current?.WindowHandle ?? nint.Zero)) return;
+                _ = await _inputBroker.PostAsync(current!, releases, CancellationToken.None, hwnd =>
+                    MatchesReleaseTarget(account, current, expectedRoot,
+                        ClientEmbeddings.RootFor(accountId) ?? nint.Zero, hwnd)).ConfigureAwait(false);
+            }
+
+            return await _sendInjector.PostAsync(
+                expectedRoot,
+                events,
+                cancellationToken,
+                TargetStillValid,
+                ReleaseWithoutForegroundAsync).ConfigureAwait(false);
         }
 
         var result = await _inputBroker.PostAsync(account, events, cancellationToken).ConfigureAwait(false);
@@ -523,9 +559,21 @@ public sealed class PluginRuntime : IAsyncDisposable
         Accounts.AccountExited -= Accounts_AccountExited;
         _supervisor.Dispose();
         _hotkeyMonitor.Dispose();
-        await _actions.DisposeAsync().ConfigureAwait(false);
-        await _host.DisposeAsync().ConfigureAwait(false);
-        Accounts.Dispose();
+        try
+        {
+            // Stop plugin dispatch before terminating clients so no macro can
+            // race shutdown and enqueue another input event.
+            await _actions.DisposeAsync().ConfigureAwait(false);
+            await _host.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            // The main window restores the native embedding before App.OnExit
+            // reaches this point. Terminate only the PID/start-time/executable
+            // identities registered by RAM; unrelated Roblox clients are untouched.
+            try { await Accounts.TerminateAllManagedAccountsAsync().ConfigureAwait(false); }
+            finally { Accounts.Dispose(); }
+        }
         _lifecycleGate.Dispose();
     }
 }

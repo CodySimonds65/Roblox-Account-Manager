@@ -13,10 +13,9 @@ public sealed class WindowArrangementService
         var errors = new List<string>();
         foreach (var account in accounts)
         {
-            var window = account with { WindowHandle = RootWindow(account.WindowHandle) };
-            if (!TrySnapshot(window, out var placement))
+            if (!TryResolveWindow(account, out var window) || !TrySnapshot(window, out var placement))
             {
-                errors.Add($"{account.Label}: window unavailable");
+                errors.Add($"{account.Label}: window unavailable or embedded in RAM");
                 continue;
             }
             _original.TryAdd(new WindowIdentity(window), placement);
@@ -41,10 +40,9 @@ public sealed class WindowArrangementService
         for (var index = 0; index < accounts.Count; index++)
         {
             var account = accounts[index];
-            var window = account with { WindowHandle = RootWindow(account.WindowHandle) };
-            if (!TrySnapshot(window, out var placement))
+            if (!TryResolveWindow(account, out var window) || !TrySnapshot(window, out var placement))
             {
-                errors.Add($"{account.Label}: window unavailable");
+                errors.Add($"{account.Label}: window unavailable or embedded in RAM");
                 continue;
             }
             _original.TryAdd(new WindowIdentity(window), placement);
@@ -64,7 +62,11 @@ public sealed class WindowArrangementService
         var errors = new List<string>();
         foreach (var account in accounts)
         {
-            var window = account with { WindowHandle = RootWindow(account.WindowHandle) };
+            if (!TryResolveWindow(account, out var window))
+            {
+                errors.Add($"{account.Label}: window unavailable or embedded in RAM");
+                continue;
+            }
             if (!_original.TryGetValue(new WindowIdentity(window), out var placement)) continue;
             if (!ValidateIdentity(window)) { errors.Add($"{account.Label}: window identity changed"); continue; }
             if (!SetWindowPos(window.WindowHandle, nint.Zero, placement.Left, placement.Top, placement.Width, placement.Height,
@@ -102,6 +104,16 @@ public sealed class WindowArrangementService
         if (hwnd == nint.Zero || !GetWindowRect(hwnd, out var rect)) return false;
         placement = new WindowPlacement(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top, account.IsMinimized, IsZoomed(hwnd));
         return true;
+    }
+
+    private static bool TryResolveWindow(ManagedAccountSnapshot account, out ManagedAccountSnapshot window)
+    {
+        window = account with { WindowHandle = RootWindow(account.WindowHandle) };
+        if (window.WindowHandle == nint.Zero || !IsWindow(window.WindowHandle)) return false;
+        GetWindowThreadProcessId(window.WindowHandle, out var ownerPid);
+        // An embedded render HWND climbs to RAM's top-level ancestor. Never
+        // pass that ancestor to the arrangement APIs or RAM itself could move.
+        return ownerPid == window.ProcessId;
     }
 
     private static nint RootWindow(nint hwnd) => hwnd == nint.Zero ? nint.Zero : GetAncestor(hwnd, GA_ROOT);

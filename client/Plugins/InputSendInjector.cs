@@ -3,10 +3,8 @@ using System.Runtime.InteropServices;
 namespace RobloxAltClient.Plugins;
 
 /// <summary>
-/// Injects input into an EMBEDDED (child) game window via SendInput, which
-/// produces real hardware-level input that raw-input consumers (Roblox) accept —
-/// unlike posted window messages. The client must be embedded in and focused by
-/// the launcher so no desktop focus is stolen.
+/// Injects macro input only when the selected docked Roblox top-level is the
+/// actual desktop foreground target. Human input never passes through here.
 /// </summary>
 public sealed class InputSendInjector
 {
@@ -22,16 +20,20 @@ public sealed class InputSendInjector
     private const uint MouseeventfMiddleDown = 0x0020;
     private const uint MouseeventfMiddleUp = 0x0040;
     private const uint MouseeventfWheel = 0x0800;
+    private const uint MouseeventfMove = 0x0001;
+    private const uint MouseeventfVirtualDesk = 0x4000;
+    private const uint MouseeventfAbsolute = 0x8000;
 
     public async Task<BackgroundInputResult> PostAsync(
         nint rootWindow,
         IReadOnlyList<PluginInputEvent> events,
         CancellationToken cancellationToken,
-        Func<bool>? targetValidator = null)
+        Func<bool>? targetValidator = null,
+        Func<IReadOnlyList<PluginInputEvent>, Task>? releaseFallback = null)
     {
         if (rootWindow == nint.Zero || events.Count == 0 || !IsWindow(rootWindow))
         {
-            return BackgroundInputResult.Failure("unavailable", "The embedded client window is unavailable.", GetForegroundWindow(), GetForegroundWindow());
+            return BackgroundInputResult.Failure("unavailable", "The docked client window is unavailable.", GetForegroundWindow(), GetForegroundWindow());
         }
         var foregroundBefore = GetForegroundWindow();
         if (!IsSafeTarget(rootWindow, targetValidator))
@@ -40,39 +42,125 @@ public sealed class InputSendInjector
         }
         var posted = 0;
         long previousOffset = 0;
-        foreach (var input in events.OrderBy(item => item.OffsetMicroseconds))
+        var postedEvents = new List<PluginInputEvent>();
+        try
         {
-            var gapMicroseconds = input.OffsetMicroseconds - previousOffset;
-            if (gapMicroseconds > 0)
+            foreach (var input in events.OrderBy(item => item.OffsetMicroseconds))
             {
-                await Task.Delay(TimeSpan.FromTicks(gapMicroseconds * 10), cancellationToken).ConfigureAwait(false);
+                var gapMicroseconds = input.OffsetMicroseconds - previousOffset;
+                if (gapMicroseconds > 0)
+                {
+                    await Task.Delay(TimeSpan.FromTicks(gapMicroseconds * 10), cancellationToken).ConfigureAwait(false);
+                }
+                previousOffset = input.OffsetMicroseconds;
+                cancellationToken.ThrowIfCancellationRequested();
+                // Revalidate before every event. HWND values can be reused, tabs can
+                // switch, and the user can move to another application during a macro.
+                if (!IsSafeTarget(rootWindow, targetValidator))
+                {
+                    await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
+                    var after = GetForegroundWindow();
+                    return BackgroundInputResult.Failure("focus-lost", "The client lost focus during playback; input was stopped.", foregroundBefore, after, posted);
+                }
+                if (!TryInject(rootWindow, input, out var error))
+                {
+                    await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
+                    var after = GetForegroundWindow();
+                    return BackgroundInputResult.Failure(error.Code, error.Message, foregroundBefore, after, posted);
+                }
+                postedEvents.Add(input);
+                posted++;
             }
-            previousOffset = input.OffsetMicroseconds;
-            cancellationToken.ThrowIfCancellationRequested();
-            // Revalidate before every event. HWND values can be reused, tabs can
-            // switch, and the user can move to another application during a macro.
-            if (!IsSafeTarget(rootWindow, targetValidator))
-            {
-                var after = GetForegroundWindow();
-                return BackgroundInputResult.Failure("focus-lost", "The client lost focus during playback; input was stopped.", foregroundBefore, after, posted);
-            }
-            if (!TryInject(rootWindow, input, out var error))
-            {
-                var after = GetForegroundWindow();
-                return BackgroundInputResult.Failure(error.Code, error.Message, foregroundBefore, after, posted);
-            }
-            posted++;
         }
+        catch (OperationCanceledException)
+        {
+            await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
+            throw;
+        }
+
+        await ReleaseHeldInputsAsync(rootWindow, postedEvents, targetValidator, releaseFallback).ConfigureAwait(false);
         var foregroundAfter = GetForegroundWindow();
         return new BackgroundInputResult(true, foregroundBefore == foregroundAfter ? "ok" : "foreground-changed",
             foregroundBefore == foregroundAfter ? "All input was injected." : "Input injected; foreground changed externally.",
             posted, foregroundBefore, foregroundAfter);
     }
 
+    private static async Task ReleaseHeldInputsAsync(
+        nint rootWindow,
+        IReadOnlyList<PluginInputEvent> postedEvents,
+        Func<bool>? targetValidator,
+        Func<IReadOnlyList<PluginInputEvent>, Task>? releaseFallback)
+    {
+        var releases = PendingReleases(postedEvents);
+        _ = await ReleasePendingInputsAsync(
+            releases,
+            IsSafeTarget(rootWindow, targetValidator),
+            release => TryInject(rootWindow, release, out _),
+            releaseFallback).ConfigureAwait(false);
+    }
+
+    internal static async Task<bool> ReleasePendingInputsAsync(
+        IReadOnlyList<PluginInputEvent> releases,
+        bool realTargetSafe,
+        Func<PluginInputEvent, bool> realRelease,
+        Func<IReadOnlyList<PluginInputEvent>, Task>? releaseFallback)
+    {
+        if (releases.Count == 0) return true;
+        if (realTargetSafe)
+        {
+            var released = true;
+            foreach (var release in releases)
+                released &= realRelease(release);
+            if (released) return true;
+        }
+        if (releaseFallback is not null)
+        {
+            try
+            {
+                await releaseFallback(releases).ConfigureAwait(false);
+                return true;
+            }
+            catch { /* Message-level cleanup is best effort and never targets a new foreground window. */ }
+        }
+        return false;
+    }
+
+    internal static IReadOnlyList<PluginInputEvent> PendingReleases(IReadOnlyList<PluginInputEvent> postedEvents)
+    {
+        var keys = new Dictionary<(int VirtualKey, int ScanCode, bool Extended), PluginInputEvent>();
+        var buttons = new Dictionary<int, PluginInputEvent>();
+        foreach (var input in postedEvents)
+        {
+            var key = (input.VirtualKey, input.ScanCode, input.Extended);
+            switch (input.Kind)
+            {
+                case PluginInputKind.KeyDown:
+                    keys[key] = input;
+                    break;
+                case PluginInputKind.KeyUp:
+                    keys.Remove(key);
+                    break;
+                case PluginInputKind.MouseButtonDown:
+                    buttons[input.Button] = input;
+                    break;
+                case PluginInputKind.MouseButtonUp:
+                    buttons.Remove(input.Button);
+                    break;
+            }
+        }
+        return keys.Values.Select(input => input with { Kind = PluginInputKind.KeyUp, OffsetMicroseconds = 0 })
+            .Concat(buttons.Values.Select(input => input with { Kind = PluginInputKind.MouseButtonUp, OffsetMicroseconds = 0 }))
+            .ToArray();
+    }
+
     private static bool IsSafeTarget(nint rootWindow, Func<bool>? targetValidator)
     {
         if (!IsWindow(rootWindow) || !IsWindowVisible(rootWindow) ||
-            GetForegroundWindow() != GetAncestor(rootWindow, GaRoot)) return false;
+            GetAncestor(rootWindow, GaRoot) != rootWindow || GetForegroundWindow() != rootWindow) return false;
+        var gameThread = GetWindowThreadProcessId(rootWindow, out _);
+        var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
+        if (gameThread == 0 || !GetGUIThreadInfo(gameThread, ref info) ||
+            !IsFocusWithin(rootWindow, info.hwndFocus)) return false;
         try
         {
             return targetValidator?.Invoke() ?? true;
@@ -101,25 +189,25 @@ public sealed class InputSendInjector
                 }
             case PluginInputKind.MouseButtonDown or PluginInputKind.MouseButtonUp:
                 {
-                    if (!TryGetScreenPoint(rootWindow, input, out var x, out var y)) { error = ("unavailable", "The embedded client has no client area."); return false; }
-                    if (!SetCursorPos(x, y)) { error = ("post-failed", "The cursor could not be positioned."); return false; }
+                    if (!TryCreateAbsoluteMove(rootWindow, input, out var move)) { error = ("unavailable", "The docked client has no client area."); return false; }
                     var down = input.Kind == PluginInputKind.MouseButtonDown;
                     var flags = ButtonFlag(input.Button, down);
                     if (flags == 0) { error = ("unsupported-input", "The mouse button is not supported."); return false; }
-                    return Inject(new INPUT { Type = InputMouse, Data = new INPUTUNION { Mouse = new MOUSEINPUT { Flags = flags } } }, out error);
+                    return Inject([
+                        move,
+                        new INPUT { Type = InputMouse, Data = new INPUTUNION { Mouse = new MOUSEINPUT { Flags = flags } } }
+                    ], out error);
                 }
             case PluginInputKind.MouseWheel:
                 {
-                    if (!TryGetScreenPoint(rootWindow, input, out var x, out var y)) { error = ("unavailable", "The embedded client has no client area."); return false; }
-                    if (!SetCursorPos(x, y)) { error = ("post-failed", "The cursor could not be positioned."); return false; }
+                    if (!TryCreateAbsoluteMove(rootWindow, input, out var move)) { error = ("unavailable", "The docked client has no client area."); return false; }
                     var mouse = new MOUSEINPUT { Flags = MouseeventfWheel, MouseData = WheelData(input.WheelDelta) };
-                    return Inject(new INPUT { Type = InputMouse, Data = new INPUTUNION { Mouse = mouse } }, out error);
+                    return Inject([move, new INPUT { Type = InputMouse, Data = new INPUTUNION { Mouse = mouse } }], out error);
                 }
             case PluginInputKind.MouseMove:
                 {
-                    if (!TryGetScreenPoint(rootWindow, input, out var x, out var y)) { error = ("unavailable", "The embedded client has no client area."); return false; }
-                    if (!SetCursorPos(x, y)) { error = ("post-failed", "The cursor could not be positioned."); return false; }
-                    return true;
+                    if (!TryCreateAbsoluteMove(rootWindow, input, out var move)) { error = ("unavailable", "The docked client has no client area."); return false; }
+                    return Inject([move], out error);
                 }
             default:
                 error = ("unsupported-input", "The input event kind is not supported.");
@@ -127,11 +215,13 @@ public sealed class InputSendInjector
         }
     }
 
-    private static bool Inject(INPUT input, out (string Code, string Message) error)
+    private static bool Inject(INPUT input, out (string Code, string Message) error) => Inject([input], out error);
+
+    private static bool Inject(INPUT[] inputs, out (string Code, string Message) error)
     {
         error = default;
-        var injected = SendInput(1, [input], Marshal.SizeOf<INPUT>());
-        if (injected == 0)
+        var injected = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        if (injected != inputs.Length)
         {
             error = ("post-failed", $"SendInput failed (Win32 error {Marshal.GetLastWin32Error()}).");
             return false;
@@ -152,6 +242,44 @@ public sealed class InputSendInjector
 
     internal static uint WheelData(int wheelDelta) => unchecked((uint)(short)Math.Clamp(wheelDelta, short.MinValue, short.MaxValue));
 
+    internal static (int X, int Y) NormalizeAbsolutePoint(int screenX, int screenY, int virtualLeft, int virtualTop, int virtualWidth, int virtualHeight)
+    {
+        var width = Math.Max(2, virtualWidth);
+        var height = Math.Max(2, virtualHeight);
+        var x = Math.Clamp(screenX - virtualLeft, 0, width - 1);
+        var y = Math.Clamp(screenY - virtualTop, 0, height - 1);
+        return (
+            (int)Math.Round(x * 65535d / (width - 1)),
+            (int)Math.Round(y * 65535d / (height - 1)));
+    }
+
+    private static bool TryCreateAbsoluteMove(nint rootWindow, PluginInputEvent input, out INPUT move)
+    {
+        move = default;
+        if (!TryGetScreenPoint(rootWindow, input, out var screenX, out var screenY)) return false;
+        var (x, y) = NormalizeAbsolutePoint(
+            screenX,
+            screenY,
+            GetSystemMetrics(SmXVirtualScreen),
+            GetSystemMetrics(SmYVirtualScreen),
+            GetSystemMetrics(SmCxVirtualScreen),
+            GetSystemMetrics(SmCyVirtualScreen));
+        move = new INPUT
+        {
+            Type = InputMouse,
+            Data = new INPUTUNION
+            {
+                Mouse = new MOUSEINPUT
+                {
+                    DX = x,
+                    DY = y,
+                    Flags = MouseeventfMove | MouseeventfAbsolute | MouseeventfVirtualDesk
+                }
+            }
+        };
+        return true;
+    }
+
     private static bool TryGetScreenPoint(nint rootWindow, PluginInputEvent input, out int x, out int y)
     {
         x = y = 0;
@@ -167,6 +295,19 @@ public sealed class InputSendInjector
 
     [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X; public int Y; }
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GUITHREADINFO
+    {
+        public uint cbSize;
+        public uint flags;
+        public nint hwndActive;
+        public nint hwndFocus;
+        public nint hwndCapture;
+        public nint hwndMenuOwner;
+        public nint hwndMoveSize;
+        public nint hwndCaret;
+        public RECT rcCaret;
+    }
     [StructLayout(LayoutKind.Sequential)] private struct INPUT { public uint Type; public INPUTUNION Data; }
     [StructLayout(LayoutKind.Explicit)]
     private struct INPUTUNION
@@ -178,12 +319,23 @@ public sealed class InputSendInjector
     [StructLayout(LayoutKind.Sequential)] private struct KEYBDINPUT { public ushort Vk; public ushort Scan; public uint Flags; public uint Time; public nint ExtraInfo; }
 
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint inputCount, INPUT[] inputs, int size);
-    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll")] private static extern bool IsChild(nint parent, nint window);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
+    [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO info);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(nint window, ref POINT point);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+
+    private static bool IsFocusWithin(nint root, nint focusedWindow) =>
+        focusedWindow != nint.Zero && (focusedWindow == root || IsChild(root, focusedWindow));
+
     private const uint GaRoot = 2;
+    private const int SmXVirtualScreen = 76;
+    private const int SmYVirtualScreen = 77;
+    private const int SmCxVirtualScreen = 78;
+    private const int SmCyVirtualScreen = 79;
 }
