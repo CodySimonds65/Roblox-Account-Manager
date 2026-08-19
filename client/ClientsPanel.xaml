@@ -1,6 +1,7 @@
 <UserControl x:Class="RobloxAltClient.ClientsPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:RobloxAltClient"
              Loaded="ClientsPanel_Loaded">
     <Grid Background="Transparent">
         <Grid.RowDefinitions>
@@ -57,7 +58,9 @@
 
         <Border Grid.Row="1" x:Name="HostArea" Background="#101318" BorderBrush="{StaticResource BorderBrush}"
                 BorderThickness="1" CornerRadius="12" Margin="0,8,0,0" ClipToBounds="True"
-                SizeChanged="HostArea_SizeChanged" />
+                SizeChanged="HostArea_SizeChanged">
+            <local:EmbeddedClientHost x:Name="NativeClientHost" Focusable="True" />
+        </Border>
 
         <TextBlock Grid.Row="2" x:Name="FocusDiagnostics" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
                    MaxHeight="40" TextWrapping="Wrap" Margin="0,6,0,0" Visibility="Collapsed" />

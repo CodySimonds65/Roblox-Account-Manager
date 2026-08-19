@@ -18,11 +18,15 @@ function Find-ForbiddenReference([string]$pattern, [string[]]$allowedPaths = @()
 
 # These APIs always steal or reorder desktop focus and have no approved use.
 Find-ForbiddenReference '\b(SetForegroundWindow|BringWindowToTop)\b'
+Find-ForbiddenReference '\b(mouse_event|keybd_event)\b'
 
 # System-wide injection is isolated to a validator-guarded implementation, and
 # cross-thread focus attachment is isolated to the embedded child focus bridge.
 Find-ForbiddenReference '\bSendInput\b' @('Plugins/InputSendInjector.cs')
+Find-ForbiddenReference '\bSetCursorPos\b' @('Plugins/InputSendInjector.cs')
+Find-ForbiddenReference '\bPostMessage\b' @('Plugins/FocusSafeInputBroker.cs')
 Find-ForbiddenReference '\bAttachThreadInput\b' @('Plugins/EmbeddedInputBridge.cs')
+Find-ForbiddenReference '\bSetFocus\b' @('Plugins/EmbeddedInputBridge.cs')
 
 $injectorPath = Join-Path $sourceRoot 'Plugins\InputSendInjector.cs'
 $injector = Get-Content $injectorPath -Raw
@@ -43,6 +47,22 @@ $bridge = Get-Content (Join-Path $sourceRoot 'Plugins\EmbeddedInputBridge.cs') -
 if ($bridge -notmatch 'try[\s\S]*finally[\s\S]*AttachThreadInput\([^;]+false\)') {
     $violations.Add('EmbeddedInputBridge must detach cross-thread input in a finally block.')
 }
+if ($bridge -match '\b(PostMessage|SendInput|SetCursorPos|WmMouse(?:Move|Wheel|Button)|WmKey(?:Down|Up))\b') {
+    $violations.Add('EmbeddedInputBridge must not synthesize human mouse or keyboard input.')
+}
+
+$nativeHost = Get-Content (Join-Path $sourceRoot 'EmbeddedClientHost.cs') -Raw
+if ($nativeHost -notmatch 'class\s+EmbeddedClientHost\s*:\s*HwndHost' -or
+    $nativeHost -notmatch 'WsChild\s*\|\s*WsVisible\s*\|\s*WsClipChildren') {
+    $violations.Add('The Clients viewport must use a native HwndHost child window for direct user input.')
+}
+
+$embedding = Get-Content (Join-Path $sourceRoot 'Plugins\ClientEmbeddingService.cs') -Raw
+if ($embedding -notmatch 'GetAncestor\(hostWindow,\s*GaRoot\)' -or
+    $embedding -notmatch 'OriginalStyle' -or
+    $embedding -notmatch 'OriginalBounds') {
+    $violations.Add('Client embedding must derive foreground ownership from its native root and restore original window state.')
+}
 
 $arrangement = Get-Content (Join-Path $sourceRoot 'Plugins\WindowArrangementService.cs') -Raw
 if ($arrangement -notmatch 'SWP_NOACTIVATE') {
@@ -52,6 +72,9 @@ if ($arrangement -notmatch 'SWP_NOACTIVATE') {
 $clientsPanel = Get-Content (Join-Path $sourceRoot 'ClientsPanel.xaml') -Raw
 if ($clientsPanel -match '<Style TargetType="ListBoxItem">[\s\S]*?<Setter Property="Focusable" Value="False"') {
     $violations.Add('Client tab ListBoxItems must remain focusable so mouse and keyboard selection work.')
+}
+if ($clientsPanel -notmatch '<local:EmbeddedClientHost\b') {
+    $violations.Add('ClientsPanel must reserve its game viewport with EmbeddedClientHost.')
 }
 
 if ($violations.Count -gt 0) {

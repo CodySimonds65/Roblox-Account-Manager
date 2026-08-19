@@ -1,57 +1,32 @@
 using System.Runtime.InteropServices;
-using System.Windows.Input;
 using System.Windows.Interop;
 
 namespace RobloxAltClient.Plugins;
 
 /// <summary>
-/// Bridges focus, activation, and pointer input from the launcher window to the
-/// embedded game windows. WPF's input pipeline consumes pointer messages that
-/// land on its own visuals (the host area has a WPF background), so a native
-/// WS_CHILD game window never sees them: every client-area mouse message whose
-/// screen point falls inside the visible embedded root is re-posted to that
-/// window with client coordinates, and the message is marked handled so WPF
-/// does not also process it.
-/// Note: posted messages carry a synthesized GetMessagePos/GetMessageTime, so
-/// engine paths that read lParam (Roblox/SDL/Chromium) work, while paths that
-/// query the cursor queue position do not.
+/// Mirrors only activation state and keyboard focus across the WPF/Win32
+/// boundary. Human mouse and keyboard events travel directly to the embedded
+/// Roblox HWND through the native host and are never synthesized here.
 /// </summary>
 public static class EmbeddedInputBridge
 {
-    private const int WmMouseFirst = 0x0200;
-    private const int WmMouseLast = 0x020E;
-    private const int WmMouseMove = 0x0200;
     private const int WmActivate = 0x0006;
     private const int WmActivateApp = 0x001C;
-    private const int WmMouseActivate = 0x0021;
-    private const int WmLButtonDown = 0x0201;
-    private const int WmLButtonUp = 0x0202;
-    private const int WmRButtonDown = 0x0204;
-    private const int WmRButtonUp = 0x0205;
-    private const int WmMButtonDown = 0x0207;
-    private const int WmMButtonUp = 0x0208;
-    private const int WmXButtonDown = 0x020B;
-    private const int WmXButtonUp = 0x020C;
-    private const int WmMouseWheel = 0x020A;
-    private const int WmMouseHwheel = 0x020E;
-    private const int WmMouseLeave = 0x02A3;
-    private const nint WaActive = 1;
-    private const nint WaInactive = 0;
+    private const int WaInactive = 0;
+    private const uint SmtoAbortIfHung = 0x0002;
 
     private static HwndSource? _source;
     private static Func<string?>? _visibleAccount;
     private static Func<string, nint?>? _rootResolver;
-    private static int _pendingButtonDown;
-    private static bool _cursorInsideLastMove;
 
     public static Action<string>? Diagnostics { get; set; }
 
-    public static void Attach(nint hostHwnd, Func<string?> visibleAccount, Func<string, nint?> rootResolver)
+    public static void Attach(nint foregroundWindow, Func<string?> visibleAccount, Func<string, nint?> rootResolver)
     {
         Detach();
         _visibleAccount = visibleAccount;
         _rootResolver = rootResolver;
-        _source = HwndSource.FromHwnd(hostHwnd);
+        _source = HwndSource.FromHwnd(foregroundWindow);
         _source?.AddHook(WndProc);
     }
 
@@ -61,27 +36,19 @@ public static class EmbeddedInputBridge
         _source = null;
         _visibleAccount = null;
         _rootResolver = null;
-        _pendingButtonDown = 0;
-        _cursorInsideLastMove = false;
     }
 
     public static bool FocusEmbedded(nint root)
     {
-        if (root == nint.Zero || !IsWindow(root))
+        if (root == nint.Zero || !IsWindow(root) || !IsWindowVisible(root))
         {
-            Diagnostics?.Invoke("Embedded focus: the client window no longer exists.");
+            Diagnostics?.Invoke("Embedded focus: the visible client window is unavailable.");
             return false;
         }
 
-        // If the game thread already owns focus on the embedded root, there is
-        // nothing to do; attaching input threads redistributes key state and is
-        // only needed when focus actually has to move.
         var gameThread = GetWindowThreadProcessId(root, out _);
         var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
-        if (gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) && info.hwndFocus == root)
-        {
-            return true;
-        }
+        if (gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) && IsFocusWithin(root, info.hwndFocus)) return true;
 
         var ourThread = GetCurrentThreadId();
         var attached = gameThread != 0 && gameThread != ourThread &&
@@ -89,9 +56,10 @@ public static class EmbeddedInputBridge
         try
         {
             SetFocus(root);
-            var actual = GetFocus();
+            info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
+            var actual = gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) ? info.hwndFocus : nint.Zero;
             Diagnostics?.Invoke($"Embedded focus 0x{root.ToInt64():X}: attached={(attached ? "yes" : "no")}, actual focus 0x{actual.ToInt64():X}.");
-            return actual == root;
+            return IsFocusWithin(root, actual);
         }
         finally
         {
@@ -99,139 +67,79 @@ public static class EmbeddedInputBridge
         }
     }
 
+    public static void TransferFocus(nint? previousRoot, nint currentRoot, bool hostForeground)
+    {
+        if (previousRoot is not null && previousRoot != nint.Zero && previousRoot != currentRoot)
+            SendActivation(previousRoot.Value, active: false);
+        SendActivation(currentRoot, hostForeground);
+        if (hostForeground) FocusEmbedded(currentRoot);
+    }
+
     private static nint WndProc(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
-        if (message is WmActivateApp or WmActivate or WmMouseActivate)
+        if (message == WmActivateApp)
         {
-            ForwardActivation(wParam);
-            return nint.Zero;
+            ForwardActivation(wParam != nint.Zero);
         }
-
-        if (message >= WmMouseFirst && message <= WmMouseLast)
+        else if (message == WmActivate)
         {
-            if (ForwardMouseMessage(hwnd, message, wParam, lParam))
-            {
-                handled = true;
-            }
+            var active = unchecked((ushort)(long)wParam) != WaInactive;
+            ForwardActivation(active);
         }
         return nint.Zero;
     }
 
-    private static void ForwardActivation(nint wParam)
+    private static void ForwardActivation(bool active)
     {
-        var accountId = _visibleAccount?.Invoke();
-        if (accountId is null) return;
-        var root = _rootResolver?.Invoke(accountId);
-        if (root is null || root == nint.Zero || !IsWindow(root.Value)) return;
-        var activated = wParam == WaActive || GetForegroundWindow() == _source?.Handle;
-        try
-        {
-            SendMessage(root.Value, WmActivateApp, activated ? WaActive : WaInactive, nint.Zero);
-            SendMessage(root.Value, WmActivate, activated ? WaActive : WaInactive, _source?.Handle ?? nint.Zero);
-        }
-        catch
-        {
-            // The game may have closed between the check and the send.
-        }
-        if (activated) FocusEmbedded(root.Value);
+        var root = ResolveVisibleRoot();
+        if (root == nint.Zero) return;
+        var foreground = active && _source is not null && GetForegroundWindow() == _source.Handle;
+        SendActivation(root, foreground);
+        if (foreground) FocusEmbedded(root);
     }
 
-    private static bool ForwardMouseMessage(nint hostHwnd, int message, nint wParam, nint lParam)
+    private static nint ResolveVisibleRoot()
     {
         var accountId = _visibleAccount?.Invoke();
-        if (accountId is null) return false;
+        if (accountId is null) return nint.Zero;
         var root = _rootResolver?.Invoke(accountId);
-        if (root is null || root == nint.Zero || !IsWindow(root.Value) || !IsWindowVisible(root.Value)) return false;
-
-        var isWheel = message is WmMouseWheel or WmMouseHwheel;
-        // Pointer messages carry host-client coordinates; wheel messages carry
-        // screen coordinates already.
-        var hostX = unchecked((short)(long)lParam);
-        var hostY = unchecked((short)((long)lParam >> 16));
-        var point = new POINT { X = hostX, Y = hostY };
-        if (!isWheel)
-        {
-            ClientToScreen(hostHwnd, ref point);
-        }
-
-        ScreenToClient(root.Value, ref point);
-        var inside = GetClientRect(root.Value, out var rect) &&
-                     point.X >= 0 && point.Y >= 0 && point.X < rect.Right && point.Y < rect.Bottom;
-
-        // A button pressed inside the embed must always receive its release,
-        // even if the cursor leaves the game area before letting go; otherwise
-        // the game keeps a stuck button and WPF keeps a stuck capture.
-        var pendingDown = _pendingButtonDown;
-        var isUpMessage = message is WmLButtonUp or WmRButtonUp or WmMButtonUp or WmXButtonUp;
-        if (!inside && !isWheel)
-        {
-            var completesPendingDown = (message == WmLButtonUp && pendingDown == WmLButtonDown) ||
-                                       (message == WmRButtonUp && pendingDown == WmRButtonDown) ||
-                                       (message == WmMButtonUp && pendingDown == WmMButtonDown) ||
-                                       (message == WmXButtonUp && pendingDown == WmXButtonDown);
-            if (!completesPendingDown)
-            {
-                if (_cursorInsideLastMove)
-                {
-                    _cursorInsideLastMove = false;
-                    PostMessage(root.Value, WmMouseLeave, nint.Zero, nint.Zero);
-                }
-                return false;
-            }
-        }
-
-        if (message is WmLButtonDown or WmRButtonDown or WmMButtonDown or WmXButtonDown)
-        {
-            _pendingButtonDown = message;
-        }
-        else if (isUpMessage)
-        {
-            _pendingButtonDown = 0;
-        }
-        if (message == WmMouseMove)
-        {
-            _cursorInsideLastMove = inside;
-        }
-
-        // Swallowing a press while WPF holds capture strands the capture and
-        // the element's visual state; drop it before the game takes over.
-        if ((message is WmLButtonDown or WmRButtonDown or WmMButtonDown or WmXButtonDown or WmLButtonUp or WmRButtonUp or WmMButtonUp or WmXButtonUp) &&
-            Mouse.Captured is not null)
-        {
-            Mouse.Capture(null);
-        }
-
-        var gameParam = isWheel ? lParam : new nint((point.Y << 16) | (point.X & 0xFFFF));
-        if (!PostMessage(root.Value, message, wParam, gameParam))
-        {
-            Diagnostics?.Invoke($"Embedded input: posting message 0x{message:X} to 0x{root.Value.ToInt64():X} failed.");
-            return false;
-        }
-
-        if ((message is WmLButtonDown or WmRButtonDown or WmMButtonDown))
-        {
-            FocusEmbedded(root.Value);
-        }
-        return true;
+        return root is not null && root != nint.Zero && IsWindow(root.Value) && IsWindowVisible(root.Value)
+            ? root.Value
+            : nint.Zero;
     }
 
-    [DllImport("user32.dll")] private static extern nint SendMessage(nint window, int message, nint wParam, nint lParam);
-    [DllImport("user32.dll")] private static extern bool PostMessage(nint window, int message, nint wParam, nint lParam);
+    private static void SendActivation(nint root, bool active)
+    {
+        if (root == nint.Zero || !IsWindow(root)) return;
+        var state = active ? new nint(1) : nint.Zero;
+        SendMessageTimeout(root, WmActivateApp, state, nint.Zero, SmtoAbortIfHung, 100, out _);
+        SendMessageTimeout(root, WmActivate, state, _source?.Handle ?? nint.Zero, SmtoAbortIfHung, 100, out _);
+    }
+
+    private static bool IsFocusWithin(nint root, nint focusedWindow) =>
+        focusedWindow != nint.Zero && (focusedWindow == root || IsChild(root, focusedWindow));
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint SendMessageTimeout(
+        nint window,
+        int message,
+        nint wParam,
+        nint lParam,
+        uint flags,
+        uint timeoutMilliseconds,
+        out nint result);
+
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] private static extern nint SetFocus(nint window);
-    [DllImport("user32.dll")] private static extern nint GetFocus();
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
-    [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
-    [DllImport("user32.dll")] private static extern bool ClientToScreen(nint window, ref POINT point);
-    [DllImport("user32.dll")] private static extern bool ScreenToClient(nint window, ref POINT point);
+    [DllImport("user32.dll")] private static extern bool IsChild(nint parent, nint window);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
     [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
     [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO info);
 
     private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-    private struct POINT { public int X; public int Y; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct GUITHREADINFO
