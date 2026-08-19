@@ -13,7 +13,24 @@
         <ListBox x:Name="ClientTabs" Background="Transparent" BorderThickness="0"
                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
                  ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                 ScrollViewer.CanContentScroll="True"
+                 ScrollViewer.PanningMode="HorizontalOnly"
+                 Margin="0,0,0,2"
                  SelectionChanged="ClientTabs_SelectionChanged">
+            <ListBox.Resources>
+                <!-- Keep an overflowing tab strip usable without compressing
+                     every client label into an unreadable sliver. The app
+                     scrollbar template supplies the same dark track and violet
+                     thumb as the rest of RAM. -->
+                <Style TargetType="ScrollBar" BasedOn="{StaticResource {x:Type ScrollBar}}">
+                    <Setter Property="Height" Value="14" />
+                    <Style.Triggers>
+                        <Trigger Property="Orientation" Value="Vertical">
+                            <Setter Property="Height" Value="Auto" />
+                        </Trigger>
+                    </Style.Triggers>
+                </Style>
+            </ListBox.Resources>
             <ListBox.ItemsPanel>
                 <ItemsPanelTemplate>
                     <StackPanel Orientation="Horizontal" />

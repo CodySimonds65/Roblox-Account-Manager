@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
+using System.Windows.Threading;
 
 namespace RobloxAltClient.Plugins;
 
@@ -13,6 +14,7 @@ public static class EmbeddedInputBridge
     private const int WmActivate = 0x0006;
     private const int WmActivateApp = 0x001C;
     private const int WaInactive = 0;
+    private const uint GaRoot = 2;
     private const uint SmtoAbortIfHung = 0x0002;
 
     private static HwndSource? _source;
@@ -55,7 +57,10 @@ public static class EmbeddedInputBridge
                        AttachThreadInput(ourThread, gameThread, true);
         try
         {
-            SetFocus(root);
+            // SetFocus is only valid across threads while their input queues
+            // are attached. The attachment is deliberately scoped to this
+            // operation and is always undone below.
+            _ = SetFocus(root);
             info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
             var actual = gameThread != 0 && GetGUIThreadInfo(gameThread, ref info) ? info.hwndFocus : nint.Zero;
             Diagnostics?.Invoke($"Embedded focus 0x{root.ToInt64():X}: attached={(attached ? "yes" : "no")}, actual focus 0x{actual.ToInt64():X}.");
@@ -65,6 +70,15 @@ public static class EmbeddedInputBridge
         {
             if (attached) AttachThreadInput(ourThread, gameThread, false);
         }
+    }
+
+    /// <summary>Returns whether the supplied embedded root currently owns keyboard focus.</summary>
+    public static bool HasFocusWithin(nint root)
+    {
+        if (root == nint.Zero || !IsWindow(root)) return false;
+        var thread = GetWindowThreadProcessId(root, out _);
+        var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
+        return thread != 0 && GetGUIThreadInfo(thread, ref info) && IsFocusWithin(root, info.hwndFocus);
     }
 
     public static void TransferFocus(nint? previousRoot, nint currentRoot, bool hostForeground)
@@ -79,21 +93,33 @@ public static class EmbeddedInputBridge
     {
         if (message == WmActivateApp)
         {
-            ForwardActivation(wParam != nint.Zero);
+            QueueActivation(wParam != nint.Zero);
         }
         else if (message == WmActivate)
         {
             var active = unchecked((ushort)(long)wParam) != WaInactive;
-            ForwardActivation(active);
+            QueueActivation(active);
         }
         return nint.Zero;
+    }
+
+    private static void QueueActivation(bool active)
+    {
+        // WM_ACTIVATE is delivered before the foreground transition is fully
+        // observable from another thread. Deferring one dispatcher turn avoids
+        // incorrectly treating the selected client as inactive and skipping
+        // the focus handoff.
+        var dispatcher = _source?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted) return;
+        _ = dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => ForwardActivation(active)));
     }
 
     private static void ForwardActivation(bool active)
     {
         var root = ResolveVisibleRoot();
         if (root == nint.Zero) return;
-        var foreground = active && _source is not null && GetForegroundWindow() == _source.Handle;
+        var foregroundRoot = _source is null ? nint.Zero : GetAncestor(_source.Handle, GaRoot);
+        var foreground = active && foregroundRoot != nint.Zero && GetForegroundWindow() == foregroundRoot;
         SendActivation(root, foreground);
         if (foreground) FocusEmbedded(root);
     }
@@ -134,6 +160,7 @@ public static class EmbeddedInputBridge
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern bool IsChild(nint parent, nint window);
+    [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
     [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);

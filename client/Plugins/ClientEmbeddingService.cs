@@ -204,7 +204,10 @@ public sealed class ClientEmbeddingService
             foreach (var (id, embedded) in _embedded)
             {
                 if (!IsCurrent(embedded, _hostWindow)) continue;
-                ShowWindow(embedded.Root, string.Equals(id, accountId, StringComparison.Ordinal) ? SwShow : SwHide);
+                // Showing a selected client must not activate it. The caller
+                // performs an explicit guarded focus handoff only when RAM
+                // already owns foreground.
+                ShowWindow(embedded.Root, string.Equals(id, accountId, StringComparison.Ordinal) ? SwShowNoActivate : SwHide);
             }
         }
     }

@@ -38,6 +38,16 @@ public sealed class FocusSafeInputBroker
             return BackgroundInputResult.Failure("unavailable", "The target window is unavailable or minimized.", GetForegroundWindow(), GetForegroundWindow());
         }
 
+        var hostIntegrity = ProcessIntegrity.Current;
+        var targetIntegrity = ProcessIntegrity.ForWindow(account.WindowHandle);
+        if (hostIntegrity != ProcessIntegrityLevel.Unknown &&
+            targetIntegrity != ProcessIntegrityLevel.Unknown && targetIntegrity > hostIntegrity)
+        {
+            return BackgroundInputResult.Failure("integrity-mismatch",
+                $"The target client is {targetIntegrity} integrity while RAM is {hostIntegrity}; background delivery was blocked.",
+                GetForegroundWindow(), GetForegroundWindow());
+        }
+
         if (!ValidateWindowIdentity(account, account.WindowHandle) ||
             (windowValidator is not null && !windowValidator(account.WindowHandle)))
         {

@@ -35,6 +35,7 @@ public partial class ClientsPanel : UserControl
         _attached = true;
         _ownerWindow = ownerWindow;
         _runtime = ((App)Application.Current).PluginRuntime;
+        _runtime.EnsureEmbeddedFocus = EnsureEmbeddedFocus;
         _foregroundWindow = new WindowInteropHelper(ownerWindow).Handle;
         NativeClientHost.HandleCreated += NativeClientHost_HandleCreated;
         NativeClientHost.HandleDestroying += NativeClientHost_HandleDestroying;
@@ -71,6 +72,7 @@ public partial class ClientsPanel : UserControl
             _runtime.ClientEmbeddings.ReleaseHostWindow(NativeClientHost.NativeHandle);
         EmbeddedInputBridge.Diagnostics = null;
         EmbeddedInputBridge.Detach();
+        if (_runtime is not null) _runtime.EnsureEmbeddedFocus = null;
         _attached = false;
     }
 
@@ -248,6 +250,29 @@ public partial class ClientsPanel : UserControl
         if (_runtime is null || !_viewVisible || !_runtime.ClientEmbeddings.HostOwnsForeground()) return false;
         var accountId = _runtime.ClientEmbeddings.VisibleAccountId;
         if (accountId is null || !_runtime.ClientEmbeddings.IsVisible(accountId)) return false;
+        var root = _runtime.ClientEmbeddings.RootFor(accountId);
+        return root is not null && root != nint.Zero && EmbeddedInputBridge.FocusEmbedded(root.Value);
+    }
+
+    private bool EnsureEmbeddedFocus(string accountId)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            if (Dispatcher.HasShutdownStarted) return false;
+            try
+            {
+                return Dispatcher.Invoke(() => EnsureEmbeddedFocus(accountId));
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        if (_runtime is null || !_viewVisible ||
+            !string.Equals(_runtime.ClientEmbeddings.VisibleAccountId, accountId, StringComparison.Ordinal) ||
+            !_runtime.ClientEmbeddings.HostOwnsForeground()) return false;
+
         var root = _runtime.ClientEmbeddings.RootFor(accountId);
         return root is not null && root != nint.Zero && EmbeddedInputBridge.FocusEmbedded(root.Value);
     }

@@ -24,6 +24,12 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly GlobalHotkeyMonitor _hotkeyMonitor = new();
     private readonly InputSendInjector _sendInjector = new();
     public ClientEmbeddingService ClientEmbeddings { get; } = new();
+    /// <summary>
+    /// UI-owned focus handoff used only immediately before guarded macro input.
+    /// The callback must refuse to focus anything unless RAM already owns the
+    /// foreground, so plugin playback can never activate RAM or steal focus.
+    /// </summary>
+    internal Func<string, bool>? EnsureEmbeddedFocus { get; set; }
     private int _queuedAccountUpdates;
     private const int MaxQueuedAccountUpdates = 64;
 
@@ -93,6 +99,23 @@ public sealed class PluginRuntime : IAsyncDisposable
         if (deliveryMode == InputDeliveryMode.GuardedReal)
         {
             var expectedRoot = embeddedRoot!.Value;
+            var hostIntegrity = ProcessIntegrity.Current;
+            var targetIntegrity = ProcessIntegrity.ForWindow(expectedRoot);
+            if (hostIntegrity != ProcessIntegrityLevel.Unknown &&
+                targetIntegrity != ProcessIntegrityLevel.Unknown && targetIntegrity > hostIntegrity)
+            {
+                return BackgroundInputResult.Failure("integrity-mismatch",
+                    $"The embedded client is {targetIntegrity} integrity while RAM is {hostIntegrity}; input was not injected.",
+                    nint.Zero, nint.Zero);
+            }
+            var focusReady = EnsureEmbeddedFocus?.Invoke(accountId) == true ||
+                              EmbeddedInputBridge.HasFocusWithin(expectedRoot);
+            if (!focusReady)
+            {
+                return BackgroundInputResult.Failure("focus-lost",
+                    "The selected embedded client does not own keyboard focus.",
+                    nint.Zero, nint.Zero);
+            }
             return await _sendInjector.PostAsync(expectedRoot, events, cancellationToken, () =>
             {
                 var current = Accounts.Snapshot().FirstOrDefault(snapshot =>

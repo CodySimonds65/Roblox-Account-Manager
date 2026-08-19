@@ -20,6 +20,7 @@ public sealed class EmbeddedClientHost : HwndHost
     private const int WmSize = 0x0005;
     private const int WmSetFocus = 0x0007;
     private const int WmMouseActivate = 0x0021;
+    private const int MaActivate = 1;
 
     public nint NativeHandle { get; private set; }
 
@@ -68,10 +69,16 @@ public sealed class EmbeddedClientHost : HwndHost
         {
             Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() => NativeSizeChanged?.Invoke()));
         }
-        else if (message is WmMouseActivate or WmSetFocus)
+        else if (message == WmMouseActivate)
         {
             // WM_MOUSEACTIVATE arrives before the top-level activation completes.
             // Defer focus so the guard can verify RAM is actually foreground.
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => FocusVisibleClient?.Invoke()));
+            handled = true;
+            return MaActivate;
+        }
+        else if (message == WmSetFocus)
+        {
             Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => FocusVisibleClient?.Invoke()));
         }
 

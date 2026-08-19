@@ -36,6 +36,7 @@ $requiredInjectorGuards = [ordered]@{
     'live HWND validation' = '!IsWindow\(rootWindow\)'
     'visible-client validation' = '!IsWindowVisible\(rootWindow\)'
     'foreground-owner validation' = 'GetForegroundWindow\(\)\s*!=\s*GetAncestor\(rootWindow, GaRoot\)'
+    'focused-client validation' = 'GetGUIThreadInfo\(gameThread, ref info\)[\s\S]*?IsFocusWithin\(rootWindow, info\.hwndFocus\)'
 }
 foreach ($guard in $requiredInjectorGuards.GetEnumerator()) {
     if ($injector -notmatch $guard.Value) {

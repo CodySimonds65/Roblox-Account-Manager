@@ -73,6 +73,10 @@ public sealed class InputSendInjector
     {
         if (!IsWindow(rootWindow) || !IsWindowVisible(rootWindow) ||
             GetForegroundWindow() != GetAncestor(rootWindow, GaRoot)) return false;
+        var gameThread = GetWindowThreadProcessId(rootWindow, out _);
+        var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
+        if (gameThread == 0 || !GetGUIThreadInfo(gameThread, ref info) ||
+            !IsFocusWithin(rootWindow, info.hwndFocus)) return false;
         try
         {
             return targetValidator?.Invoke() ?? true;
@@ -167,6 +171,19 @@ public sealed class InputSendInjector
 
     [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X; public int Y; }
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GUITHREADINFO
+    {
+        public uint cbSize;
+        public uint flags;
+        public nint hwndActive;
+        public nint hwndFocus;
+        public nint hwndCapture;
+        public nint hwndMenuOwner;
+        public nint hwndMoveSize;
+        public nint hwndCaret;
+        public RECT rcCaret;
+    }
     [StructLayout(LayoutKind.Sequential)] private struct INPUT { public uint Type; public INPUTUNION Data; }
     [StructLayout(LayoutKind.Explicit)]
     private struct INPUTUNION
@@ -183,7 +200,14 @@ public sealed class InputSendInjector
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll")] private static extern bool IsChild(nint parent, nint window);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
+    [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO info);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint window, out RECT rect);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(nint window, ref POINT point);
+
+    private static bool IsFocusWithin(nint root, nint focusedWindow) =>
+        focusedWindow != nint.Zero && (focusedWindow == root || IsChild(root, focusedWindow));
+
     private const uint GaRoot = 2;
 }
