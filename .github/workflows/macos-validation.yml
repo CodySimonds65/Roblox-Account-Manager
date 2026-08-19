@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "src/**"
+      - "build/macos/**"
       - "tests/RobloxAccountManager.Core.Tests/**"
       - "tests/RobloxAccountManager.Platform.MacOS.Tests/**"
       - ".github/workflows/macos-*.yml"
