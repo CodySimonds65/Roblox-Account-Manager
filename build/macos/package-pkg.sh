@@ -72,7 +72,7 @@ validate_script_free_component() {
   fi
 
   pkgutil --payload-files "$package_path" > "$payload_list"
-  awk '
+  if ! awk '
     BEGIN {
       prefix1 = "Applications/Roblox Account Manager.app/"
       prefix2 = "Roblox Account Manager.app/"
@@ -83,7 +83,11 @@ validate_script_free_component() {
       $0 == "Roblox Account Manager.app" || $0 == "Roblox Account Manager.app/" { next }
     index($0, prefix1) == 1 || index($0, prefix2) == 1 { next }
     { exit 1 }
-  ' "$payload_list" || die "PKG payload contains an absolute, escaping, or unexpected path."
+  ' "$payload_list"; then
+    echo "Rejected PKG payload entries:" >&2
+    sed -n '1,80p' "$payload_list" >&2
+    die "PKG payload contains an absolute, escaping, or unexpected path."
+  fi
   if grep -Eiq '(^|/)(Scripts|[^/]*\.sh)(/|$)' "$payload_list"; then
     die "PKG payload unexpectedly contains installer scripts."
   fi
