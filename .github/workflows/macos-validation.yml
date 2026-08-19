@@ -40,3 +40,10 @@ jobs:
         run: bash build/macos/package-app.sh "artifacts/${{ matrix.rid }}" "artifacts/Roblox Account Manager.app" 0.0.0
       - name: Smoke-test app composition
         run: '"artifacts/Roblox Account Manager.app/Contents/MacOS/RobloxAccountManager" --validate-composition'
+      - name: Smoke-test unsigned PKG creation
+        run: |
+          set -euo pipefail
+          app="artifacts/Roblox Account Manager.app"
+          pkg="artifacts/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned.pkg"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
+          bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" 1
