@@ -85,8 +85,10 @@ public sealed partial class SingletonService
 
     internal static async Task<UnlockResult> ReleaseHandlesAsync(
         string handlePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<int>? protectedProcessIds = null)
     {
+        var protectedSet = protectedProcessIds is null ? null : new HashSet<int>(protectedProcessIds);
         var processes = Process.GetProcessesByName("RobloxPlayerBeta");
         if (processes.Length == 0)
         {
@@ -105,6 +107,14 @@ public sealed partial class SingletonService
                 foreach (var process in processes)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    // Closing the singleton handles inside a RUNNING managed client
+                    // makes its watchdog shut the game down. Managed accounts are
+                    // protected; their handles are never closed or verified.
+                    if (protectedSet is not null && protectedSet.Contains(process.Id))
+                    {
+                        messages.Add($"Skipped singleton release for PID {process.Id} (managed account in use).");
+                        continue;
+                    }
                     var queryResult = await RunHandleAsync(
                         handlePath,
                         cancellationToken,
@@ -143,6 +153,10 @@ public sealed partial class SingletonService
                 foreach (var process in verificationProcesses)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    if (protectedSet is not null && protectedSet.Contains(process.Id))
+                    {
+                        continue;
+                    }
                     var verificationResult = await RunHandleAsync(
                         handlePath,
                         cancellationToken,
@@ -338,10 +352,12 @@ public sealed class SingletonUnlockSession : IAsyncDisposable
         _handlePath = handlePath;
     }
 
-    public Task<UnlockResult> ReleaseAsync(CancellationToken cancellationToken = default)
+    public Task<UnlockResult> ReleaseAsync(
+        CancellationToken cancellationToken = default,
+        IReadOnlyCollection<int>? protectedProcessIds = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return SingletonService.ReleaseHandlesAsync(_handlePath, cancellationToken);
+        return SingletonService.ReleaseHandlesAsync(_handlePath, cancellationToken, protectedProcessIds);
     }
 
     public ValueTask DisposeAsync()
