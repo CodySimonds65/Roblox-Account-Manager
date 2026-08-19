@@ -39,4 +39,4 @@ jobs:
       - name: Package unsigned app bundle
         run: bash build/macos/package-app.sh "artifacts/${{ matrix.rid }}" "artifacts/Roblox Account Manager.app" 0.0.0
       - name: Smoke-test app composition
-        run: "artifacts/Roblox Account Manager.app/Contents/MacOS/RobloxAccountManager --validate-composition"
+        run: '"artifacts/Roblox Account Manager.app/Contents/MacOS/RobloxAccountManager" --validate-composition'
