@@ -89,9 +89,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_NOTARY_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
-          ROBLOX_TEAM_ID: ${{ secrets.ROBLOX_DEVELOPER_TEAM_ID }}
         run: |
-          for name in CERTIFICATE CERTIFICATE_PASSWORD SIGNING_IDENTITY INSTALLER_CERTIFICATE INSTALLER_CERTIFICATE_PASSWORD INSTALLER_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_PASSWORD ROBLOX_TEAM_ID; do
+          for name in CERTIFICATE CERTIFICATE_PASSWORD SIGNING_IDENTITY INSTALLER_CERTIFICATE INSTALLER_CERTIFICATE_PASSWORD INSTALLER_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_PASSWORD; do
             test -n "${!name}" || { echo "Missing required secret: $name" >&2; exit 1; }
           done
           [[ "$SIGNING_IDENTITY" =~ ^Developer[[:space:]]ID[[:space:]]Application:[[:space:]].+\(${APPLE_TEAM_ID}\)$ ]] || {
@@ -132,7 +131,6 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_NOTARY_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
-          RAM_TRUSTED_ROBLOX_TEAM_ID: ${{ secrets.ROBLOX_DEVELOPER_TEAM_ID }}
           RAM_TRUSTED_INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
         run: |
           set -euo pipefail
@@ -146,7 +144,6 @@ jobs:
           mkdir -p dist
           app="dist/Roblox Account Manager.app"
           bash build/macos/package-app.sh publish "$app" "$app_version"
-          printf '%s\n' "$RAM_TRUSTED_ROBLOX_TEAM_ID" > "$app/Contents/Resources/RobloxDeveloperTeamIdentifier"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$app/Contents/Info.plist"
           find "$app/Contents/MacOS" -type f \( -name '*.dylib' -o -perm -111 \) -print0 | while IFS= read -r -d '' item; do
             codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$item"

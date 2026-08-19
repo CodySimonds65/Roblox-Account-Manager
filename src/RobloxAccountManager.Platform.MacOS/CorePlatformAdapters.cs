@@ -5,10 +5,14 @@ namespace RobloxAccountManager.Platform.MacOS;
 public sealed class MacCoreProcessLocator : Contracts.IRobloxProcessLocator
 {
     private readonly MacRobloxProcessLocator _inner;
+    private readonly MacBundleDiscovery? _bundleDiscovery;
 
-    public MacCoreProcessLocator(MacRobloxProcessLocator? inner = null)
+    public MacCoreProcessLocator(
+        MacRobloxProcessLocator? inner = null,
+        MacBundleDiscovery? bundleDiscovery = null)
     {
         _inner = inner ?? new MacRobloxProcessLocator();
+        _bundleDiscovery = bundleDiscovery;
     }
 
     public ValueTask<Contracts.RobloxLaunchSnapshot> CaptureSnapshotAsync(CancellationToken cancellationToken = default)
@@ -37,11 +41,21 @@ public sealed class MacCoreProcessLocator : Contracts.IRobloxProcessLocator
         {
             return Contracts.LaunchVerificationResult.Failure(Contracts.LaunchFailureKind.VerificationFailed, "bundle-path-required");
         }
+        if (_bundleDiscovery is not null && string.IsNullOrWhiteSpace(request.ValidatedRobloxBundleFingerprint))
+        {
+            return Contracts.LaunchVerificationResult.Failure(
+                Contracts.LaunchFailureKind.VerificationFailed,
+                "pre-launch-bundle-fingerprint-required");
+        }
 
-        var result = await new MacLaunchVerificationService(_inner).WaitForNewProcessAsync(
+        Func<string, CancellationToken, Task<MacBundleInfo?>>? bundleValidator = _bundleDiscovery is null
+            ? null
+            : (path, token) => _bundleDiscovery.ValidateAsync(path, token);
+        var result = await new MacLaunchVerificationService(_inner, bundleValidator).WaitForNewProcessAsync(
             beforeSnapshot,
             expectedBundle,
             request.VerificationTimeout ?? TimeSpan.FromSeconds(30),
+            request.ValidatedRobloxBundleFingerprint,
             cancellationToken).ConfigureAwait(false);
         if (result.Succeeded && result.NewProcess is not null)
         {
@@ -130,8 +144,6 @@ public sealed class MacCorePlatformLauncher : Contracts.IRobloxPlatformLauncher
         MacSemaphore? semaphore = null)
     {
         _bundleDiscovery = bundleDiscovery ?? throw new ArgumentNullException(nameof(bundleDiscovery));
-        if (!_bundleDiscovery.HasTrustedTeamIdentifier)
-            throw new ArgumentException("trusted-source-team-id-required", nameof(bundleDiscovery));
         _commandRunner = commandRunner ?? new MacProcessCommandRunner();
         _semaphore = semaphore ?? new MacSemaphore();
     }
@@ -151,13 +163,21 @@ public sealed class MacCorePlatformLauncher : Contracts.IRobloxPlatformLauncher
             return new Contracts.PlatformLaunchResult(false, Contracts.LaunchFailureKind.PlatformNotSupported, "platform-not-supported");
 
         // Validate before the ticket-bearing URI is passed to any external process. Bundle id,
-        // approved location, Developer ID chain, Gatekeeper assessment, designated requirement,
-        // and the configured Roblox TeamIdentifier must all match.
+        // approved location, Developer ID chain, Gatekeeper assessment, and designated
+        // requirement must all match. Team ID pinning is intentionally not required.
         var validatedBundle = await _bundleDiscovery.ValidateAsync(
             request.RobloxBundlePath,
             cancellationToken).ConfigureAwait(false);
         if (validatedBundle is null)
             return new Contracts.PlatformLaunchResult(false, Contracts.LaunchFailureKind.LauncherRejected, "untrusted-roblox-bundle");
+        var revalidatedBundle = await _bundleDiscovery.ValidateAsync(
+            request.RobloxBundlePath,
+            cancellationToken).ConfigureAwait(false);
+        if (revalidatedBundle is null
+            || !string.Equals(validatedBundle.SourceFingerprint, revalidatedBundle.SourceFingerprint, StringComparison.Ordinal))
+        {
+            return new Contracts.PlatformLaunchResult(false, Contracts.LaunchFailureKind.LauncherRejected, "roblox-bundle-changed-before-launch");
+        }
         try
         {
             var command = await _commandRunner.RunAsync(
@@ -165,7 +185,7 @@ public sealed class MacCorePlatformLauncher : Contracts.IRobloxPlatformLauncher
                 ["-n", "-a", validatedBundle.BundlePath, freshLaunchUri.AbsoluteUri],
                 cancellationToken).ConfigureAwait(false);
             return command.Succeeded
-                ? Contracts.PlatformLaunchResult.Success()
+                ? Contracts.PlatformLaunchResult.Success(validatedBundle.SourceFingerprint)
                 : new Contracts.PlatformLaunchResult(false, Contracts.LaunchFailureKind.LauncherRejected, "macos-open-failed");
         }
         finally

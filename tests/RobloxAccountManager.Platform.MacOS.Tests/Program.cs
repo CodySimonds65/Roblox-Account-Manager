@@ -45,22 +45,99 @@ var commandResult = new MacProcessCommandResult(0, "auth-ticket-token", "auth-ti
 Check(!commandResult.ToString().Contains("auth-ticket-token", StringComparison.Ordinal),
     "Process command diagnostics leaked sensitive command output.");
 
-var unconfiguredDiscovery = new MacBundleDiscovery(requiredTeamIdentifier: null);
-Check(!unconfiguredDiscovery.HasTrustedTeamIdentifier,
-    "Bundle discovery accepted a missing trusted Team ID configuration.");
-var rejectedLauncher = false;
+var unconfiguredDiscovery = new MacBundleDiscovery();
+_ = new MacCorePlatformLauncher(unconfiguredDiscovery);
+passed++;
+Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblox Team ID pin.");
+
+var officialSignature = new MacProcessCommandResult(
+    0,
+    string.Empty,
+    "Authority=Developer ID Application: Roblox Corporation (ARBITRARY1)\n" +
+    "Identifier=com.roblox.RobloxPlayer\n" +
+    "TeamIdentifier=ARBITRARY1");
+var officialGatekeeper = new MacProcessCommandResult(0, "accepted", string.Empty);
+var officialRequirements = new MacProcessCommandResult(
+    0,
+    string.Empty,
+    "designated => anchor apple generic and identifier \"com.roblox.RobloxPlayer\"");
+Check(MacSignatureVerifier.IsAcceptedOfficialBundleSignature(
+        officialSignature, officialGatekeeper, officialRequirements),
+    "A valid Developer ID Roblox bundle was rejected when Team ID pinning was omitted.");
+Check(MacSignatureVerifier.IsAcceptedOfficialBundleSignature(
+        officialSignature with { StandardError = officialSignature.StandardError.Replace(
+            "Roblox Corporation", "Other Developer") },
+        officialGatekeeper,
+        officialRequirements),
+    "The intentionally unpinned Team ID policy unexpectedly rejected another Developer ID signer.");
+Console.WriteLine("PASS: publisher Team ID differences remain an explicit accepted trust reduction.");
+Check(!MacSignatureVerifier.IsAcceptedOfficialBundleSignature(
+        officialSignature with { StandardError = officialSignature.StandardError.Replace(
+            "Identifier=com.roblox.RobloxPlayer", "Identifier=com.example.Spoof") },
+        officialGatekeeper,
+        officialRequirements),
+    "A bundle with a spoofed Roblox identifier was accepted.");
+Check(!MacSignatureVerifier.IsAcceptedOfficialBundleSignature(
+        officialSignature with { StandardError = officialSignature.StandardError + "\nSignature=adhoc" },
+        officialGatekeeper,
+        officialRequirements),
+    "An ad-hoc Roblox bundle was accepted.");
+Check(!MacSignatureVerifier.IsAcceptedOfficialBundleSignature(
+        officialSignature,
+        new MacProcessCommandResult(1, string.Empty, "rejected"),
+        officialRequirements),
+    "A bundle rejected by Gatekeeper was accepted.");
+Check(!MacSignatureVerifier.IsAcceptedOfficialBundleSignature(
+        officialSignature,
+        officialGatekeeper,
+        officialRequirements with { StandardError = "identifier \"com.example.Spoof\"" }),
+    "A bundle with a spoofed designated requirement was accepted.");
+
+var raceBundlePath = Path.Combine(Path.GetTempPath(), "ram-mac-race-" + Guid.NewGuid().ToString("N") + ".app");
+Directory.CreateDirectory(raceBundlePath);
 try
 {
-    _ = new MacCorePlatformLauncher(unconfiguredDiscovery);
+    var raceBundle = new MacBundleInfo(
+        raceBundlePath,
+        MacBundleDiscovery.RobloxBundleIdentifier,
+        Path.Combine(raceBundlePath, "Contents", "MacOS", "RobloxPlayer"),
+        "1",
+        "1",
+        true,
+        "fingerprint-a",
+        "executable-a",
+        "plist-a");
+    var replacedBundle = raceBundle with { SourceFingerprint = "fingerprint-b" };
+    var validationCalls = 0;
+    var raceLocator = new SequenceRobloxProcessLocator(raceBundlePath);
+var raceVerification = await new MacLaunchVerificationService(
+            raceLocator,
+            (_, _) => Task.FromResult<MacBundleInfo?>(Interlocked.Increment(ref validationCalls) <= 2 ? raceBundle : replacedBundle))
+        .WaitForNewProcessAsync(
+            new RobloxLaunchSnapshot(DateTimeOffset.UtcNow, Array.Empty<RobloxProcessInfo>()),
+            raceBundlePath,
+            TimeSpan.FromSeconds(2));
+    Check(raceVerification.Status == LaunchVerificationStatus.InvalidBundle
+        && raceVerification.Warnings.Any(warning => warning.Contains("bundle changed", StringComparison.OrdinalIgnoreCase)),
+        "A Roblox bundle replacement during process verification was not rejected.");
+
+var boundaryLocator = new SequenceRobloxProcessLocator(raceBundlePath);
+var boundaryVerification = await new MacLaunchVerificationService(
+        boundaryLocator,
+        (_, _) => Task.FromResult<MacBundleInfo?>(replacedBundle))
+    .WaitForNewProcessAsync(
+        new RobloxLaunchSnapshot(DateTimeOffset.UtcNow, Array.Empty<RobloxProcessInfo>()),
+        raceBundlePath,
+        TimeSpan.FromSeconds(2),
+        expectedBundleFingerprint: raceBundle.SourceFingerprint);
+Check(boundaryVerification.Status == LaunchVerificationStatus.InvalidBundle
+    && boundaryVerification.Warnings.Any(warning => warning.Contains("bundle changed", StringComparison.OrdinalIgnoreCase)),
+    "A bundle replacement at the post-open verification boundary was accepted as the baseline.");
 }
-catch (ArgumentException exception) when (exception.Message.Contains("trusted-source-team-id-required", StringComparison.Ordinal))
+finally
 {
-    rejectedLauncher = true;
+    Directory.Delete(raceBundlePath, recursive: true);
 }
-Check(rejectedLauncher, "The platform launcher accepted an unconfigured bundle validator.");
-var configuredDiscovery = new MacBundleDiscovery(requiredTeamIdentifier: "TEAM123456");
-Check(configuredDiscovery.HasTrustedTeamIdentifier,
-    "Bundle discovery did not retain an explicitly configured trusted Team ID.");
 
 var tempRoot = Path.Combine(Path.GetTempPath(), "ram-mac-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(tempRoot);
@@ -448,4 +525,38 @@ sealed class RecordingCommandRunner(
 
         return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
     }
+}
+
+sealed class SequenceRobloxProcessLocator : IRobloxProcessLocator
+{
+    private readonly RobloxProcessInfo _candidate;
+    private int _captureCount;
+
+    public SequenceRobloxProcessLocator(string bundlePath)
+    {
+        var executablePath = Path.Combine(bundlePath, "Contents", "MacOS", "RobloxPlayer");
+        _candidate = new RobloxProcessInfo(
+            new RobloxProcessIdentity(
+                4242,
+                DateTimeOffset.UtcNow,
+                executablePath,
+                bundlePath),
+            "RobloxPlayer",
+            false,
+            true);
+    }
+
+    public RobloxLaunchSnapshot CaptureSnapshot()
+    {
+        var processes = Interlocked.Increment(ref _captureCount) == 1
+            ? Array.Empty<RobloxProcessInfo>()
+            : [_candidate];
+        return new RobloxLaunchSnapshot(DateTimeOffset.UtcNow, processes);
+    }
+
+    public RobloxProcessInfo? FindProcess(int processId) =>
+        processId == _candidate.ProcessId ? _candidate : null;
+
+    public bool IsSameProcess(RobloxProcessIdentity expected, RobloxProcessInfo actual) =>
+        expected.Matches(actual.Identity) && actual.IsStable;
 }

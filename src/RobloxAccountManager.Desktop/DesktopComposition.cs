@@ -21,7 +21,6 @@ public sealed record DesktopComposition(
 {
     public static DesktopComposition Create(
         RobloxPlatform platform,
-        string? trustedRobloxTeamIdentifier = null,
         string? trustedInstallerIdentity = null)
     {
         IAccountBrowserDataStoreRemover dataStoreRemover = platform == RobloxPlatform.MacOS
@@ -41,18 +40,12 @@ public sealed record DesktopComposition(
         {
             var registry = new MacManagedProcessRegistry();
             var nativeLocator = new MacRobloxProcessLocator(registry);
-            var coreLocator = new MacCoreProcessLocator(nativeLocator);
-            if (!string.IsNullOrWhiteSpace(trustedRobloxTeamIdentifier))
-            {
-                var discovery = new MacBundleDiscovery(requiredTeamIdentifier: trustedRobloxTeamIdentifier);
-                if (discovery.HasTrustedTeamIdentifier)
-                {
-                    launches = new SerializedLaunchCoordinator(
-                        coreLocator,
-                        new MacCoreMultiInstanceStrategy(),
-                        new MacCorePlatformLauncher(discovery));
-                }
-            }
+            var discovery = new MacBundleDiscovery();
+            var coreLocator = new MacCoreProcessLocator(nativeLocator, discovery);
+            launches = new SerializedLaunchCoordinator(
+                coreLocator,
+                new MacCoreMultiInstanceStrategy(),
+                new MacCorePlatformLauncher(discovery));
             clients = new MacCoreClientWindowManager(new MacAccessibilityWindowManager(nativeLocator), coreLocator);
             robloxSettings = new MacRobloxSettingsAdapter();
             plugins = new MacPluginHostFacade();

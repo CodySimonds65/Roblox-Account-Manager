@@ -15,20 +15,14 @@ public sealed class MacManagedRuntimeBuilder
         string? runtimeRoot = null,
         MacBundleDiscovery? bundleDiscovery = null,
         IMacProcessCommandRunner? commandRunner = null,
-        IRobloxProcessLocator? processLocator = null,
-        string? requiredSourceTeamIdentifier = null)
+        IRobloxProcessLocator? processLocator = null)
     {
         RuntimeRoot = Path.GetFullPath(runtimeRoot ?? GetDefaultRuntimeRoot());
         _commandRunner = commandRunner ?? new MacProcessCommandRunner();
         _signatureVerifier = new MacSignatureVerifier(_commandRunner);
-        if (bundleDiscovery is null && string.IsNullOrWhiteSpace(requiredSourceTeamIdentifier))
-            throw new ArgumentException(
-                "trusted-source-team-id-required: configure the verified Roblox Developer ID TeamIdentifier before managed-runtime cloning.",
-                nameof(requiredSourceTeamIdentifier));
         _bundleDiscovery = bundleDiscovery ?? new MacBundleDiscovery(
             _commandRunner,
-            _signatureVerifier,
-            requiredSourceTeamIdentifier);
+            _signatureVerifier);
         _processLocator = processLocator ?? new MacRobloxProcessLocator();
     }
 

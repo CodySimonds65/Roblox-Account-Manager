@@ -15,17 +15,13 @@ internal static class Program
             app.Initialize();
             var platform = OperatingSystem.IsMacOS() ? RobloxPlatform.MacOS :
                 OperatingSystem.IsWindows() ? RobloxPlatform.Windows : RobloxPlatform.Unknown;
-            var trustedTeamIdentifier = TrustedRobloxIdentityConfiguration.LoadTeamIdentifier();
             var composition = DesktopComposition.Create(
                 platform,
-                trustedTeamIdentifier,
                 TrustedRobloxIdentityConfiguration.LoadInstallerIdentity());
             if (platform == RobloxPlatform.MacOS && composition.Clients is null)
                 throw new InvalidOperationException("The macOS client services were not composed.");
-            if (platform == RobloxPlatform.MacOS
-                && !string.IsNullOrWhiteSpace(trustedTeamIdentifier)
-                && composition.Launches is null)
-                throw new InvalidOperationException("The trusted macOS launch services were not composed.");
+            if (platform == RobloxPlatform.MacOS && composition.Launches is null)
+                throw new InvalidOperationException("The macOS launch services were not composed.");
             var browserSessions = composition.BrowserSessions;
             var accountId = Guid.NewGuid().ToString("N");
             var descriptor = browserSessions.CreateAsync(accountId, "Composition test").AsTask().GetAwaiter().GetResult();

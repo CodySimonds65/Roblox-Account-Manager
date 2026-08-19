@@ -108,7 +108,11 @@ public sealed record RobloxLaunchRequest(
     MacLaunchLevel? PreferredMacLevel = null,
     string? RobloxBundlePath = null,
     bool UserConsentedToMultiInstanceChanges = false,
-    TimeSpan? VerificationTimeout = null);
+    TimeSpan? VerificationTimeout = null,
+    // Populated by the platform launcher after it validates the bundle and is
+    // carried into process verification so a post-launch path replacement
+    // cannot establish a new trust baseline.
+    string? ValidatedRobloxBundleFingerprint = null);
 
 public sealed record SingletonReleaseResult(
     SingletonReleaseStatus Status,
@@ -132,9 +136,11 @@ public sealed record LaunchVerificationResult(
 public sealed record PlatformLaunchResult(
     bool Accepted,
     LaunchFailureKind FailureKind = LaunchFailureKind.None,
-    string? DiagnosticCode = null)
+    string? DiagnosticCode = null,
+    string? ValidatedRobloxBundleFingerprint = null)
 {
-    public static PlatformLaunchResult Success() => new(true);
+    public static PlatformLaunchResult Success(string? validatedRobloxBundleFingerprint = null) =>
+        new(true, ValidatedRobloxBundleFingerprint: validatedRobloxBundleFingerprint);
 }
 
 public sealed record LaunchAttemptDiagnostic(
