@@ -162,12 +162,16 @@ try
     var pluginDirectory = Path.Combine(pluginRoot, "sample.plugin");
     Directory.CreateDirectory(pluginDirectory);
     await File.WriteAllTextAsync(Path.Combine(pluginDirectory, "plugin.json"),
-        "{\"schemaVersion\":2,\"id\":\"sample.plugin\",\"capabilities\":[\"host.accounts.read\"],\"entryPoints\":{\"osx-x64\":\"plugin\"}}");
+        "{\"schemaVersion\":2,\"id\":\"sample.plugin\",\"capabilities\":[\"host.accounts.read\"],\"entryPoints\":{\"osx-arm64\":\"plugin\",\"osx-x64\":\"plugin\"}}");
     await File.WriteAllBytesAsync(Path.Combine(pluginDirectory, "plugin"), [1, 2, 3]);
     var pluginHost = new MacPluginHostFacade(pluginRoot);
     var pluginIds = await pluginHost.GetInstalledPluginIdsAsync();
     Check(pluginIds.Contains("sample.plugin", StringComparer.Ordinal),
         "A macOS RID-matched plugin was not discovered.");
+    var transport = new MacUnixPluginTransport();
+    Check(System.Text.Encoding.UTF8.GetByteCount(transport.SocketPath) <= 104,
+        "The macOS plugin socket path exceeded the sockaddr_un limit.");
+    await transport.DisposeAsync();
     var unsupportedStart = await pluginHost.StartAsync("sample.plugin", userConfirmed: true);
     if (!OperatingSystem.IsMacOS())
         Check(!unsupportedStart.Succeeded && unsupportedStart.DiagnosticCode == "platform-not-supported",

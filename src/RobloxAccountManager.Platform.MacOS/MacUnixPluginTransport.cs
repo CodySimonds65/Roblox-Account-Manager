@@ -30,7 +30,12 @@ public sealed record MacPluginFrame(string Type, JsonElement Payload);
 public sealed partial class MacUnixPluginTransport : IAsyncDisposable
 {
     private const int MaxFrameBytes = 1024 * 1024;
+    // macOS sockaddr_un.sun_path is limited to 104 bytes. Application Support paths can
+    // already consume most of that budget, so transports use a private, short-lived temp
+    // directory and pass only its short socket name to the plugin.
+    private const int MaxMacOsSocketPathBytes = 104;
     private static readonly TimeSpan IoTimeout = TimeSpan.FromSeconds(5);
+    private readonly string _socketDirectory;
     private readonly string _socketPath;
     private Socket? _listener;
     private ExpectedConnection? _expected;
@@ -38,10 +43,7 @@ public sealed partial class MacUnixPluginTransport : IAsyncDisposable
 
     public MacUnixPluginTransport()
     {
-        var root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "RobloxAccountManager", "PluginTransport");
-        _socketPath = Path.Combine(Path.GetFullPath(root), $"host-{Guid.NewGuid():N}.sock");
+        (_socketDirectory, _socketPath) = CreateSocketPaths();
     }
 
     public string SocketPath => _socketPath;
@@ -169,7 +171,36 @@ public sealed partial class MacUnixPluginTransport : IAsyncDisposable
             File.Delete(_socketPath);
         }
 
+        if (Directory.Exists(_socketDirectory))
+        {
+            // The directory is unique to this transport. Delete only the empty directory so
+            // an unexpected file can never cause cleanup to remove unrelated data.
+            PathSafety.RejectSymlinkDirectory(_socketDirectory);
+            Directory.Delete(_socketDirectory);
+        }
+
         await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    private static (string Directory, string SocketPath) CreateSocketPaths()
+    {
+        var directoryName = $"ram-{Guid.NewGuid():N}";
+        var roots = new[] { Path.GetTempPath(), "/tmp" }
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        foreach (var root in roots)
+        {
+            var directory = Path.Combine(root, directoryName);
+            var socket = Path.Combine(directory, "h.sock");
+            if (Encoding.UTF8.GetByteCount(socket) <= MaxMacOsSocketPathBytes)
+            {
+                return (directory, socket);
+            }
+        }
+
+        throw new PathTooLongException("No suitable short path is available for the macOS plugin socket.");
     }
 
     private void PrepareEndpoint()
