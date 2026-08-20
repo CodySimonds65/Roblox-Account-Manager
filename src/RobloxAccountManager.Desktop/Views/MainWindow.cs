@@ -182,7 +182,7 @@ public sealed class MainWindow : Window
         AddHeaderAction(actions, "Settings", "settings");
         AddHeaderAction(actions, "Diagnostics", "diagnostics");
         _moreNavigation.ItemsSource = _viewModel.Pages.Where(page => page.Key is not ("accounts" or "browser" or "plugins" or "settings" or "diagnostics")).ToArray();
-        _moreNavigation.ItemTemplate = new FuncDataTemplate<NavigationItemViewModel>((page, _) => new TextBlock { Text = page.Title });
+        _moreNavigation.ItemTemplate = new FuncDataTemplate<NavigationItemViewModel>((page, _) => new TextBlock { Text = page?.Title ?? string.Empty });
         _moreNavigation.Width = 128;
         _moreNavigation.SelectedIndex = -1;
         _moreNavigation.SelectionChanged += (_, _) =>
