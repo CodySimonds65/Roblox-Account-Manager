@@ -128,7 +128,7 @@ jobs:
           bash build/macos/package-app.sh publish "$app" "$app_version"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $package_version" "$app/Contents/Info.plist"
           "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
-          bash build/macos/package-pkg.sh --component --unsigned "$app" "$pkg" "${{ matrix.rid }}" "$package_version"
+          bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" "$package_version"
           /bin/mkdir -p "$smoke_dir"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
           bash build/macos/package-pkg.sh --unsigned "$app" "$smoke_pkg" "${{ matrix.rid }}" 1
@@ -160,7 +160,7 @@ jobs:
           if [[ "${{ matrix.rid }}" == "osx-arm64" ]]; then
             bash build/macos/smoke-install-root-pkg.sh "$release_pkg"
           else
-            echo "Skipping host-root PKG smoke on Intel; isolated target-volume coverage passed."
+            echo "Skipping unsigned host-root PKG smoke on Intel; isolated target-volume coverage passed."
           fi
 
       - name: Stage unsigned architecture artifact
