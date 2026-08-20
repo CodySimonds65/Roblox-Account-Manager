@@ -64,6 +64,7 @@ cleanup() {
     fi
     mounted=false
   fi
+  /bin/chmod -R u+w "$work_root" >/dev/null 2>&1 || true
   /bin/rm -rf -- "$work_root"
 }
 trap cleanup EXIT
@@ -135,9 +136,9 @@ inspect_package_metadata() {
   [[ "$package_info_count" == 1 ]] || die "PKG must contain exactly one PackageInfo: $package_path"
   package_info="$package_infos"
 
-  identifier="$(/usr/bin/sed -nE 's/.*<pkg-info[^>]*identifier="([^"]+)".*/\1/p' "$package_info" | /usr/bin/head -n 1)"
-  package_version="$(/usr/bin/sed -nE 's/.*<pkg-info[^>]*version="([^"]+)".*/\1/p' "$package_info" | /usr/bin/head -n 1)"
-  install_location="$(/usr/bin/sed -nE 's/.*<pkg-info[^>]*install-location="([^"]+)".*/\1/p' "$package_info" | /usr/bin/head -n 1)"
+  identifier="$(/usr/bin/grep -Eo 'identifier="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^identifier="([^"]+)"$/\1/')"
+  package_version="$(/usr/bin/grep -Eo 'version="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^version="([^"]+)"$/\1/')"
+  install_location="$(/usr/bin/grep -Eo 'install-location="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^install-location="([^"]+)"$/\1/')"
   [[ "$identifier" == "$PACKAGE_IDENTIFIER" ]] || die "PKG identifier mismatch: $package_path"
   [[ "$package_version" =~ ^[0-9]+$ ]] || die "PKG version is not numeric: $package_path"
 

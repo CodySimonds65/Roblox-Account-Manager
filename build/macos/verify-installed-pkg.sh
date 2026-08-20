@@ -48,7 +48,10 @@ target="$(cd -- "$target" && pwd -P)" || die "cannot resolve target volume: $tar
 [[ "$package_identifier" =~ ^[A-Za-z0-9][A-Za-z0-9.+_-]*$ ]] || die "package identifier is not a safe package identifier"
 
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/ram-pkg-verify.XXXXXX")"
-cleanup() { /bin/rm -rf -- "$work_root"; }
+cleanup() {
+  /bin/chmod -R u+w "$work_root" >/dev/null 2>&1 || true
+  /bin/rm -rf -- "$work_root"
+}
 trap cleanup EXIT
 
 payload_list="$work_root/payload-files.txt"
@@ -87,9 +90,9 @@ package_info_count="$(printf '%s\n' "$package_infos" | /usr/bin/sed '/^$/d' | /u
 [[ "$package_info_count" == 1 ]] || die "PKG must contain exactly one PackageInfo"
 package_info="$package_infos"
 
-identifier="$(/usr/bin/sed -nE 's/.*<pkg-info[^>]*identifier="([^"]+)".*/\1/p' "$package_info" | /usr/bin/head -n 1)"
-package_version="$(/usr/bin/sed -nE 's/.*<pkg-info[^>]*version="([^"]+)".*/\1/p' "$package_info" | /usr/bin/head -n 1)"
-install_location="$(/usr/bin/sed -nE 's/.*<pkg-info[^>]*install-location="([^"]+)".*/\1/p' "$package_info" | /usr/bin/head -n 1)"
+identifier="$(/usr/bin/grep -Eo 'identifier="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^identifier="([^"]+)"$/\1/')"
+package_version="$(/usr/bin/grep -Eo 'version="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^version="([^"]+)"$/\1/')"
+install_location="$(/usr/bin/grep -Eo 'install-location="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^install-location="([^"]+)"$/\1/')"
 [[ "$identifier" == "$package_identifier" ]] || die "PackageInfo identifier mismatch: $identifier"
 [[ "$package_version" =~ ^[0-9]+$ ]] || die "PackageInfo version is not numeric: $package_version"
 case "$layout:$install_location" in
