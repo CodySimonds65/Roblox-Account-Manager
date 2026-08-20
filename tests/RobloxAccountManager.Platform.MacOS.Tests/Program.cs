@@ -1,6 +1,8 @@
 using RobloxAccountManager.Platform.MacOS;
 using Contracts = RobloxAccountManager.Core.Contracts;
 using RobloxAccountManager.Core.Models;
+using System.Net;
+using System.Text.Json;
 using System.Security.Cryptography;
 
 var passed = 0;
@@ -451,6 +453,64 @@ finally
         Directory.Delete(updateRoot, recursive: true);
     }
 }
+
+var sourceRoot = Path.Combine(Path.GetTempPath(), "ram-mac-update-source-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(sourceRoot);
+try
+{
+    var packageBytes = RandomNumberGenerator.GetBytes(512);
+    var packageHash = Convert.ToHexString(SHA256.HashData(packageBytes)).ToLowerInvariant();
+    var validPackageName = "RobloxAccountManager-3.1.0-osx-arm64.pkg";
+    var validChecksumName = validPackageName + ".sha256";
+    var releaseJson = BuildReleaseJson(
+        ("draft", true, "v9.0.0", validPackageName, validChecksumName),
+        ("prerelease", true, "v8.0.0", validPackageName, validChecksumName),
+        ("stable", false, "v7.0.0", "RobloxAccountManager-7.0.0-osx-x64.pkg", "RobloxAccountManager-7.0.0-osx-x64.pkg.sha256"),
+        ("stable", false, "v3.1.0", validPackageName, validChecksumName));
+    var handler = new UpdateHttpHandler(releaseJson, packageBytes, packageHash, validPackageName);
+    var source = new MacGitHubReleaseUpdateSource(
+        new HttpClient(handler),
+        new RecordingCommandRunner(new MacProcessCommandResult(0, string.Empty, string.Empty),
+            packageIdentifier: "io.github.codysimonds65.roblox-account-manager", packageVersion: "77"),
+        rid: "osx-arm64",
+        stagingRoot: sourceRoot);
+    var signedPackage = await source.DownloadLatestAsync(UpdateChannel.Signed);
+    Check(signedPackage is not null && !signedPackage.IsUnsigned
+        && signedPackage.Version == new Version(3, 1, 0)
+        && signedPackage.PackageVersion == "77"
+        && signedPackage.LocalPath.StartsWith(sourceRoot, StringComparison.Ordinal),
+        "The GitHub source did not skip drafts/prereleases/wrong-RID assets or read PackageInfo version.");
+
+    var unsignedName = "RobloxAccountManager-3.1.0-osx-arm64-unsigned.pkg";
+    var unsignedHash = Convert.ToHexString(SHA256.HashData(packageBytes)).ToLowerInvariant();
+    var unsignedSource = new MacGitHubReleaseUpdateSource(
+        new HttpClient(new UpdateHttpHandler(BuildReleaseJson(("stable", false, "v3.1.0", unsignedName, unsignedName + ".sha256")), packageBytes, unsignedHash, unsignedName)),
+        new RecordingCommandRunner(new MacProcessCommandResult(0, string.Empty, string.Empty),
+            packageIdentifier: "io.github.codysimonds65.roblox-account-manager", packageVersion: "77"),
+        rid: "osx-arm64",
+        stagingRoot: Path.Combine(sourceRoot, "unsigned"));
+    var unsignedPackage = await unsignedSource.DownloadLatestAsync(UpdateChannel.Unsigned);
+    Check(unsignedPackage is not null && unsignedPackage.IsUnsigned
+        && unsignedPackage.LocalPath.EndsWith("-unsigned.pkg", StringComparison.Ordinal),
+        "The unsigned channel did not select the explicit unsigned asset.");
+
+    var mismatchSource = new MacGitHubReleaseUpdateSource(
+        new HttpClient(new UpdateHttpHandler(BuildReleaseJson(("stable", false, "v3.2.0", "RobloxAccountManager-3.2.0-osx-arm64.pkg", "RobloxAccountManager-3.2.0-osx-arm64.pkg.sha256")), packageBytes, new string('0', 64), "RobloxAccountManager-3.2.0-osx-arm64.pkg")),
+        new RecordingCommandRunner(new MacProcessCommandResult(0, string.Empty, string.Empty),
+            packageIdentifier: "io.github.codysimonds65.roblox-account-manager", packageVersion: "77"),
+        rid: "osx-arm64",
+        stagingRoot: Path.Combine(sourceRoot, "mismatch"));
+    try
+    {
+        _ = await mismatchSource.DownloadLatestAsync(UpdateChannel.Signed);
+        throw new InvalidOperationException("A SHA-256 mismatch was accepted by the GitHub source.");
+    }
+    catch (InvalidDataException) { passed++; }
+}
+finally
+{
+    if (Directory.Exists(sourceRoot)) Directory.Delete(sourceRoot, recursive: true);
+}
 var unlink = new MacSemaphore().Unlink();
 if (!OperatingSystem.IsMacOS())
 {
@@ -459,6 +519,40 @@ if (!OperatingSystem.IsMacOS())
 }
 
 Console.WriteLine($"macOS platform safety tests passed: {passed}; skipped: {skipped}.");
+
+static string BuildReleaseJson(params (string Kind, bool Prerelease, string Tag, string Package, string Checksum)[] releases) =>
+    JsonSerializer.Serialize(releases.Select(release => new
+    {
+        draft = release.Kind == "draft",
+        prerelease = release.Prerelease,
+        tag_name = release.Tag,
+        assets = new[]
+        {
+            new { name = release.Package, browser_download_url = $"https://downloads.example.test/{release.Package}" },
+            new { name = release.Checksum, browser_download_url = $"https://downloads.example.test/{release.Checksum}" }
+        }
+    }));
+
+sealed class UpdateHttpHandler(string releaseJson, byte[] packageBytes, string checksum, string packageName) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request.RequestUri?.AbsolutePath.Contains("/releases", StringComparison.Ordinal) == true)
+            return Task.FromResult(Response(releaseJson, "application/json"));
+        if (request.RequestUri?.AbsolutePath.EndsWith(".sha256", StringComparison.Ordinal) == true)
+            return Task.FromResult(Response($"{checksum}  {packageName}\n", "text/plain"));
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(packageBytes)
+        });
+    }
+
+    private static HttpResponseMessage Response(string content, string mediaType) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(content, System.Text.Encoding.UTF8, mediaType)
+    };
+}
 
 sealed class RecordingCommandRunner(
     MacProcessCommandResult signatureResult,

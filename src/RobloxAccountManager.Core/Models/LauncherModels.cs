@@ -41,7 +41,15 @@ public sealed record GamePreset(string Name, string Url, bool IsBuiltIn = false)
             return false;
         }
 
-        normalizedUrl = uri.AbsoluteUri;
+        if (string.Equals(uri.Host, "roblox.com", StringComparison.OrdinalIgnoreCase))
+        {
+            var canonical = new UriBuilder(uri) { Host = "www.roblox.com" };
+            normalizedUrl = canonical.Uri.AbsoluteUri;
+        }
+        else
+        {
+            normalizedUrl = uri.AbsoluteUri;
+        }
         return true;
     }
 }
@@ -49,6 +57,7 @@ public sealed record GamePreset(string Name, string Url, bool IsBuiltIn = false)
 public sealed class LauncherSettings
 {
     public bool UpdateChecksEnabled { get; set; } = true;
+    public UpdateChannel UpdateChannel { get; set; } = UpdateChannel.Signed;
     public int LaunchTimeoutSeconds { get; set; } = 45;
     public int LaunchDelaySeconds { get; set; }
     public bool ContinueOnFailure { get; set; } = true;
@@ -63,6 +72,12 @@ public sealed class LauncherSettings
     public bool UnsignedUpdatesConsentGranted { get; set; }
     public GameSettings GameSettings { get; set; } = new();
     public Dictionary<string, GameSettings> GameOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+public enum UpdateChannel
+{
+    Signed,
+    Unsigned
 }
 
 public sealed class GameSettings

@@ -7,7 +7,6 @@ using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform;
-using System.Text.Json;
 using System.Collections.ObjectModel;
 using RobloxAccountManager.Core.Capabilities;
 using RobloxAccountManager.Core.Contracts;
@@ -56,16 +55,17 @@ public sealed class MainWindow : Window
     private Button? _queueLaunch;
     private readonly StackPanel _queueSummary = new() { Orientation = Orientation.Horizontal, Spacing = 7 };
     private readonly ListBox _accountsRail = new();
-    private readonly ComboBox _moreNavigation = new();
     private readonly Dictionary<string, Border> _accountCards = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CheckBox> _accountChecks = new(StringComparer.Ordinal);
     private readonly AvaloniaAccountBrowserSessionService _browserSessions;
     private readonly SerializedLaunchCoordinator? _launches;
     private readonly CoreClientWindowManager? _clients;
+    private readonly IPlatformUpdateSource? _updateSource;
     private CancellationTokenSource? _launchCancellation;
     private string? _lastGameUrl;
     private GamePreset? _lastLaunchPreset;
     private bool _suppressAccountSelection;
+    private bool _updateCheckStarted;
     private long _browserActivationVersion;
     private readonly HashSet<string> _queueSelectedAccounts = new(StringComparer.Ordinal);
 
@@ -73,12 +73,14 @@ public sealed class MainWindow : Window
         DesktopShellViewModel viewModel,
         AvaloniaAccountBrowserSessionService browserSessions,
         SerializedLaunchCoordinator? launches = null,
-        CoreClientWindowManager? clients = null)
+        CoreClientWindowManager? clients = null,
+        IPlatformUpdateSource? updateSource = null)
     {
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _browserSessions = browserSessions ?? throw new ArgumentNullException(nameof(browserSessions));
         _launches = launches;
         _clients = clients;
+        _updateSource = updateSource;
         Title = "Roblox Account Manager";
         Width = 1380;
         Height = 860;
@@ -177,23 +179,9 @@ public sealed class MainWindow : Window
         header.Children.Add(copy);
 
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
-        AddHeaderAction(actions, "Browse", "browser");
         AddHeaderAction(actions, "Plugins", "plugins");
         AddHeaderAction(actions, "Settings", "settings");
         AddHeaderAction(actions, "Diagnostics", "diagnostics");
-        _moreNavigation.ItemsSource = _viewModel.Pages.Where(page => page.Key is not ("accounts" or "browser" or "plugins" or "settings" or "diagnostics")).ToArray();
-        _moreNavigation.ItemTemplate = new FuncDataTemplate<NavigationItemViewModel>((page, _) => new TextBlock { Text = page?.Title ?? string.Empty });
-        _moreNavigation.Width = 128;
-        _moreNavigation.SelectedIndex = -1;
-        _moreNavigation.SelectionChanged += (_, _) =>
-        {
-            if (_moreNavigation.SelectedItem is NavigationItemViewModel page)
-            {
-                SelectPage(page.Key);
-                _moreNavigation.SelectedIndex = -1;
-            }
-        };
-        actions.Children.Add(_moreNavigation);
         var localOnly = new Border
         {
             Background = new SolidColorBrush(Avalonia.Media.Color.Parse("#10261F")),
@@ -229,7 +217,8 @@ public sealed class MainWindow : Window
     private Border BuildSidebar()
     {
         _accountsRail.ItemsSource = _viewModel.Accounts;
-        _accountsRail.Height = 254;
+        _accountsRail.MinHeight = 120;
+        _accountsRail.VerticalAlignment = VerticalAlignment.Stretch;
         _accountsRail.Background = Brushes.Transparent;
         _accountsRail.BorderThickness = new Thickness(0);
         _accountsRail.SelectionMode = SelectionMode.Multiple;
@@ -256,7 +245,10 @@ public sealed class MainWindow : Window
             SelectPage("accounts");
         };
 
-        var shell = new StackPanel { Spacing = 0 };
+        var shell = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto")
+        };
         var brand = new Grid { ColumnDefinitions = new ColumnDefinitions("44,*"), Margin = new Thickness(2, 1, 2, 25) };
         brand.Children.Add(new Border
         {
@@ -271,6 +263,7 @@ public sealed class MainWindow : Window
         brandText.Children.Add(new TextBlock { Text = "Roblox launcher", FontSize = 12, Foreground = MutedTextBrush });
         Grid.SetColumn(brandText, 1);
         brand.Children.Add(brandText);
+        Grid.SetRow(brand, 0);
         shell.Children.Add(brand);
 
         var profilesHeader = new Grid { Margin = new Thickness(2, 0, 2, 9) };
@@ -283,7 +276,9 @@ public sealed class MainWindow : Window
             Padding = new Thickness(7, 2),
             Child = new TextBlock { Text = "MULTI-SELECT", FontSize = 9, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Avalonia.Media.Color.Parse("#B5A7FF")) }
         });
+        Grid.SetRow(profilesHeader, 1);
         shell.Children.Add(profilesHeader);
+        Grid.SetRow(_accountsRail, 2);
         shell.Children.Add(_accountsRail);
 
         var accountActions = new StackPanel { Spacing = 8, Margin = new Thickness(0, 14, 0, 0) };
@@ -416,6 +411,7 @@ public sealed class MainWindow : Window
         transferActions.Children.Add(import);
         accountActions.Children.Add(transferActions);
         accountActions.Children.Add(new TextBlock { Text = "Sessions stay isolated and local to this PC.", TextWrapping = TextWrapping.Wrap, FontSize = 11, Foreground = MutedTextBrush, Margin = new Thickness(3, 5, 3, 0) });
+        Grid.SetRow(accountActions, 3);
         shell.Children.Add(accountActions);
 
         return new Border
@@ -425,12 +421,7 @@ public sealed class MainWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(16),
             Padding = new Thickness(17),
-            Child = new ScrollViewer
-            {
-                Content = shell,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
-            }
+            Child = shell
         };
     }
 
@@ -688,6 +679,7 @@ public sealed class MainWindow : Window
                 await OpenAccountAsync(_viewModel.SelectedAccount);
                 RenderPage();
             }
+            _ = CheckForUpdateAtStartupAsync();
         }
         catch (Exception exception)
         {
@@ -711,7 +703,6 @@ public sealed class MainWindow : Window
             "activity" => BuildActivityPage(),
             "settings" => BuildSettingsPage(),
             "plugins" => BuildPluginsPage(),
-            "updates" => BuildUpdatesPage(),
             "diagnostics" => BuildDiagnosticsPage(),
             _ => new TextBlock { Text = "Select a page." }
         };
@@ -776,18 +767,10 @@ public sealed class MainWindow : Window
             presetActions.Children.Add(action);
         }
 
-        var consent = new CheckBox
-        {
-            Content = "I consent to macOS multi-instance semaphore changes",
-            IsChecked = _viewModel.Settings.MultiInstanceConsentGranted,
-            Foreground = TextBrush,
-            Margin = new Thickness(0, 7, 0, 0)
-        };
         var presetControls = new StackPanel { Spacing = 5 };
         presetControls.Children.Add(new TextBlock { Text = "GAME PRESET", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush });
         presetControls.Children.Add(presetSearch);
         presetControls.Children.Add(presetActions);
-        presetControls.Children.Add(consent);
 
         var customUrlText = new TextBlock
         {
@@ -823,7 +806,7 @@ public sealed class MainWindow : Window
             _viewModel.Settings.LaunchTimeoutSeconds = GetSelectedTimeoutSeconds();
             _viewModel.Settings.ContinueOnFailure = _continueOnFailure.IsChecked == true;
             await SaveAsync();
-            await RunLaunchQueueAsync(consent.IsChecked == true, presetPicker.SelectedItem as GamePreset, accounts);
+            await RunLaunchQueueAsync(presetPicker.SelectedItem as GamePreset, accounts);
         };
 
         var presetBar = new Border
@@ -1025,15 +1008,14 @@ public sealed class MainWindow : Window
         var selected = _viewModel.Accounts.Where(x => _queueSelectedAccounts.Contains(x.Id)).ToList();
         var picker = new ComboBox { ItemsSource = _viewModel.Presets, SelectedItem = _viewModel.SelectedPreset ?? _viewModel.Presets.FirstOrDefault() };
         picker.SelectionChanged += (_, _) => _viewModel.SelectedPreset = picker.SelectedItem as GamePreset;
-        var consent = new CheckBox { Content = "I consent to macOS multi-instance semaphore changes", IsChecked = _viewModel.Settings.MultiInstanceConsentGranted };
         var launch = new Button { Content = _launches is null ? "Launch unavailable until Roblox trust is configured" : "Launch selected accounts", IsEnabled = _launches is not null && _launchCancellation is null };
         _queueLaunch = launch;
-        launch.Click += async (_, _) => await RunLaunchQueueAsync(consent.IsChecked == true, picker.SelectedItem as GamePreset, selected);
+        launch.Click += async (_, _) => await RunLaunchQueueAsync(picker.SelectedItem as GamePreset, selected);
         var cancel = new Button { Content = "Cancel", IsEnabled = _launchCancellation is not null };
         cancel.Click += (_, _) => _launchCancellation?.Cancel();
         var queueList = new ListBox { ItemsSource = _viewModel.Queue, Height = 230 };
         var info = new TextBlock { Text = selected.Count == 0 ? "Favorite an account or open one from Accounts to include it in the queue." : $"{selected.Count} account(s) selected." , TextWrapping = TextWrapping.Wrap };
-        return Card(new StackPanel { Spacing = 10, Children = { info, new TextBlock { Text = "Game preset", FontWeight = FontWeight.SemiBold }, picker, consent, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { launch, cancel } }, queueList } });
+        return Card(new StackPanel { Spacing = 10, Children = { info, new TextBlock { Text = "Game preset", FontWeight = FontWeight.SemiBold }, picker, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { launch, cancel } }, queueList } });
     }
 
     private Control BuildClientsPage()
@@ -1081,38 +1063,213 @@ public sealed class MainWindow : Window
 
     private Control BuildSettingsPage()
     {
+        var tabs = new TabControl
+        {
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Stretch
+        };
+        tabs.Items.Add(new TabItem { Header = "General", Content = ScrollSettings(BuildGeneralSettingsTab()) });
+        tabs.Items.Add(new TabItem { Header = "Global Defaults", Content = ScrollSettings(BuildGlobalDefaultsTab()) });
+        tabs.Items.Add(new TabItem { Header = "Games", Content = ScrollSettings(BuildGamesSettingsTab()) });
+        tabs.Items.Add(new TabItem { Header = "Profiles", Content = ScrollSettings(BuildProfilesSettingsTab()) });
+        return Card(tabs);
+    }
+
+    private static ScrollViewer ScrollSettings(Control content) => new()
+    {
+        Content = content,
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        HorizontalContentAlignment = HorizontalAlignment.Stretch
+    };
+
+    private Control BuildGeneralSettingsTab()
+    {
         var timeout = new NumericUpDown { Minimum = 15, Maximum = 180, Value = _viewModel.Settings.LaunchTimeoutSeconds, Increment = 5 };
         var delay = new NumericUpDown { Minimum = 0, Maximum = 60, Value = _viewModel.Settings.LaunchDelaySeconds, Increment = 1 };
+        var preferred = new ComboBox { ItemsSource = new[] { "Auto", "Bloxstrap", "Standard" }, SelectedItem = _viewModel.Settings.PreferredLauncher };
         var continueOnFailure = new CheckBox { Content = "Continue after a failed account", IsChecked = _viewModel.Settings.ContinueOnFailure };
         var remember = new CheckBox { Content = "Remember account and preset selections", IsChecked = _viewModel.Settings.RememberSelections };
-        var updates = new CheckBox { Content = "Check for updates", IsChecked = _viewModel.Settings.UpdateChecksEnabled };
-        var settingsConsent = new CheckBox { Content = "I consent to managed Roblox settings changes", IsChecked = _viewModel.Settings.RobloxSettingsConsentGranted };
-        var save = new Button { Content = "Save settings" };
+        var clearSessions = new CheckBox { Content = "Clear all Roblox browser sessions on next restart", IsChecked = _viewModel.Settings.ClearBrowserDataOnNextStart };
+        var updates = new CheckBox { Content = "Enable automatic updates", IsChecked = _viewModel.Settings.UpdateChecksEnabled };
+        var channel = new ComboBox { ItemsSource = Enum.GetNames<UpdateChannel>(), SelectedItem = _viewModel.Settings.UpdateChannel.ToString(), MinWidth = 150 };
+        var validation = new TextBlock { Foreground = DangerTextBrush, TextWrapping = TextWrapping.Wrap };
+        var save = new Button { Content = "Save general settings" };
+        StyleButton(save);
         save.Click += async (_, _) =>
         {
+            if (!Enum.TryParse<UpdateChannel>(channel.SelectedItem?.ToString(), true, out var selectedChannel))
+            {
+                validation.Text = "Choose a valid update channel.";
+                return;
+            }
+
             _viewModel.Settings.LaunchTimeoutSeconds = (int)(timeout.Value ?? 45);
             _viewModel.Settings.LaunchDelaySeconds = (int)(delay.Value ?? 0);
+            _viewModel.Settings.PreferredLauncher = preferred.SelectedItem?.ToString() ?? "Auto";
             _viewModel.Settings.ContinueOnFailure = continueOnFailure.IsChecked == true;
             _viewModel.Settings.RememberSelections = remember.IsChecked == true;
+            _viewModel.Settings.ClearBrowserDataOnNextStart = clearSessions.IsChecked == true;
             _viewModel.Settings.UpdateChecksEnabled = updates.IsChecked == true;
-            _viewModel.Settings.RobloxSettingsConsentGranted = settingsConsent.IsChecked == true;
-            if (_viewModel.RobloxSettings is not null && _viewModel.Settings.RobloxSettingsConsentGranted)
-            {
-                var result = await _viewModel.RobloxSettings.ApplyAsync(_viewModel.Settings.GameSettings);
-                _viewModel.AppendActivity($"Roblox settings: {result.Applied.Count} applied, {result.Skipped.Count} skipped.");
-            }
+            _viewModel.Settings.UpdateChannel = selectedChannel;
+            validation.Text = string.Empty;
             await SaveAsync();
         };
-        var settings = new StackPanel { Spacing = 10 };
-        settings.Children.Add(new TextBlock { Text = "Queue and storage", FontSize = 18, FontWeight = FontWeight.SemiBold });
-        settings.Children.Add(new TextBlock { Text = "Launch timeout (seconds)" }); settings.Children.Add(timeout);
-        settings.Children.Add(new TextBlock { Text = "Delay between accounts (seconds)" }); settings.Children.Add(delay);
-        settings.Children.Add(continueOnFailure); settings.Children.Add(remember); settings.Children.Add(updates); settings.Children.Add(settingsConsent);
-        settings.Children.Add(new Separator());
-        settings.Children.Add(new TextBlock { Text = "Roblox settings", FontSize = 18, FontWeight = FontWeight.SemiBold });
-        settings.Children.Add(new TextBlock { Text = _viewModel.RobloxSettings is null ? "No macOS Roblox settings adapter is configured." : string.Join(Environment.NewLine, _viewModel.RobloxSettings.Capabilities.Select(x => $"{x.Name}: {x.Status} — {x.Description}")), TextWrapping = TextWrapping.Wrap });
-        settings.Children.Add(save);
-        return Card(settings);
+        var checkNow = new Button { Content = "Check now" };
+        StyleButton(checkNow, secondary: true);
+        checkNow.Click += async (_, _) => await CheckForUpdateAsync();
+
+        var updateRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
+        updateRow.Children.Add(updates);
+        updateRow.Children.Add(new TextBlock { Text = "Channel", VerticalAlignment = VerticalAlignment.Center, Foreground = MutedTextBrush });
+        updateRow.Children.Add(channel);
+        updateRow.Children.Add(checkNow);
+        var panel = new StackPanel { Spacing = 10 };
+        panel.Children.Add(new TextBlock { Text = "General", FontSize = 20, FontWeight = FontWeight.SemiBold });
+        panel.Children.Add(new TextBlock { Text = "Queue, launcher, storage, and update behavior.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new TextBlock { Text = "Launch timeout (seconds)" }); panel.Children.Add(timeout);
+        panel.Children.Add(new TextBlock { Text = "Delay between accounts (seconds)" }); panel.Children.Add(delay);
+        panel.Children.Add(new TextBlock { Text = "Preferred launcher" }); panel.Children.Add(preferred);
+        panel.Children.Add(continueOnFailure); panel.Children.Add(remember); panel.Children.Add(clearSessions); panel.Children.Add(updateRow);
+        panel.Children.Add(new TextBlock { Text = "Signed packages install automatically after validation. Unsigned packages always ask once before Apple Installer opens.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(validation); panel.Children.Add(save);
+        return panel;
+    }
+
+    private Control BuildGlobalDefaultsTab()
+    {
+        var panel = new StackPanel { Spacing = 10 };
+        panel.Children.Add(new TextBlock { Text = "Global Defaults", FontSize = 20, FontWeight = FontWeight.SemiBold });
+        panel.Children.Add(new TextBlock { Text = "These values apply first. Game and profile overrides are merged afterward.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(BuildGameSettingsEditor(_viewModel.Settings.GameSettings, false, settings => _viewModel.Settings.GameSettings = settings));
+        return panel;
+    }
+
+    private Control BuildGamesSettingsTab()
+    {
+        var search = new TextBox { PlaceholderText = "Search games" };
+        var matches = new ObservableCollection<GamePreset>(_viewModel.Presets);
+        var list = new ListBox { ItemsSource = matches, MinWidth = 220, MaxHeight = 420 };
+        var editor = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        void SelectGame(GamePreset? preset)
+        {
+            if (preset is null || !GamePreset.TryNormalizeRobloxGameUrl(preset.Url, out var normalized))
+            {
+                editor.Content = new TextBlock { Text = "Select a game preset with a valid Roblox URL.", Foreground = MutedTextBrush };
+                return;
+            }
+            var current = _viewModel.Settings.GameOverrides.TryGetValue(normalized, out var value) ? value.Clone() : new GameSettings();
+            editor.Content = BuildGameSettingsEditor(current, true, settings =>
+            {
+                if (settings.HasOverrides) _viewModel.Settings.GameOverrides[normalized] = settings;
+                else _viewModel.Settings.GameOverrides.Remove(normalized);
+            });
+        }
+        list.SelectionChanged += (_, _) => SelectGame(list.SelectedItem as GamePreset);
+        search.TextChanged += (_, _) =>
+        {
+            var query = search.Text?.Trim() ?? string.Empty;
+            matches.Clear();
+            foreach (var preset in _viewModel.Presets.Where(item => item.Name.Contains(query, StringComparison.OrdinalIgnoreCase))) matches.Add(preset);
+        };
+        if (matches.Count > 0) list.SelectedIndex = 0;
+        var layout = new Grid { ColumnDefinitions = new ColumnDefinitions("220,*"), ColumnSpacing = 16 };
+        var left = new StackPanel { Spacing = 8, Children = { search, list } };
+        layout.Children.Add(left); Grid.SetColumn(editor, 1); layout.Children.Add(editor);
+        return new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "Games", FontSize = 20, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Per-game overrides inherit from Global Defaults when set to Automatic.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap }, layout } };
+    }
+
+    private Control BuildProfilesSettingsTab()
+    {
+        var list = new ListBox { ItemsSource = _viewModel.Accounts, MinWidth = 220, MaxHeight = 420 };
+        var editor = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        void SelectProfile(AccountProfile? account)
+        {
+            if (account is null)
+            {
+                editor.Content = new TextBlock { Text = "Select an account profile.", Foreground = MutedTextBrush };
+                return;
+            }
+            var current = account.GameSettings?.Clone() ?? new GameSettings();
+            editor.Content = BuildGameSettingsEditor(current, true, settings => account.GameSettings = settings.HasOverrides ? settings : null);
+        }
+        list.SelectionChanged += (_, _) => SelectProfile(list.SelectedItem as AccountProfile);
+        if (_viewModel.Accounts.Count > 0) list.SelectedIndex = 0;
+        var layout = new Grid { ColumnDefinitions = new ColumnDefinitions("220,*"), ColumnSpacing = 16 };
+        layout.Children.Add(list); Grid.SetColumn(editor, 1); layout.Children.Add(editor);
+        return new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "Profiles", FontSize = 20, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Per-profile overrides are applied last and use Default to inherit.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap }, layout } };
+    }
+
+    private Control BuildGameSettingsEditor(GameSettings current, bool overrideMode, Action<GameSettings> onSave)
+    {
+        var automatic = overrideMode ? "Default" : "Automatic";
+        var msaa = new ComboBox { ItemsSource = new[] { automatic, "Off", "2x", "4x", "8x" }, SelectedItem = current.MsaaSamples switch { 0 => "Off", 2 => "2x", 4 => "4x", 8 => "8x", _ => automatic } };
+        var preserve = new ComboBox { ItemsSource = new[] { automatic, "Enabled", "Disabled" }, SelectedItem = current.PreserveRenderingQuality switch { true => "Enabled", false => "Disabled", _ => automatic } };
+        var graphics = new ComboBox { ItemsSource = new[] { automatic }.Concat(Enumerable.Range(1, 10).Select(x => x.ToString())).ToArray(), SelectedItem = current.GraphicsQuality?.ToString() ?? automatic };
+        var texture = new ComboBox { ItemsSource = new[] { automatic }.Concat(Enumerable.Range(0, 7).Select(x => x.ToString())).ToArray(), SelectedItem = current.TextureQuality?.ToString() ?? automatic };
+        var fps = new ComboBox { ItemsSource = new[] { automatic, "60", "120", "144", "165", "240", "Custom" }, SelectedItem = current.FpsLimit is 60 or 120 or 144 or 165 or 240 ? current.FpsLimit.Value.ToString() : current.FpsLimit is null ? automatic : "Custom" };
+        var fpsCustom = new TextBox { Text = current.FpsLimit is not null and not (60 or 120 or 144 or 165 or 240) ? current.FpsLimit.Value.ToString() : string.Empty, PlaceholderText = "30-1000", IsVisible = fps.SelectedItem?.ToString() == "Custom" };
+        fps.SelectionChanged += (_, _) => fpsCustom.IsVisible = string.Equals(fps.SelectedItem?.ToString(), "Custom", StringComparison.Ordinal);
+        var volume = new ComboBox { ItemsSource = new[] { automatic }.Concat(Enumerable.Range(0, 11).Select(x => x.ToString())).ToArray(), SelectedItem = current.MasterVolumeLevel?.ToString() ?? automatic };
+        var flags = new TextBox { Text = current.AdvancedFlagsJson ?? string.Empty, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, Height = 110, PlaceholderText = "Optional JSON object of advanced engine flags" };
+        var validation = new TextBlock { Foreground = DangerTextBrush, TextWrapping = TextWrapping.Wrap };
+        var save = new Button { Content = overrideMode ? "Save override" : "Save defaults" };
+        StyleButton(save);
+        save.Click += async (_, _) =>
+        {
+            if (!TryReadGameSettings(msaa, preserve, graphics, texture, fps, fpsCustom, volume, flags, automatic, out var parsed, out var error))
+            {
+                validation.Text = error;
+                return;
+            }
+            validation.Text = string.Empty;
+            onSave(parsed);
+            await SaveAsync();
+        };
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock { Text = overrideMode ? "Override editor" : "Roblox defaults", FontSize = 17, FontWeight = FontWeight.SemiBold });
+        AddLabeled(panel, "MSAA", msaa); AddLabeled(panel, "Rendering quality / client scaling", preserve);
+        AddLabeled(panel, "Graphics quality", graphics); AddLabeled(panel, "Texture quality", texture);
+        AddLabeled(panel, "FPS limit", fps); panel.Children.Add(fpsCustom);
+        AddLabeled(panel, "Master volume", volume); AddLabeled(panel, "Advanced engine flags (JSON)", flags);
+        panel.Children.Add(new TextBlock { Text = overrideMode ? "Automatic/Default removes this layer's value and restores inheritance." : "Automatic leaves Roblox's default behavior unchanged.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(validation); panel.Children.Add(save);
+        return panel;
+    }
+
+    private static void AddLabeled(Panel panel, string label, Control control)
+    {
+        panel.Children.Add(new TextBlock { Text = label, FontWeight = FontWeight.SemiBold });
+        panel.Children.Add(control);
+    }
+
+    private static bool TryReadGameSettings(
+        ComboBox msaa, ComboBox preserve, ComboBox graphics, ComboBox texture, ComboBox fps, TextBox fpsCustom,
+        ComboBox volume, TextBox flags, string automatic, out GameSettings settings, out string error)
+    {
+        settings = new GameSettings(); error = string.Empty;
+        var msaaValue = msaa.SelectedItem?.ToString();
+        settings.MsaaSamples = msaaValue switch { "Off" => 0, "2x" => 2, "4x" => 4, "8x" => 8, _ => null };
+        settings.PreserveRenderingQuality = preserve.SelectedItem?.ToString() switch { "Enabled" => true, "Disabled" => false, _ => null };
+        settings.GraphicsQuality = ParseOptionalInt(graphics.SelectedItem?.ToString(), automatic, 1, 10, "graphics quality", ref error);
+        settings.TextureQuality = ParseOptionalInt(texture.SelectedItem?.ToString(), automatic, 0, 6, "texture quality", ref error);
+        var fpsChoice = fps.SelectedItem?.ToString();
+        settings.FpsLimit = fpsChoice == "Custom" ? ParseOptionalInt(fpsCustom.Text, automatic, 30, 1000, "FPS", ref error) : ParseOptionalInt(fpsChoice, automatic, 30, 1000, "FPS", ref error);
+        settings.MasterVolumeLevel = ParseOptionalInt(volume.SelectedItem?.ToString(), automatic, 0, 10, "master volume", ref error);
+        settings.AdvancedFlagsJson = string.IsNullOrWhiteSpace(flags.Text) ? null : flags.Text.Trim();
+        if (error.Length == 0 && !GameSettings.TryValidate(settings, out error)) return false;
+        return error.Length == 0;
+    }
+
+    private static int? ParseOptionalInt(string? value, string automatic, int minimum, int maximum, string label, ref string error)
+    {
+        if (string.IsNullOrWhiteSpace(value) || string.Equals(value, automatic, StringComparison.OrdinalIgnoreCase)) return null;
+        if (!int.TryParse(value, out var parsed) || parsed < minimum || parsed > maximum)
+        {
+            error = $"{label} must be between {minimum} and {maximum}.";
+            return null;
+        }
+        return parsed;
     }
 
     private Control BuildPluginsPage()
@@ -1127,7 +1284,6 @@ public sealed class MainWindow : Window
         {
             if (_viewModel.PluginHost is null) return;
             var source = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "roblox-plugin");
-            if (!await ConfirmAsync("Install this local plugin and review its declared capabilities before starting it?")) return;
             var result = await _viewModel.PluginHost.InstallFromDirectoryAsync(source, userConfirmed: true);
             _viewModel.AppendActivity(result.Succeeded ? $"Installed plugin {result.PluginId}." : $"Plugin install rejected: {result.DiagnosticCode}.");
             RenderPage();
@@ -1152,8 +1308,6 @@ public sealed class MainWindow : Window
                 var start = new Button { Content = running.Contains(id) ? "Running" : "Start", IsEnabled = !running.Contains(id) };
                 start.Click += async (_, _) =>
                 {
-                    var requested = await _viewModel.PluginHost.GetRequestedCapabilitiesAsync(id);
-                    if (!await ConfirmAsync($"Grant plugin {id} these declared capabilities: {string.Join(", ", requested)}?")) return;
                     var result = await _viewModel.PluginHost.StartAsync(id, userConfirmed: true);
                     _viewModel.AppendActivity(result.Succeeded ? $"Started plugin {id}." : $"Plugin start rejected: {result.DiagnosticCode}.");
                     RenderPage();
@@ -1181,54 +1335,67 @@ public sealed class MainWindow : Window
         return Card(panel);
     }
 
-    private Control BuildUpdatesPage()
+    private async Task CheckForUpdateAtStartupAsync()
     {
-        var panel = new StackPanel { Spacing = 10 };
-        panel.Children.Add(new TextBlock { Text = "macOS updates", FontSize = 18, FontWeight = FontWeight.SemiBold });
-        panel.Children.Add(new TextBlock
-        {
-            Text = "Place an update manifest at ~/Desktop/roblox-account-manager-update.json. The manifest must point to a local PKG and include its SHA-256, architecture, package identity, and version metadata. The package is revalidated before Apple Installer opens.",
-            TextWrapping = TextWrapping.Wrap
-        });
-        panel.Children.Add(new TextBlock
-        {
-            Text = "Unsigned development packages are intentionally supported, but always require a fresh confirmation and macOS Privacy & Security approval. Unsigned consent is never imported from a profile export.",
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = Brushes.DarkOrange
-        });
-        var install = new Button { Content = _viewModel.UpdateInstaller is null ? "Updates unavailable" : "Validate and install Desktop manifest", IsEnabled = _viewModel.UpdateInstaller is not null };
-        install.Click += async (_, _) =>
-        {
-            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "roblox-account-manager-update.json");
-            try
-            {
-                if (_viewModel.UpdateInstaller is null) throw new InvalidOperationException("update-installer-unavailable");
-                var package = JsonSerializer.Deserialize<UpdatePackage>(await File.ReadAllTextAsync(path))
-                    ?? throw new InvalidDataException("The update manifest is empty.");
-                var warning = package.IsUnsigned
-                    ? "This is an explicitly unsigned development package. macOS will require Open Anyway approval. Continue only if you trust the source and checksum."
-                    : "This package will be checksum- and identity-validated before Apple Installer opens. Continue?";
-                if (!await ConfirmAsync(warning)) return;
-                if (package.IsUnsigned) _viewModel.Settings.UnsignedUpdatesConsentGranted = true;
-                var result = await _viewModel.UpdateInstaller.InstallAsync(package, userConfirmed: true);
-                _viewModel.AppendActivity(result.Accepted ? "Update package verified; Apple Installer opened." : $"Update rejected: {result.DiagnosticCode}.");
-                await SaveAsync();
-            }
-            catch (Exception exception)
-            {
-                _viewModel.AppendActivity($"Update manifest rejected: {exception.Message}");
-            }
-        };
-        panel.Children.Add(install);
-        return Card(panel);
+        if (_updateCheckStarted || !_viewModel.Settings.UpdateChecksEnabled || _updateSource is null || _viewModel.UpdateInstaller is null) return;
+        _updateCheckStarted = true;
+        await CheckForUpdateAsync();
     }
 
-    private async Task RunLaunchQueueAsync(bool consent, GamePreset? preset, IReadOnlyList<AccountProfile> accounts)
+    private async Task CheckForUpdateAsync()
     {
-        if (!consent) { _viewModel.AppendActivity("Launch blocked: explicit macOS multi-instance consent is required."); return; }
+        if (_updateSource is null || _viewModel.UpdateInstaller is null)
+        {
+            _viewModel.AppendActivity("Updates are unavailable on this platform.");
+            return;
+        }
+
+        try
+        {
+            var channel = _viewModel.Settings.UpdateChannel;
+            var package = await _updateSource.DownloadLatestAsync(channel);
+            if (package is null)
+            {
+                _viewModel.AppendActivity($"No newer {channel} macOS update is available.");
+                return;
+            }
+
+            if (package.IsUnsigned)
+            {
+                if (_viewModel.UpdateInstaller is MacPkgUpdateInstaller macInstaller)
+                {
+                    var validationError = await macInstaller.ValidateAsync(package);
+                    if (validationError is not null)
+                    {
+                        _viewModel.AppendActivity($"Unsigned update rejected before prompt: {validationError}.");
+                        return;
+                    }
+                }
+
+                var approved = await ConfirmAsync("An unsigned development update was downloaded and verified. Install it now? Apple may require Open Anyway approval in Privacy & Security.");
+                if (!approved)
+                {
+                    _viewModel.AppendActivity("Unsigned update deferred.");
+                    return;
+                }
+            }
+
+            var result = await _viewModel.UpdateInstaller.InstallAsync(package, userConfirmed: true);
+            _viewModel.AppendActivity(result.Accepted
+                ? $"{channel} update verified; Apple Installer opened."
+                : $"{channel} update rejected: {result.DiagnosticCode}.");
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception)
+        {
+            _viewModel.AppendActivity($"Update check failed safely: {LaunchDiagnostics.SanitiseCode(exception.Message)}.");
+        }
+    }
+
+    private async Task RunLaunchQueueAsync(GamePreset? preset, IReadOnlyList<AccountProfile> accounts)
+    {
         if (_launches is null || preset is null || !GamePreset.TryNormalizeRobloxGameUrl(preset.Url, out var gameUrl)) { _viewModel.AppendActivity("Launch blocked: configure a validated Roblox bundle and a valid game preset."); return; }
         if (accounts.Count == 0) { _viewModel.AppendActivity("Launch blocked: favorite or open at least one account."); return; }
-        _viewModel.Settings.MultiInstanceConsentGranted = true;
         _lastGameUrl = gameUrl;
         _lastLaunchPreset = preset;
         _viewModel.Queue.Clear();
@@ -1253,7 +1420,7 @@ public sealed class MainWindow : Window
                     item.Account.GameSettings);
                 var request = new CoreRobloxLaunchRequest(item.Account.Id, async cancellationToken =>
                 {
-                    if (_viewModel.RobloxSettings is not null && _viewModel.Settings.RobloxSettingsConsentGranted && scopedSettings.HasOverrides)
+                    if (_viewModel.RobloxSettings is not null && scopedSettings.HasOverrides)
                     {
                         var settingsResult = await _viewModel.RobloxSettings.ApplyAsync(scopedSettings, cancellationToken);
                         _viewModel.AppendActivity($"{item.Label}: Roblox settings applied={settingsResult.Applied.Count}, skipped={settingsResult.Skipped.Count}.");
@@ -1313,7 +1480,7 @@ public sealed class MainWindow : Window
         if (_launchCancellation is not null || _lastLaunchPreset is null) return;
         var failed = _viewModel.Queue.Where(item => item.State == LaunchQueueState.Failed).Select(item => item.Account).ToArray();
         if (failed.Length == 0) return;
-        await RunLaunchQueueAsync(_viewModel.Settings.MultiInstanceConsentGranted, _lastLaunchPreset, failed);
+        await RunLaunchQueueAsync(_lastLaunchPreset, failed);
     }
 
     private int GetSelectedTimeoutSeconds()

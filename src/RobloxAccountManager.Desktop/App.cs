@@ -295,7 +295,7 @@ public sealed class App : Application
             var composition = DesktopComposition.Create(
                 platform,
                 TrustedRobloxIdentityConfiguration.LoadInstallerIdentity());
-            var shell = new DesktopShellViewModel(composition.Capabilities, composition.Accounts, composition.Presets, composition.Settings, composition.Updates, composition.RobloxSettings, composition.Plugins);
+            var shell = new DesktopShellViewModel(composition.Capabilities, composition.Accounts, composition.Presets, composition.Settings, composition.Updates, composition.UpdateSource, composition.RobloxSettings, composition.Plugins);
             if (composition.Plugins is MacPluginHostFacade macPlugins)
             {
                 macPlugins.SetAccountSnapshotProvider(() => shell.Accounts.Select(account => new PluginAccountSnapshot(account.Id, account.Label, RobloxPlatform.MacOS)).ToArray());
@@ -304,7 +304,8 @@ public sealed class App : Application
                 shell,
                 composition.BrowserSessions,
                 composition.Launches,
-                composition.Clients);
+                composition.Clients,
+                composition.UpdateSource);
         }
 
         base.OnFrameworkInitializationCompleted();

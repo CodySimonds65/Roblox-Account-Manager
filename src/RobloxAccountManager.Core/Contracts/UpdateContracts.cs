@@ -1,3 +1,5 @@
+using RobloxAccountManager.Core.Models;
+
 namespace RobloxAccountManager.Core.Contracts;
 
 /// <summary>Verified, architecture-specific update metadata shared by all desktop frontends.</summary>
@@ -27,5 +29,15 @@ public interface IPlatformUpdateInstaller
     ValueTask<UpdateInstallResult> InstallAsync(
         UpdatePackage package,
         bool userConfirmed,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>Downloads and validates the latest package for one explicit update channel.</summary>
+public interface IPlatformUpdateSource
+{
+    RobloxPlatform Platform { get; }
+
+    ValueTask<UpdatePackage?> DownloadLatestAsync(
+        UpdateChannel channel,
         CancellationToken cancellationToken = default);
 }

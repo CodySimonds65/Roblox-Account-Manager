@@ -42,7 +42,34 @@ public sealed class GamePresetStore(LauncherDataPaths? paths = null)
     public Task<List<GamePreset>> LoadAsync(CancellationToken cancellationToken = default) =>
         JsonFileStore.LoadAsync(Paths.Presets, new List<GamePreset>(), Options, cancellationToken);
     public Task SaveAsync(IEnumerable<GamePreset> presets, CancellationToken cancellationToken = default) =>
-        JsonFileStore.SaveAsync(Paths.Presets, presets.ToList(), Options, cancellationToken);
+        JsonFileStore.SaveAsync(Paths.Presets, presets.Where(preset => !preset.IsBuiltIn).ToList(), Options, cancellationToken);
+
+    public static IReadOnlyList<GamePreset> EnsureBuiltIns(IEnumerable<GamePreset> presets)
+    {
+        ArgumentNullException.ThrowIfNull(presets);
+        var builtIns = new[]
+        {
+            new GamePreset("Dungeon Quest Reborn", "https://www.roblox.com/games/77649408247578/Dungeon-Quest-Reborn", true),
+            new GamePreset("Custom URL", "https://www.roblox.com/games/", true)
+        };
+        var result = new List<GamePreset>();
+        foreach (var preset in presets.Where(item => !item.IsBuiltIn))
+        {
+            if (builtIns.Any(builtIn => SameUrl(preset.Url, builtIn.Url)) ||
+                result.Any(existing => string.Equals(existing.Name, preset.Name, StringComparison.OrdinalIgnoreCase) || SameUrl(existing.Url, preset.Url))) continue;
+            result.Add(preset);
+        }
+        result.InsertRange(0, builtIns);
+        return result;
+    }
+
+    private static bool SameUrl(string left, string right)
+    {
+        if (string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase)) return true;
+        return GamePreset.TryNormalizeRobloxGameUrl(left, out var normalizedLeft)
+            && GamePreset.TryNormalizeRobloxGameUrl(right, out var normalizedRight)
+            && string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 public sealed class SettingsStore(LauncherDataPaths? paths = null)
@@ -160,6 +187,7 @@ public static class ProfileTransferService
     private static LauncherSettings CloneSettingsForTransfer(LauncherSettings settings) => new()
     {
         UpdateChecksEnabled = settings.UpdateChecksEnabled,
+        UpdateChannel = settings.UpdateChannel,
         LaunchTimeoutSeconds = settings.LaunchTimeoutSeconds,
         LaunchDelaySeconds = settings.LaunchDelaySeconds,
         ContinueOnFailure = settings.ContinueOnFailure,

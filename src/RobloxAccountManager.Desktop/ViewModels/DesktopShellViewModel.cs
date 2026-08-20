@@ -29,6 +29,7 @@ public sealed class DesktopShellViewModel : INotifyPropertyChanged
         GamePresetStore presetStore,
         SettingsStore settingsStore,
         IPlatformUpdateInstaller? updateInstaller = null,
+        IPlatformUpdateSource? updateSource = null,
         IRobloxSettingsAdapter? robloxSettings = null,
         IPluginHostFacade? pluginHost = null)
     {
@@ -37,6 +38,7 @@ public sealed class DesktopShellViewModel : INotifyPropertyChanged
         PresetsStore = presetStore ?? throw new ArgumentNullException(nameof(presetStore));
         SettingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
         UpdateInstaller = updateInstaller;
+        UpdateSource = updateSource;
         RobloxSettings = robloxSettings;
         PluginHost = pluginHost;
         Pages = new ObservableCollection<NavigationItemViewModel>(
@@ -48,8 +50,7 @@ public sealed class DesktopShellViewModel : INotifyPropertyChanged
             new("clients", "Clients", "Focus, tile, and close verified external Roblox clients."),
             new("activity", "Activity", "Review sanitized launch and client events."),
             new("settings", "Settings", "Configure queue, Roblox, storage, and update behavior."),
-            new("plugins", "Plugins", "Review plugin consent and platform capabilities."),
-            new("updates", "Updates", "Validate a macOS package and hand it to Apple Installer."),
+            new("plugins", "Plugins", "Manage local plugins and platform capabilities."),
             new("diagnostics", "Diagnostics", "Inspect platform trust and permission status.")
         ]);
         _selectedPage = Pages[0];
@@ -68,6 +69,7 @@ public sealed class DesktopShellViewModel : INotifyPropertyChanged
     public GamePresetStore PresetsStore { get; }
     public SettingsStore SettingsStore { get; }
     public IPlatformUpdateInstaller? UpdateInstaller { get; }
+    public IPlatformUpdateSource? UpdateSource { get; }
     public IRobloxSettingsAdapter? RobloxSettings { get; }
     public IPluginHostFacade? PluginHost { get; }
     public LauncherSettings Settings { get; private set; } = new();
@@ -108,8 +110,8 @@ public sealed class DesktopShellViewModel : INotifyPropertyChanged
         Accounts.Clear();
         foreach (var account in await AccountsStore.LoadAsync(cancellationToken).ConfigureAwait(false)) Accounts.Add(account);
         Presets.Clear();
-        foreach (var preset in await PresetsStore.LoadAsync(cancellationToken).ConfigureAwait(false)) Presets.Add(preset);
-        if (Presets.Count == 0) Presets.Add(new GamePreset("Custom URL", "https://www.roblox.com/games/"));
+        foreach (var preset in GamePresetStore.EnsureBuiltIns(await PresetsStore.LoadAsync(cancellationToken).ConfigureAwait(false))) Presets.Add(preset);
+        SelectedPreset = Presets.FirstOrDefault(preset => preset.Name.Equals("Dungeon Quest Reborn", StringComparison.OrdinalIgnoreCase));
         Settings = await SettingsStore.LoadAsync(cancellationToken).ConfigureAwait(false);
         Settings.GameSettings ??= new GameSettings();
         Settings.GameOverrides ??= new Dictionary<string, GameSettings>(StringComparer.OrdinalIgnoreCase);
@@ -130,6 +132,7 @@ public sealed class DesktopShellViewModel : INotifyPropertyChanged
         Settings.GameOverrides ??= new Dictionary<string, GameSettings>(StringComparer.OrdinalIgnoreCase);
         OnPropertyChanged(nameof(Settings));
     }
+
 
     public void AppendActivity(string message)
     {
