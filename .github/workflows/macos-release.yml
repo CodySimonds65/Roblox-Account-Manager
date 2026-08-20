@@ -163,6 +163,11 @@ jobs:
           xcrun stapler staple "$pkg"
           bash build/macos/package-pkg.sh --verify "$pkg" "$INSTALLER_IDENTITY"
           (cd dist && shasum -a 256 "$(basename "$pkg")" > "$(basename "$pkg").sha256")
+      - name: Smoke-test exact signed release PKG on the runner root
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve.outputs.release_tag }}"; version="${version#v}"
+          bash build/macos/smoke-install-root-pkg.sh "dist/RobloxAccountManager-${version}-${{ matrix.rid }}.pkg"
       - name: Stage architecture artifacts
         uses: actions/upload-artifact@v4
         with:

@@ -120,10 +120,24 @@ jobs:
           mkdir -p dist
           app="dist/Roblox Account Manager.app"
           pkg="dist/RobloxAccountManager-${version}-${{ matrix.rid }}-unsigned.pkg"
+          smoke_dir="$RUNNER_TEMP/ram-pkg-smoke"
+          smoke_pkg="$smoke_dir/RobloxAccountManager-${version}-${{ matrix.rid }}-unsigned-v1.pkg"
+          newer_smoke_pkg="$smoke_dir/RobloxAccountManager-${version}-${{ matrix.rid }}-unsigned-v2.pkg"
+          component_smoke_pkg="$smoke_dir/RobloxAccountManager-${version}-${{ matrix.rid }}-unsigned-component-v1.pkg"
+          component_newer_smoke_pkg="$smoke_dir/RobloxAccountManager-${version}-${{ matrix.rid }}-unsigned-component-v2.pkg"
           bash build/macos/package-app.sh publish "$app" "$app_version"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $package_version" "$app/Contents/Info.plist"
           "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
           bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" "$package_version"
+          /usr/bin/mkdir -p "$smoke_dir"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
+          bash build/macos/package-pkg.sh --unsigned "$app" "$smoke_pkg" "${{ matrix.rid }}" 1
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 2" "$app/Contents/Info.plist"
+          bash build/macos/package-pkg.sh --unsigned "$app" "$newer_smoke_pkg" "${{ matrix.rid }}" 2
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
+          bash build/macos/package-pkg.sh --component --unsigned "$app" "$component_smoke_pkg" "${{ matrix.rid }}" 1
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 2" "$app/Contents/Info.plist"
+          bash build/macos/package-pkg.sh --component --unsigned "$app" "$component_newer_smoke_pkg" "${{ matrix.rid }}" 2
           (cd dist && shasum -a 256 "$(basename "$pkg")" > "$(basename "$pkg").sha256")
           {
             echo "WARNING: This is an unsigned, temporary macOS test package."
@@ -133,19 +147,17 @@ jobs:
       - name: Smoke-test unsigned PKG installation
         run: |
           set -euo pipefail
-          image="$RUNNER_TEMP/ram-pkg-install.dmg"
-          mountpoint="$RUNNER_TEMP/ram-pkg-install-volume"
           release_tag="${{ needs.resolve.outputs.release_tag }}"
           release_tag="${release_tag#v}"
-          pkg="dist/RobloxAccountManager-${release_tag}-${{ matrix.rid }}-unsigned.pkg"
-          mkdir -p "$mountpoint"
-          hdiutil create -quiet -size 512m -fs APFS -volname "RAM PKG Smoke" "$image"
-          hdiutil attach -quiet -nobrowse -mountpoint "$mountpoint" "$image"
-          cleanup() { hdiutil detach -quiet "$mountpoint" || true; }
-          trap cleanup EXIT
-          sudo -n installer -allowUntrusted -pkg "$pkg" -target "$mountpoint"
-          test -d "$mountpoint/Applications/Roblox Account Manager.app"
-          test -x "$mountpoint/Applications/Roblox Account Manager.app/Contents/MacOS/RobloxAccountManager"
+          smoke_dir="$RUNNER_TEMP/ram-pkg-smoke"
+          pkg="$smoke_dir/RobloxAccountManager-${release_tag}-${{ matrix.rid }}-unsigned-v1.pkg"
+          newer_pkg="$smoke_dir/RobloxAccountManager-${release_tag}-${{ matrix.rid }}-unsigned-v2.pkg"
+          component_pkg="$smoke_dir/RobloxAccountManager-${release_tag}-${{ matrix.rid }}-unsigned-component-v1.pkg"
+          component_newer_pkg="$smoke_dir/RobloxAccountManager-${release_tag}-${{ matrix.rid }}-unsigned-component-v2.pkg"
+          bash build/macos/smoke-install-pkg.sh "$pkg" "$newer_pkg"
+          bash build/macos/smoke-install-pkg.sh "$component_pkg" "$component_newer_pkg"
+          release_pkg="dist/RobloxAccountManager-${release_tag}-${{ matrix.rid }}-unsigned.pkg"
+          bash build/macos/smoke-install-root-pkg.sh "$release_pkg"
 
       - name: Stage unsigned architecture artifact
         uses: actions/upload-artifact@v4

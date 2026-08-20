@@ -53,7 +53,15 @@ The package step creates a normal macOS application bundle. Open `Roblox Account
 open "Roblox Account Manager.app"
 ```
 
-Unsigned development bundles may require **System Settings → Privacy & Security → Open Anyway**. During the unsigned phase, update packages are checksum- and payload-validated before Apple Installer is opened, but macOS approval remains the user's responsibility. The release workflow publishes separate `osx-arm64` and `osx-x64` component PKGs signed with Developer ID Installer, notarized, stapled, and checksum-paired. The package has no installer scripts and installs the signed app under `/Applications`.
+To verify that Apple Installer actually materialized a package on a target volume, without modifying that volume, run:
+
+```text
+bash build/macos/verify-installed-pkg.sh "$HOME/Downloads/RobloxAccountManager-<version>-osx-x64-unsigned.pkg" /
+```
+
+This checks the PKG payload, internal `PackageInfo`, physical application files, and package receipt. A successful Installer transaction alone is not treated as proof that the application bundle exists.
+
+Unsigned development bundles may require **System Settings → Privacy & Security → Open Anyway**. During the unsigned phase, update packages are checksum- and payload-validated before Apple Installer is opened, but macOS approval remains the user's responsibility. The release workflow publishes separate `osx-arm64` and `osx-x64` script-free PKGs signed with Developer ID Installer, notarized, stapled, and checksum-paired. The package has no installer scripts and installs the signed app under `/Applications`; the packaging validator also accepts legacy component PKGs for compatibility testing.
 
 While Apple signing credentials are being configured, the repository also provides a manually triggered temporary unsigned release path. Its assets include `-unsigned` in the filename and are never presented as certified. Users must explicitly approve the installer and app through macOS **Privacy & Security → Open Anyway**. These packages are for testing only; use the signed workflow for normal distribution.
 

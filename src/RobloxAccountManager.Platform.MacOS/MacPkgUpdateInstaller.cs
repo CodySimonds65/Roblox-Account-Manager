@@ -108,7 +108,7 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
             BuildOpenArguments(stagedPackage),
             cancellationToken).ConfigureAwait(false);
         return launch.Succeeded
-            ? Contracts.UpdateInstallResult.Success()
+            ? Contracts.UpdateInstallResult.InstallerOpened()
             : Contracts.UpdateInstallResult.Rejected("installer-launch-failed");
     }
 
