@@ -39,6 +39,8 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
             ? session.View
             : throw new KeyNotFoundException("The account browser session has not been created.");
 
+    public bool HasSession(string accountId) => _sessions.ContainsKey(accountId);
+
     public Task<BrowserNavigationResult> BeginLaunchCapture(string accountId, CancellationToken cancellationToken)
     {
         var session = GetSession(accountId);

@@ -63,6 +63,7 @@ public sealed class MainWindow : Window
     private readonly SerializedLaunchCoordinator? _launches;
     private readonly CoreClientWindowManager? _clients;
     private readonly IPlatformUpdateSource? _updateSource;
+    private readonly DesktopValidationMode _validationMode;
     private CancellationTokenSource? _launchCancellation;
     private string? _lastGameUrl;
     private GamePreset? _lastLaunchPreset;
@@ -76,13 +77,15 @@ public sealed class MainWindow : Window
         AvaloniaAccountBrowserSessionService browserSessions,
         SerializedLaunchCoordinator? launches = null,
         CoreClientWindowManager? clients = null,
-        IPlatformUpdateSource? updateSource = null)
+        IPlatformUpdateSource? updateSource = null,
+        DesktopValidationMode validationMode = DesktopValidationMode.None)
     {
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _browserSessions = browserSessions ?? throw new ArgumentNullException(nameof(browserSessions));
         _launches = launches;
         _clients = clients;
         _updateSource = updateSource;
+        _validationMode = validationMode;
         Title = "Roblox Account Manager";
         Width = 1380;
         Height = 860;
@@ -328,8 +331,8 @@ public sealed class MainWindow : Window
             }
             _viewModel.SelectedAccount = account;
             UpdateAccountSelectionVisuals();
-            await OpenAccountAsync(account);
             SelectPage("accounts");
+            await OpenAccountAsync(account);
         };
 
         var shell = new Grid
@@ -514,8 +517,27 @@ public sealed class MainWindow : Window
 
     private Control BuildAccountRailRow(AccountProfile account)
     {
-        var open = new CheckBox { Content = new StackPanel { Spacing = 1, Children = { new TextBlock { Text = account.Label, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis }, new TextBlock { Text = string.IsNullOrWhiteSpace(account.Group) ? "" : account.Group, FontSize = 10, Foreground = MutedTextBrush, TextTrimming = TextTrimming.CharacterEllipsis } } }, IsChecked = _queueSelectedAccounts.Contains(account.Id), Foreground = TextBrush, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Center };
-        _accountChecks[account.Id] = open;
+        ArgumentNullException.ThrowIfNull(account);
+        var accountId = account.Id;
+        var accountLabel = account.Label ?? "Roblox account";
+        var accountGroup = account.Group ?? string.Empty;
+        var open = new CheckBox
+        {
+            Content = new StackPanel
+            {
+                Spacing = 1,
+                Children =
+                {
+                    new TextBlock { Text = accountLabel, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis },
+                    new TextBlock { Text = string.IsNullOrWhiteSpace(accountGroup) ? "" : accountGroup, FontSize = 10, Foreground = MutedTextBrush, TextTrimming = TextTrimming.CharacterEllipsis }
+                }
+            },
+            IsChecked = _queueSelectedAccounts.Contains(accountId),
+            Foreground = TextBrush,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _accountChecks[accountId] = open;
         open.Click += async (_, _) =>
         {
             if (open.IsChecked == true) _queueSelectedAccounts.Add(account.Id);
@@ -537,6 +559,7 @@ public sealed class MainWindow : Window
             {
                 _viewModel.SelectedAccount = account;
                 UpdateAccountSelectionVisuals();
+                SelectPage("accounts");
                 await OpenAccountAsync(account);
             }
             else if (wasActive)
@@ -545,15 +568,21 @@ public sealed class MainWindow : Window
                 if (remaining is null)
                 {
                     Interlocked.Increment(ref _browserActivationVersion);
+                    UpdateAccountSelectionVisuals();
+                    SelectPage("accounts");
                 }
                 else
                 {
                     UpdateAccountSelectionVisuals();
+                    SelectPage("accounts");
                     await OpenAccountAsync(remaining);
                 }
             }
-            UpdateAccountSelectionVisuals();
-            SelectPage("accounts");
+            else
+            {
+                UpdateAccountSelectionVisuals();
+                SelectPage("accounts");
+            }
         };
         var favorite = new Button { Content = account.IsFavorite ? "★" : "☆", Padding = new Thickness(6, 2), FontSize = 18, Background = Brushes.Transparent, BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0), Foreground = account.IsFavorite ? new SolidColorBrush(Avalonia.Media.Color.Parse("#F5C451")) : MutedTextBrush };
         favorite.Click += async (_, _) =>
@@ -764,24 +793,46 @@ public sealed class MainWindow : Window
                 if (args.PropertyName == nameof(DesktopShellViewModel.Activity)) _activity.Text = _viewModel.Activity;
             };
             _activity.Text = _viewModel.Activity;
+            var startupPlan = DesktopStartupPlan.Create(_viewModel.Accounts, _validationMode);
             RenderPage();
-            if (_viewModel.Accounts.Count > 0)
+            if (startupPlan.InitialAccount is not null)
             {
-                _viewModel.SelectedAccount = _viewModel.Accounts[0];
+                _viewModel.SelectedAccount = startupPlan.InitialAccount;
                 _queueSelectedAccounts.Add(_viewModel.SelectedAccount.Id);
-                _suppressAccountSelection = true;
-                try { _accountsRail.SelectedItems?.Add(_viewModel.SelectedAccount); }
-                finally { _suppressAccountSelection = false; }
+                if (_validationMode != DesktopValidationMode.BrowserStartup)
+                {
+                    _suppressAccountSelection = true;
+                    try { _accountsRail.SelectedItems?.Add(_viewModel.SelectedAccount); }
+                    finally { _suppressAccountSelection = false; }
+                }
                 UpdateAccountSelectionVisuals();
-                await OpenAccountAsync(_viewModel.SelectedAccount);
                 RenderPage();
             }
-            _ = CheckForUpdateAtStartupAsync();
+            if (startupPlan.ActivateBrowserOnStartup && startupPlan.InitialAccount is not null)
+            {
+                await Task.Delay(250);
+                await ValidateBrowserStartupAsync(startupPlan.InitialAccount);
+            }
+            else if (_validationMode == DesktopValidationMode.GuiStartup)
+            {
+                RequestValidationShutdown();
+            }
+            else
+            {
+                _ = CheckForUpdateAtStartupAsync();
+            }
         }
         catch (Exception exception)
         {
             _viewModel.AppendActivity($"Startup error: {exception.Message}");
-            RenderPage();
+            if (_validationMode == DesktopValidationMode.None)
+            {
+                RenderPage();
+            }
+            else
+            {
+                RequestValidationShutdown(1);
+            }
         }
     }
 
@@ -805,9 +856,7 @@ public sealed class MainWindow : Window
             _ => new TextBlock { Text = "Select a page." }
         };
         UpdateActivityControls();
-        var activation = Interlocked.Increment(ref _browserActivationVersion);
-        if (isWorkspace && _viewModel.SelectedAccount is not null)
-            _ = ActivateBrowserSessionAsync(_viewModel.SelectedAccount, activation);
+        Interlocked.Increment(ref _browserActivationVersion);
     }
 
     private void DetachBrowserHost()
@@ -965,9 +1014,13 @@ public sealed class MainWindow : Window
                 }
             };
         }
+        else if (_browserSessions.HasSession(_viewModel.SelectedAccount.Id))
+        {
+            _browserHost.Content = _browserSessions.GetView(_viewModel.SelectedAccount.Id);
+        }
         else
         {
-            _browserHost.Content = new TextBlock { Text = "Opening isolated Roblox session...", Foreground = MutedTextBrush, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            _browserHost.Content = new TextBlock { Text = "Click Browse or Login / Home to open the isolated Roblox session.", Foreground = MutedTextBrush, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         }
 
         var browserBody = new Grid { RowDefinitions = new RowDefinitions("46,3,*"), Background = InputBrush, ClipToBounds = true };
@@ -1033,7 +1086,12 @@ public sealed class MainWindow : Window
         var sessionActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
         var browse = new Button { Content = "Browse", Padding = new Thickness(14, 5) };
         StyleButton(browse, secondary: true);
-        browse.Click += (_, _) => SelectPage("browser");
+        browse.Click += async (_, _) =>
+        {
+            SelectPage("browser");
+            if (_viewModel.SelectedAccount is not null)
+                await OpenAccountAsync(_viewModel.SelectedAccount);
+        };
         var clients = new Button { Content = "Clients", Padding = new Thickness(14, 5) };
         StyleButton(clients, secondary: true);
         clients.Click += (_, _) => SelectPage("clients");
@@ -1708,20 +1766,21 @@ public sealed class MainWindow : Window
         return bundle?.BundlePath;
     }
 
-    private async Task<bool> OpenAccountAsync(AccountProfile account)
+    private async Task<bool> OpenAccountAsync(AccountProfile account, bool navigate = true)
     {
         var activation = Interlocked.Increment(ref _browserActivationVersion);
-        return await ActivateBrowserSessionAsync(account, activation);
+        return await ActivateBrowserSessionAsync(account, activation, navigate);
     }
 
-    private async Task<bool> ActivateBrowserSessionAsync(AccountProfile account, long activation)
+    private async Task<bool> ActivateBrowserSessionAsync(AccountProfile account, long activation, bool navigate)
     {
         try
         {
             await _browserSessions.CreateAsync(account.Id, account.Label);
             if (activation != Volatile.Read(ref _browserActivationVersion) || _viewModel.SelectedAccount?.Id != account.Id) return false;
             _browserHost.Content = _browserSessions.GetView(account.Id);
-            await _browserSessions.NavigateAsync(account.Id, new Uri("https://www.roblox.com/home"));
+            if (navigate)
+                await _browserSessions.NavigateAsync(account.Id, new Uri("https://www.roblox.com/home"));
             _viewModel.AppendActivity($"Opened isolated Roblox session for {account.Label}.");
             return true;
         }
@@ -1730,6 +1789,39 @@ public sealed class MainWindow : Window
             if (activation == Volatile.Read(ref _browserActivationVersion)) _viewModel.AppendActivity($"Browser session unavailable: {LaunchDiagnostics.SanitiseCode(exception.Message)}.");
             return false;
         }
+    }
+
+    private async Task ValidateBrowserStartupAsync(AccountProfile account)
+    {
+        if (!await OpenAccountAsync(account, navigate: false))
+        {
+            RequestValidationShutdown(1);
+            return;
+        }
+
+        var view = _browserSessions.GetView(account.Id);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (view.TryGetPlatformHandle() is not null)
+            {
+                RequestValidationShutdown();
+                return;
+            }
+            await Task.Delay(100);
+        }
+
+        _viewModel.AppendActivity("Browser startup validation did not create a native WebView adapter.");
+        RequestValidationShutdown(1);
+    }
+
+    private static void RequestValidationShutdown(int exitCode = 0)
+    {
+        Environment.ExitCode = exitCode;
+        Avalonia.Threading.Dispatcher.UIThread.Post(static () =>
+        {
+            (Avalonia.Application.Current?.ApplicationLifetime as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime)?.Shutdown();
+        }, Avalonia.Threading.DispatcherPriority.Background);
     }
 
     private async Task ShowLoginAsync()

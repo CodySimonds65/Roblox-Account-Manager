@@ -18,6 +18,23 @@ namespace RobloxAccountManager.Desktop;
 
 public sealed class App : Application
 {
+    private static DesktopValidationMode _configuredValidationMode;
+    private static string? _configuredDataRoot;
+    private readonly DesktopValidationMode _validationMode;
+    private readonly string? _dataRoot;
+
+    public App()
+    {
+        _validationMode = _configuredValidationMode;
+        _dataRoot = _configuredDataRoot;
+    }
+
+    internal static void ConfigureStartup(DesktopValidationMode validationMode, string? dataRoot)
+    {
+        _configuredValidationMode = validationMode;
+        _configuredDataRoot = dataRoot;
+    }
+
     public override void Initialize()
     {
         RequestedThemeVariant = ThemeVariant.Dark;
@@ -294,7 +311,8 @@ public sealed class App : Application
                 OperatingSystem.IsWindows() ? RobloxPlatform.Windows : RobloxPlatform.Unknown;
             var composition = DesktopComposition.Create(
                 platform,
-                TrustedRobloxIdentityConfiguration.LoadInstallerIdentity());
+                TrustedRobloxIdentityConfiguration.LoadInstallerIdentity(),
+                _dataRoot);
             var shell = new DesktopShellViewModel(composition.Capabilities, composition.Accounts, composition.Presets, composition.Settings, composition.Updates, composition.UpdateSource, composition.RobloxSettings, composition.Plugins);
             if (composition.Plugins is MacPluginHostFacade macPlugins)
             {
@@ -305,7 +323,8 @@ public sealed class App : Application
                 composition.BrowserSessions,
                 composition.Launches,
                 composition.Clients,
-                composition.UpdateSource);
+                composition.UpdateSource,
+                _validationMode);
         }
 
         base.OnFrameworkInitializationCompleted();

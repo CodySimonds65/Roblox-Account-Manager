@@ -128,6 +128,8 @@ jobs:
           bash build/macos/package-app.sh publish "$app" "$app_version"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $package_version" "$app/Contents/Info.plist"
           "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-gui-startup
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-browser-startup
           bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" "$package_version"
           /bin/mkdir -p "$smoke_dir"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
