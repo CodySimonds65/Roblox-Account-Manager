@@ -84,6 +84,7 @@ detect_layout() {
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
     normalized="${path#./}"
+    [[ -z "$normalized" || "$normalized" == "." ]] && continue
     [[ "$normalized" != /* ]] || die "PKG contains an absolute payload path: $path"
     [[ "$normalized" != ".." && "$normalized" != ../* && "$normalized" != */../* ]] ||
       die "PKG contains a path traversal entry: $path"

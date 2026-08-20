@@ -60,6 +60,7 @@ layout=""
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
   normalized="${path#./}"
+  [[ -z "$normalized" || "$normalized" == "." ]] && continue
   [[ "$normalized" != /* ]] || die "PKG contains an absolute payload path: $path"
   [[ "$normalized" != ".." && "$normalized" != ../* && "$normalized" != */../* ]] ||
     die "PKG contains a path traversal entry: $path"
@@ -104,6 +105,7 @@ app_path="$target/Applications/$APP_NAME"
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
   normalized="${path#./}"
+  [[ -z "$normalized" || "$normalized" == "." ]] && continue
   case "$layout" in
     root) installed_path="$target/$normalized" ;;
     component) installed_path="$target/Applications/$normalized" ;;
