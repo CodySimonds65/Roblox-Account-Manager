@@ -1,3 +1,5 @@
+using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using RobloxAccountManager.Core.Models;
 using RobloxAccountManager.Desktop;
 
@@ -39,5 +41,18 @@ Require(DesktopPresetPolicy.TryResolveLaunchUrl(
         "https://www.roblox.com/games/789/Typed-url",
         out var customUrl) && customUrl.Contains("/games/789/Typed-url", StringComparison.Ordinal),
     "The typed Custom URL was not used as the launch URL.");
+
+var rowBuildCount = 0;
+var accountTemplate = AccountRailTemplatePolicy.CreateTemplate(candidate =>
+{
+    rowBuildCount++;
+    return new TextBlock { Text = candidate.Label };
+});
+var renderedAccountRow = accountTemplate.Build(account, null);
+Require(renderedAccountRow is TextBlock textBlock && textBlock.Text == account.Label && rowBuildCount == 1,
+    "Account rail template did not delegate normal account rows to the row builder.");
+var recycledAccountRow = accountTemplate.Build(null!, renderedAccountRow);
+Require(recycledAccountRow is Border && rowBuildCount == 1,
+    "Account rail template recycling did not produce a safe placeholder without invoking the row builder.");
 
 Console.WriteLine("Desktop startup and preset policy tests passed.");
