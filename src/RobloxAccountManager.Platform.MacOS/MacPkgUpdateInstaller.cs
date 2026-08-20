@@ -408,7 +408,8 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
                         _trust.ExpectedPackageIdentifier, StringComparison.Ordinal);
                     if (matchedIdentity)
                     {
-                        if (!string.Equals(root?.Attribute("install-location")?.Value, "/Applications", StringComparison.Ordinal))
+                        var packageInstallLocation = root?.Attribute("install-location")?.Value;
+                        if (packageInstallLocation is not ("/" or "/Applications"))
                         {
                             return "pkg-install-location-mismatch";
                         }
@@ -456,6 +457,31 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
             if (payloadValidation.Error is not null)
             {
                 return payloadValidation.Error;
+            }
+
+            var installLocation = packageInfos
+                .Select(path =>
+                {
+                    try
+                    {
+                        var root = XDocument.Parse(File.ReadAllText(path)).Root;
+                        return string.Equals(root?.Attribute("identifier")?.Value,
+                            _trust.ExpectedPackageIdentifier, StringComparison.Ordinal)
+                            ? root?.Attribute("install-location")?.Value
+                            : null;
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                })
+                .FirstOrDefault(location => location is not null);
+            var expectedAppRoot = installLocation == "/"
+                ? Path.Combine(expansionRoot, "Payload", "Applications", "Roblox Account Manager.app")
+                : Path.Combine(expansionRoot, "Payload", "Roblox Account Manager.app");
+            if (!string.Equals(payloadValidation.AppRoot, expectedAppRoot, StringComparison.Ordinal))
+            {
+                return "pkg-install-layout-mismatch";
             }
 
             var plistPath = Path.Combine(payloadValidation.AppRoot!, "Contents", "Info.plist");
