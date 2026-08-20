@@ -129,7 +129,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $package_version" "$app/Contents/Info.plist"
           "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
           bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" "$package_version"
-          /usr/bin/mkdir -p "$smoke_dir"
+          /bin/mkdir -p "$smoke_dir"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
           bash build/macos/package-pkg.sh --unsigned "$app" "$smoke_pkg" "${{ matrix.rid }}" 1
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 2" "$app/Contents/Info.plist"

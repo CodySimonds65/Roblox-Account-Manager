@@ -90,17 +90,35 @@ package_info_count="$(printf '%s\n' "$package_infos" | /usr/bin/sed '/^$/d' | /u
 [[ "$package_info_count" == 1 ]] || die "PKG must contain exactly one PackageInfo"
 package_info="$package_infos"
 
-package_info_header="$(/usr/bin/tr '\n' ' ' < "$package_info")"
+package_info_header=""
+package_info_started=false
+while IFS= read -r package_info_line; do
+  if [[ "$package_info_started" != true ]]; then
+    case "$package_info_line" in
+      [[:space:]]*"<pkg-info"*|"<pkg-info"*)
+        package_info_suffix="${package_info_line#*<pkg-info}"
+        case "$package_info_suffix" in
+          ""|[[:space:]]*|">"*)
+            package_info_header="$package_info_suffix"
+            package_info_started=true
+            ;;
+        esac
+        ;;
+    esac
+  else
+    package_info_header+=" $package_info_line"
+  fi
+  if [[ "$package_info_started" == true && "$package_info_header" == *">"* ]]; then
+    package_info_header="${package_info_header%%>*}"
+    break
+  fi
+done < "$package_info"
+[[ "$package_info_started" == true && -n "$package_info_header" ]] ||
+  die "PackageInfo is missing a top-level pkg-info opening tag"
 package_attribute() {
   local attribute="$1"
   local value
-  value="$(/usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p" "$package_info" | /usr/bin/head -n 1)"
-  if [[ -z "$value" ]]; then
-    value="$(/usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" "$package_info" | /usr/bin/head -n 1)"
-  fi
-  if [[ -z "$value" ]]; then
-    value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p")"
-  fi
+  value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p")"
   if [[ -z "$value" ]]; then
     value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p")"
   fi
@@ -110,7 +128,7 @@ identifier="$(package_attribute identifier)"
 package_version="$(package_attribute version)"
 install_location="$(package_attribute install-location)"
 [[ "$identifier" == "$package_identifier" ]] || die "PackageInfo identifier mismatch: $identifier"
-[[ "$package_version" =~ ^[0-9]+(\.[0-9]+)*$ ]] || die "PackageInfo version is not numeric: ${package_version:-<missing>}"
+[[ "$package_version" =~ ^[1-9][0-9]*$ ]] || die "PackageInfo version is not a positive integer: ${package_version:-<missing>}"
 case "$layout:$install_location" in
   root:/|component:/Applications) ;;
   *) die "payload layout and PackageInfo install-location disagree" ;;
