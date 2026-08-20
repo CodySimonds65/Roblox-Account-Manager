@@ -1884,7 +1884,7 @@ public sealed class MainWindow : Window
 
             if (diagnostics.ArtifactPath is not null)
             {
-                _viewModel.AppendActivity($"Redacted Roblox diagnostic tail saved as {Path.GetFileName(diagnostics.ArtifactPath)}.");
+                _viewModel.AppendActivity($"Redacted Roblox diagnostic tail saved to {diagnostics.ArtifactPath}.");
             }
         }
         catch (Exception exception)
