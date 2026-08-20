@@ -23,4 +23,21 @@ var browserStartup = DesktopStartupPlan.Create(accounts, DesktopValidationMode.B
 Require(ReferenceEquals(browserStartup.InitialAccount, account) && browserStartup.ActivateBrowserOnStartup,
     "Browser startup validation did not opt into explicit WebView activation.");
 
-Console.WriteLine("Desktop startup policy tests passed.");
+var presets = new List<GamePreset>
+{
+    new("Built-in", "https://www.roblox.com/games/123/Built-in", true)
+};
+presets.Add(new GamePreset("Added preset", "https://www.roblox.com/games/456/Added"));
+Require(DesktopPresetPolicy.FilterPresets(presets, "added").Single().Name == "Added preset",
+    "Preset filtering did not include a newly added preset.");
+
+var customPreset = new GamePreset("Custom URL", "https://www.roblox.com/games/", true);
+Require(DesktopPresetPolicy.IsCustomUrlPreset(customPreset) && DesktopPresetPolicy.GetUrlEditorValue(customPreset) == string.Empty,
+    "The Custom URL preset did not expose an editable empty URL field.");
+Require(DesktopPresetPolicy.TryResolveLaunchUrl(
+        customPreset,
+        "https://www.roblox.com/games/789/Typed-url",
+        out var customUrl) && customUrl.Contains("/games/789/Typed-url", StringComparison.Ordinal),
+    "The typed Custom URL was not used as the launch URL.");
+
+Console.WriteLine("Desktop startup and preset policy tests passed.");
