@@ -67,6 +67,7 @@ public sealed class MainWindow : Window
     private CancellationTokenSource? _launchCancellation;
     private string? _lastGameUrl;
     private GamePreset? _lastLaunchPreset;
+    private string? _lastCustomUrl;
     private bool _suppressAccountSelection;
     private bool _updateCheckStarted;
     private long _browserActivationVersion;
@@ -878,10 +879,9 @@ public sealed class MainWindow : Window
     private Control BuildLaunchWorkspacePage()
     {
         var selectedPreset = _viewModel.SelectedPreset ?? _viewModel.Presets.FirstOrDefault();
-        var presetMatches = new ObservableCollection<GamePreset>(_viewModel.Presets);
         var presetPicker = new ComboBox
         {
-            ItemsSource = presetMatches,
+            ItemsSource = _viewModel.Presets,
             SelectedItem = selectedPreset,
             HorizontalAlignment = HorizontalAlignment.Stretch,
             MinWidth = 260,
@@ -896,9 +896,13 @@ public sealed class MainWindow : Window
         presetSearch.TextChanged += (_, _) =>
         {
             var query = presetSearch.Text?.Trim() ?? string.Empty;
-            presetMatches.Clear();
-            foreach (var match in _viewModel.Presets.Where(item => query.Length == 0 || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase))) presetMatches.Add(match);
-            if (presetPicker.SelectedItem is not GamePreset selected || !presetMatches.Contains(selected)) presetPicker.SelectedItem = presetMatches.FirstOrDefault();
+            var selected = presetPicker.SelectedItem as GamePreset;
+            var filteredPresets = DesktopPresetPolicy.FilterPresets(_viewModel.Presets, query);
+            presetPicker.ItemsSource = query.Length == 0 ? _viewModel.Presets : filteredPresets;
+            if (selected is null || !filteredPresets.Contains(selected))
+            {
+                presetPicker.SelectedItem = filteredPresets.FirstOrDefault();
+            }
         };
         var presetActions = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 5 };
         presetActions.Children.Add(presetPicker);
@@ -936,23 +940,24 @@ public sealed class MainWindow : Window
         presetControls.Children.Add(presetSearch);
         presetControls.Children.Add(presetActions);
 
-        var customUrlText = new TextBlock
+        var customUrl = new TextBox
         {
-            Text = selectedPreset is null ? "Choose a game preset" : selectedPreset.Url,
+            Text = DesktopPresetPolicy.GetUrlEditorValue(selectedPreset),
             Foreground = MutedTextBrush,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxWidth = 260
-        };
-        presetPicker.SelectionChanged += (_, _) => customUrlText.Text = (presetPicker.SelectedItem as GamePreset)?.Url ?? "Choose a game preset";
-
-        var customUrl = new Border
-        {
+            IsReadOnly = !DesktopPresetPolicy.IsCustomUrlPreset(selectedPreset),
+            PlaceholderText = "https://www.roblox.com/games/123/example",
+            MaxWidth = 260,
             Background = InputBrush,
             BorderBrush = ControlBorderBrush,
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(11, 10),
-            Child = customUrlText
+            Padding = new Thickness(11, 10)
+        };
+        presetPicker.SelectionChanged += (_, _) =>
+        {
+            var preset = presetPicker.SelectedItem as GamePreset;
+            _viewModel.SelectedPreset = preset;
+            customUrl.Text = DesktopPresetPolicy.GetUrlEditorValue(preset);
+            customUrl.IsReadOnly = !DesktopPresetPolicy.IsCustomUrlPreset(preset);
         };
         var customUrlPanel = new StackPanel { Spacing = 5, Margin = new Thickness(12, 0, 0, 0) };
         customUrlPanel.Children.Add(new TextBlock { Text = "CUSTOM ROBLOX URL", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush });
@@ -970,7 +975,7 @@ public sealed class MainWindow : Window
             _viewModel.Settings.LaunchTimeoutSeconds = GetSelectedTimeoutSeconds();
             _viewModel.Settings.ContinueOnFailure = _continueOnFailure.IsChecked == true;
             await SaveAsync();
-            await RunLaunchQueueAsync(presetPicker.SelectedItem as GamePreset, accounts);
+            await RunLaunchQueueAsync(presetPicker.SelectedItem as GamePreset, accounts, customUrl.Text);
         };
 
         var presetBar = new Border
@@ -1662,12 +1667,13 @@ public sealed class MainWindow : Window
         || exception.Message.Contains("SSL connection could not be established", StringComparison.OrdinalIgnoreCase)
         || exception.Message.Contains("TLS", StringComparison.OrdinalIgnoreCase);
 
-    private async Task RunLaunchQueueAsync(GamePreset? preset, IReadOnlyList<AccountProfile> accounts)
+    private async Task RunLaunchQueueAsync(GamePreset? preset, IReadOnlyList<AccountProfile> accounts, string? customUrl = null)
     {
-        if (_launches is null || preset is null || !GamePreset.TryNormalizeRobloxGameUrl(preset.Url, out var gameUrl)) { _viewModel.AppendActivity("Launch blocked: configure a validated Roblox bundle and a valid game preset."); return; }
+        if (_launches is null || preset is null || !DesktopPresetPolicy.TryResolveLaunchUrl(preset, customUrl, out var gameUrl)) { _viewModel.AppendActivity("Launch blocked: configure a validated Roblox bundle and a valid game preset."); return; }
         if (accounts.Count == 0) { _viewModel.AppendActivity("Launch blocked: favorite or open at least one account."); return; }
         _lastGameUrl = gameUrl;
         _lastLaunchPreset = preset;
+        _lastCustomUrl = DesktopPresetPolicy.IsCustomUrlPreset(preset) ? customUrl : null;
         _viewModel.Queue.Clear();
         foreach (var account in accounts) _viewModel.Queue.Add(new LaunchQueueItem(account));
         _launchCancellation?.Dispose(); _launchCancellation = new CancellationTokenSource();
@@ -1688,26 +1694,10 @@ public sealed class MainWindow : Window
                     _viewModel.Settings.GameSettings,
                     gameSettings,
                     item.Account.GameSettings);
-                var request = new CoreRobloxLaunchRequest(item.Account.Id, async cancellationToken =>
-                {
-                    if (_viewModel.RobloxSettings is not null && scopedSettings.HasOverrides)
-                    {
-                        var settingsResult = await _viewModel.RobloxSettings.ApplyAsync(scopedSettings, cancellationToken);
-                        _viewModel.AppendActivity($"{item.Label}: Roblox settings applied={settingsResult.Applied.Count}, skipped={settingsResult.Skipped.Count}.");
-                        if (!settingsResult.Succeeded)
-                        {
-                            await _viewModel.RobloxSettings.RecoverAsync(cancellationToken);
-                            throw new InvalidOperationException(settingsResult.DiagnosticCode ?? "roblox-settings-apply-failed");
-                        }
-                    }
-                    _viewModel.SelectedAccount = item.Account;
-                    if (!await OpenAccountAsync(item.Account)) throw new InvalidOperationException("browser-session-unavailable");
-                    var pending = _browserSessions.BeginLaunchCapture(item.Account.Id, cancellationToken);
-                    await _browserSessions.NavigateAsync(item.Account.Id, new Uri(gameUrl), cancellationToken);
-                    var navigation = await pending.ConfigureAwait(true);
-                    if (!navigation.TryConsumeLaunchUri(out var uri) || uri is null) throw new InvalidOperationException("No Roblox launch URI was captured.");
-                    return uri;
-                }, MaxAttempts: 3, RobloxBundlePath: await DiscoverRobloxBundleAsync(), UserConsentedToMultiInstanceChanges: true,
+                var request = new CoreRobloxLaunchRequest(
+                    item.Account.Id,
+                    cancellationToken => new ValueTask<Uri>(CaptureLaunchUriAsync(item.Account, scopedSettings, gameUrl, cancellationToken)),
+                    MaxAttempts: 3, RobloxBundlePath: await DiscoverRobloxBundleAsync(), UserConsentedToMultiInstanceChanges: true,
                     VerificationTimeout: TimeSpan.FromSeconds(Math.Clamp(_viewModel.Settings.LaunchTimeoutSeconds, 15, 180)));
                 LaunchResult result;
                 try
@@ -1750,7 +1740,72 @@ public sealed class MainWindow : Window
         if (_launchCancellation is not null || _lastLaunchPreset is null) return;
         var failed = _viewModel.Queue.Where(item => item.State == LaunchQueueState.Failed).Select(item => item.Account).ToArray();
         if (failed.Length == 0) return;
-        await RunLaunchQueueAsync(_lastLaunchPreset, failed);
+        await RunLaunchQueueAsync(_lastLaunchPreset, failed, _lastCustomUrl);
+    }
+
+    private async Task<Uri> CaptureLaunchUriAsync(
+        AccountProfile account,
+        GameSettings? scopedSettings,
+        string gameUrl,
+        CancellationToken cancellationToken)
+    {
+        RobloxSettingsApplyResult? settingsResult = null;
+        if (_viewModel.RobloxSettings is not null && scopedSettings is not null && scopedSettings.HasOverrides)
+        {
+            settingsResult = await _viewModel.RobloxSettings.ApplyAsync(scopedSettings, cancellationToken);
+            if (!settingsResult.Succeeded)
+            {
+                await _viewModel.RobloxSettings.RecoverAsync(cancellationToken);
+            }
+        }
+
+        return await InvokeOnUiThreadAsync(async () =>
+        {
+            if (settingsResult is not null)
+            {
+                _viewModel.AppendActivity($"{account.Label}: Roblox settings applied={settingsResult.Applied.Count}, skipped={settingsResult.Skipped.Count}.");
+                if (!settingsResult.Succeeded)
+                    throw new InvalidOperationException(settingsResult.DiagnosticCode ?? "roblox-settings-apply-failed");
+            }
+
+            _viewModel.SelectedAccount = account;
+            if (!await OpenAccountAsync(account)) throw new InvalidOperationException("browser-session-unavailable");
+            var pending = _browserSessions.BeginLaunchCapture(account.Id, cancellationToken);
+            await _browserSessions.NavigateAsync(account.Id, new Uri(gameUrl), cancellationToken);
+            var navigation = await pending.ConfigureAwait(true);
+            if (!navigation.TryConsumeLaunchUri(out var uri) || uri is null) throw new InvalidOperationException("No Roblox launch URI was captured.");
+            return uri;
+        }, cancellationToken);
+    }
+
+    private static Task<T> InvokeOnUiThreadAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess()) return operation();
+        if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<T>(cancellationToken);
+
+        var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var registration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
+        Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+        {
+            try
+            {
+                completion.TrySetResult(await operation());
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                completion.TrySetCanceled(cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                completion.TrySetException(exception);
+            }
+            finally
+            {
+                registration.Dispose();
+            }
+        }, Avalonia.Threading.DispatcherPriority.Normal);
+        return completion.Task;
     }
 
     private int GetSelectedTimeoutSeconds()
