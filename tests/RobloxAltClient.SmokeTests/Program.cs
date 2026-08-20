@@ -231,6 +231,12 @@ Require(
         "https://www.roblox.com/games/123456/Test?privateServerLinkCode=secret",
         out var privateServerUrl) && privateServerUrl.Contains("privateServerLinkCode=secret"),
     "A Roblox private-server link was not preserved.");
+Require(
+    GamePreset.TryNormalizeRobloxGameUrl(
+        "https://www.roblox.com/share?code=b5f0d0b82d5a53419841df9f978bed53&type=Server",
+        out var normalizedPrivateServerShare) &&
+    normalizedPrivateServerShare == "https://www.roblox.com/share?code=b5f0d0b82d5a53419841df9f978bed53&type=Server",
+    "A Roblox private server share URL was rejected.");
 
 Require(
     RobloxClientSettingsService.TryParseAdvancedFlags(

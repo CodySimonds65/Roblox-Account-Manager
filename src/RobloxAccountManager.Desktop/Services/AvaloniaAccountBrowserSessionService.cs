@@ -18,7 +18,7 @@ public sealed class UnsupportedWebsiteDataStoreRemover : IAccountBrowserDataStor
 /// Owns one NativeWebView and one persistent store identity per account. Views
 /// must be detached from their visual parent before RemoveAsync is called.
 /// </summary>
-public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessionService
+public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessionService, IMacBrowserLaunchSession
 {
     private readonly Dictionary<string, Session> _sessions = new(StringComparer.Ordinal);
     private readonly string _windowsDataDirectory;
@@ -121,6 +121,16 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
             return ValueTask.FromResult(BrowserNavigationResult.Rejected("unsupported-navigation-scheme"));
         GetSession(accountId).View.Navigate(navigationUri);
         return ValueTask.FromResult(new BrowserNavigationResult(true, diagnosticCode: "navigation-started"));
+    }
+
+    public async ValueTask<string> InvokeScriptAsync(
+        string accountId,
+        string script,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(script);
+        cancellationToken.ThrowIfCancellationRequested();
+        return await GetSession(accountId).View.InvokeScript(script).WaitAsync(cancellationToken) ?? string.Empty;
     }
 
     public async ValueTask RemoveAsync(string accountId, CancellationToken cancellationToken = default)
