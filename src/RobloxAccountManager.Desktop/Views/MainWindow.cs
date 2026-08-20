@@ -313,7 +313,7 @@ public sealed class MainWindow : Window
         _accountsRail.Background = Brushes.Transparent;
         _accountsRail.BorderThickness = new Thickness(0);
         _accountsRail.SelectionMode = SelectionMode.Multiple;
-        _accountsRail.ItemTemplate = new FuncDataTemplate<AccountProfile>((account, _) => BuildAccountRailRow(account));
+        _accountsRail.ItemTemplate = AccountRailTemplatePolicy.CreateTemplate(BuildAccountRailRow);
         _accountsRail.SelectionChanged += async (_, args) =>
         {
             if (_suppressAccountSelection) return;
