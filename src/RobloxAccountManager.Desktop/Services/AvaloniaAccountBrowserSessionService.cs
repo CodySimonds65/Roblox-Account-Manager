@@ -123,6 +123,16 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
         return ValueTask.FromResult(new BrowserNavigationResult(true, diagnosticCode: "navigation-started"));
     }
 
+    public async ValueTask<string> InvokeScriptAsync(
+        string accountId,
+        string script,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(script);
+        cancellationToken.ThrowIfCancellationRequested();
+        return await GetSession(accountId).View.InvokeScript(script).WaitAsync(cancellationToken) ?? string.Empty;
+    }
+
     public async ValueTask RemoveAsync(string accountId, CancellationToken cancellationToken = default)
     {
         if (!_storeRemover.IsSupported)
