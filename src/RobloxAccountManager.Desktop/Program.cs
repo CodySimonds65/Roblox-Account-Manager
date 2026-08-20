@@ -1,5 +1,8 @@
 using Avalonia;
+using System.Text.Json;
 using RobloxAccountManager.Core.Contracts;
+using RobloxAccountManager.Core.Data;
+using RobloxAccountManager.Core.Models;
 using RobloxAccountManager.Desktop.Services;
 
 namespace RobloxAccountManager.Desktop;
@@ -9,6 +12,7 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        var validationMode = DesktopStartupPlan.ParseValidationMode(args);
         if (args.Contains("--validate-composition", StringComparer.Ordinal))
         {
             var app = new App();
@@ -31,11 +35,51 @@ internal static class Program
             return;
         }
 
-        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        if (validationMode == DesktopValidationMode.None)
+        {
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            return;
+        }
+
+        var validationRoot = Path.Combine(
+            Path.GetTempPath(),
+            "RobloxAccountManager-validation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(validationRoot);
+        try
+        {
+            if (validationMode == DesktopValidationMode.BrowserStartup)
+            {
+                var paths = new LauncherDataPaths(validationRoot);
+                Directory.CreateDirectory(paths.Root);
+                var account = new AccountProfile { Label = "Startup validation account", SortOrder = 0 };
+                File.WriteAllText(
+                    paths.Accounts,
+                    JsonSerializer.Serialize(new[] { account }, new JsonSerializerOptions { WriteIndented = true }));
+            }
+
+            BuildAvaloniaApp(validationMode, validationRoot)
+                .StartWithClassicDesktopLifetime(Array.Empty<string>());
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(validationRoot)) Directory.Delete(validationRoot, recursive: true);
+            }
+            catch
+            {
+                // Native WebKit may still be releasing its temporary store when the process exits.
+            }
+        }
     }
 
-    public static AppBuilder BuildAvaloniaApp() =>
-        AppBuilder.Configure<App>()
+    public static AppBuilder BuildAvaloniaApp(
+        DesktopValidationMode validationMode = DesktopValidationMode.None,
+        string? dataRoot = null)
+    {
+        App.ConfigureStartup(validationMode, dataRoot);
+        return AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .LogToTrace();
+    }
 }

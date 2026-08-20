@@ -22,13 +22,14 @@ public sealed record DesktopComposition(
 {
     public static DesktopComposition Create(
         RobloxPlatform platform,
-        string? trustedInstallerIdentity = null)
+        string? trustedInstallerIdentity = null,
+        string? dataRoot = null)
     {
         IAccountBrowserDataStoreRemover dataStoreRemover = platform == RobloxPlatform.MacOS
             ? new MacAccountBrowserDataStoreRemover()
             : new UnsupportedWebsiteDataStoreRemover();
         var browserSessions = new AvaloniaAccountBrowserSessionService(dataStoreRemover);
-        var paths = new LauncherDataPaths();
+        var paths = new LauncherDataPaths(dataRoot);
         var accounts = new AccountStore(paths);
         var presets = new GamePresetStore(paths);
         var settings = new SettingsStore(paths);

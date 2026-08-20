@@ -151,6 +151,8 @@ jobs:
           codesign --force --timestamp --options runtime --entitlements build/macos/RobloxAccountManager.entitlements --sign "$SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-gui-startup
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-browser-startup
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/app.zip"
           xcrun notarytool submit "$RUNNER_TEMP/app.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait
           xcrun stapler staple "$app"
