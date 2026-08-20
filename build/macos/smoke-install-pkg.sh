@@ -136,11 +136,27 @@ inspect_package_metadata() {
   [[ "$package_info_count" == 1 ]] || die "PKG must contain exactly one PackageInfo: $package_path"
   package_info="$package_infos"
 
-  identifier="$(/usr/bin/grep -Eo 'identifier="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^identifier="([^"]+)"$/\1/')"
-  package_version="$(/usr/bin/grep -Eo 'version="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^version="([^"]+)"$/\1/')"
-  install_location="$(/usr/bin/grep -Eo 'install-location="[^"]+"' "$package_info" | /usr/bin/head -n 1 | /usr/bin/sed -E 's/^install-location="([^"]+)"$/\1/')"
+  package_info_header="$(/usr/bin/tr '\n' ' ' < "$package_info")"
+  package_attribute() {
+    local attribute="$1"
+    local value
+    value="$(/usr/bin/sed -nE "s/.*${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p" "$package_info" | /usr/bin/head -n 1)"
+    if [[ -z "$value" ]]; then
+      value="$(/usr/bin/sed -nE "s/.*${attribute}[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" "$package_info" | /usr/bin/head -n 1)"
+    fi
+    if [[ -z "$value" ]]; then
+      value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p")"
+    fi
+    if [[ -z "$value" ]]; then
+      value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*${attribute}[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p")"
+    fi
+    printf '%s\n' "$value"
+  }
+  identifier="$(package_attribute identifier)"
+  package_version="$(package_attribute version)"
+  install_location="$(package_attribute install-location)"
   [[ "$identifier" == "$PACKAGE_IDENTIFIER" ]] || die "PKG identifier mismatch: $package_path"
-  [[ "$package_version" =~ ^[0-9]+$ ]] || die "PKG version is not numeric: $package_path"
+  [[ "$package_version" =~ ^[0-9]+$ ]] || die "PKG version is not numeric: ${package_version:-<missing>} ($package_path)"
 
   case "$layout:$install_location" in
     root:/|component:/Applications) ;;
