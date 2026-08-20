@@ -48,3 +48,12 @@ jobs:
           pkg="artifacts/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned.pkg"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
           bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" 1
+      - name: Upload macOS validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-validation-${{ matrix.rid }}
+          path: |
+            artifacts/Roblox Account Manager.app
+            artifacts/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned.pkg
+          if-no-files-found: error
+          retention-days: 14
