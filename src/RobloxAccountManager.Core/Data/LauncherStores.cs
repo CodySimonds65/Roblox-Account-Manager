@@ -188,6 +188,7 @@ public static class ProfileTransferService
     {
         UpdateChecksEnabled = settings.UpdateChecksEnabled,
         UpdateChannel = settings.UpdateChannel,
+        ShowGamePresetPanel = settings.ShowGamePresetPanel,
         LaunchTimeoutSeconds = settings.LaunchTimeoutSeconds,
         LaunchDelaySeconds = settings.LaunchDelaySeconds,
         ContinueOnFailure = settings.ContinueOnFailure,

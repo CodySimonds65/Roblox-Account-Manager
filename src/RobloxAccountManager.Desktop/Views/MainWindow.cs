@@ -51,6 +51,7 @@ public sealed class MainWindow : Window
     private readonly Button _cancelLaunch = new();
     private readonly Button _retryFailed = new();
     private readonly Button _copyActivity = new();
+    private Button? _showPresets;
     private Button? _launchSelected;
     private Button? _queueLaunch;
     private readonly StackPanel _queueSummary = new() { Orientation = Orientation.Horizontal, Spacing = 7 };
@@ -188,6 +189,15 @@ public sealed class MainWindow : Window
         header.Children.Add(copy);
 
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        _showPresets = new Button { Content = "Show presets", Padding = new Thickness(13, 7), IsVisible = false };
+        StyleButton(_showPresets, secondary: true);
+        _showPresets.Click += async (_, _) =>
+        {
+            _viewModel.Settings.ShowGamePresetPanel = true;
+            await SaveAsync();
+            SelectPage("accounts");
+        };
+        actions.Children.Add(_showPresets);
         AddHeaderAction(actions, "Plugins", "plugins");
         AddHeaderAction(actions, "Settings", "settings");
         AddHeaderAction(actions, "Diagnostics", "diagnostics");
@@ -212,7 +222,14 @@ public sealed class MainWindow : Window
         actions.Children.Add(localOnly);
         Grid.SetColumn(actions, 1);
         header.Children.Add(actions);
+        UpdatePresetRevealButton();
         return header;
+    }
+
+    private void UpdatePresetRevealButton()
+    {
+        if (_showPresets is null) return;
+        _showPresets.IsVisible = !_viewModel.Settings.ShowGamePresetPanel || _viewModel.SelectedPage.Key == "clients";
     }
 
     private void AddHeaderAction(Panel panel, string title, string pageKey)
@@ -715,6 +732,7 @@ public sealed class MainWindow : Window
         var page = _viewModel.Pages.FirstOrDefault(candidate => string.Equals(candidate.Key, pageKey, StringComparison.Ordinal));
         if (page is null) return;
         _viewModel.SelectedPage = page;
+        UpdatePresetRevealButton();
         RenderPage();
     }
 
@@ -770,6 +788,7 @@ public sealed class MainWindow : Window
     private void RenderPage()
     {
         DetachBrowserHost();
+        UpdatePresetRevealButton();
         var isWorkspace = _viewModel.SelectedPage.Key is "accounts" or "browser";
         _pageTitle.Text = isWorkspace ? "Launch workspace" : _viewModel.SelectedPage.Title;
         _pageDescription.Text = isWorkspace ? "Choose profiles, pick a game, and launch every client in sequence." : _viewModel.PageStatus;
@@ -834,13 +853,30 @@ public sealed class MainWindow : Window
         };
         var presetActions = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 5 };
         presetActions.Children.Add(presetPicker);
-        var presetActionNames = new[] { ("＋", "Add preset", "add"), ("−", "Remove preset", "remove"), ("✎", "Edit preset", "edit"), ("⧉", "Duplicate preset", "duplicate"), ("⇩", "Import presets", "import"), ("⇧", "Export presets", "export") };
+        var presetActionNames = new[]
+        {
+            (Label: "Add preset", Key: "add"),
+            (Label: "Remove preset", Key: "remove"),
+            (Label: "Edit preset", Key: "edit"),
+            (Label: "Duplicate preset", Key: "duplicate"),
+            (Label: "Import presets", Key: "import"),
+            (Label: "Export presets", Key: "export")
+        };
         for (var i = 0; i < presetActionNames.Length; i++)
         {
-            var action = new Button { Content = presetActionNames[i].Item1, Width = 34, Height = 34, Padding = new Thickness(0), IsEnabled = presetActionNames[i].Item3 is "add" or "import" or "export" || presetActionNames[i].Item3 is "duplicate" && selectedPreset?.Url is not null && selectedPreset.Url.Length > 0 || presetActionNames[i].Item3 is "remove" or "edit" && selectedPreset is { IsBuiltIn: false } };
-            ToolTip.SetTip(action, presetActionNames[i].Item2);
+            var action = new Button
+            {
+                Content = BuildPresetActionIcon(presetActionNames[i].Key),
+                Width = 34,
+                Height = 34,
+                Padding = new Thickness(0),
+                IsEnabled = presetActionNames[i].Key is "add" or "import" or "export"
+                    || presetActionNames[i].Key is "duplicate" && selectedPreset?.Url is not null && selectedPreset.Url.Length > 0
+                    || presetActionNames[i].Key is "remove" or "edit" && selectedPreset is { IsBuiltIn: false }
+            };
+            ToolTip.SetTip(action, presetActionNames[i].Label);
             StyleButton(action, secondary: true);
-            var actionKey = presetActionNames[i].Item3;
+            var actionKey = presetActionNames[i].Key;
             action.Click += async (_, _) => await HandlePresetActionAsync(actionKey);
             Grid.SetColumn(action, i + 1);
             presetActions.Children.Add(action);
@@ -943,14 +979,45 @@ public sealed class MainWindow : Window
         browserBody.Children.Add(_browserHost);
         var browserCard = new Border { Background = SurfaceBrush, BorderBrush = ControlBorderBrush, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), ClipToBounds = true, Child = browserBody };
 
-        var workspace = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto"), RowSpacing = 14, ClipToBounds = true };
-        workspace.Children.Add(presetBar);
+        var showPresetPanel = _viewModel.Settings.ShowGamePresetPanel;
+        var workspace = new Grid
+        {
+            RowDefinitions = new RowDefinitions(showPresetPanel ? "Auto,*,Auto" : "*,Auto"),
+            RowSpacing = 14,
+            ClipToBounds = true
+        };
+        if (showPresetPanel) workspace.Children.Add(presetBar);
         Grid.SetRow(browserCard, 1);
+        if (!showPresetPanel) Grid.SetRow(browserCard, 0);
         workspace.Children.Add(browserCard);
         var hint = new TextBlock { Text = "Sessions stay isolated and local to this PC. Browser data is never included in exports.", FontSize = 11, Foreground = MutedTextBrush, Margin = new Thickness(3, 0, 3, 0) };
-        Grid.SetRow(hint, 2);
+        Grid.SetRow(hint, showPresetPanel ? 2 : 1);
         workspace.Children.Add(hint);
         return workspace;
+    }
+
+    private static Control BuildPresetActionIcon(string action)
+    {
+        var data = action switch
+        {
+            "add" => "M10 4H14V10H20V14H14V20H10V14H4V10H10Z",
+            "remove" => "M4 10H20V14H4Z",
+            "edit" => "M5 17.5V20H7.5L19 8.5L15.5 5L5 15.5Z M14 6.5L17.5 10",
+            "duplicate" => "M7 7H18V18H7Z M4 4H15V7H7V15H4Z",
+            "import" => "M10 4H14V12H18L12 18L6 12H10Z M4 19H20V22H4Z",
+            "export" => "M10 15H14V7H18L12 1L6 7H10Z M4 19H20V22H4Z",
+            _ => "M4 4H20V20H4Z"
+        };
+        return new Avalonia.Controls.Shapes.Path
+        {
+            Data = Geometry.Parse(data),
+            Fill = TextBrush,
+            Width = 16,
+            Height = 16,
+            Stretch = Stretch.Uniform,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
     }
 
     private Grid BuildSessionNavigationBar()
@@ -1205,6 +1272,7 @@ public sealed class MainWindow : Window
         var remember = new CheckBox { Content = "Remember account and preset selections", IsChecked = _viewModel.Settings.RememberSelections };
         var clearSessions = new CheckBox { Content = "Clear all Roblox browser sessions on next restart", IsChecked = _viewModel.Settings.ClearBrowserDataOnNextStart };
         var updates = new CheckBox { Content = "Enable automatic updates", IsChecked = _viewModel.Settings.UpdateChecksEnabled };
+        var showGamePresetPanel = new CheckBox { Content = "Show game preset panel on the launch workspace", IsChecked = _viewModel.Settings.ShowGamePresetPanel };
         var channel = new ComboBox { ItemsSource = Enum.GetNames<UpdateChannel>(), SelectedItem = _viewModel.Settings.UpdateChannel.ToString(), MinWidth = 150 };
         var validation = new TextBlock { Foreground = DangerTextBrush, TextWrapping = TextWrapping.Wrap };
         var save = new Button { Content = "Save general settings" };
@@ -1225,8 +1293,11 @@ public sealed class MainWindow : Window
             _viewModel.Settings.ClearBrowserDataOnNextStart = clearSessions.IsChecked == true;
             _viewModel.Settings.UpdateChecksEnabled = updates.IsChecked == true;
             _viewModel.Settings.UpdateChannel = selectedChannel;
+            _viewModel.Settings.ShowGamePresetPanel = showGamePresetPanel.IsChecked == true;
             validation.Text = string.Empty;
             await SaveAsync();
+            UpdatePresetRevealButton();
+            RenderPage();
         };
         var checkNow = new Button { Content = "Check now" };
         StyleButton(checkNow, secondary: true);
@@ -1243,7 +1314,7 @@ public sealed class MainWindow : Window
         panel.Children.Add(new TextBlock { Text = "Launch timeout (seconds)" }); panel.Children.Add(timeout);
         panel.Children.Add(new TextBlock { Text = "Delay between accounts (seconds)" }); panel.Children.Add(delay);
         panel.Children.Add(new TextBlock { Text = "Preferred launcher" }); panel.Children.Add(preferred);
-        panel.Children.Add(continueOnFailure); panel.Children.Add(remember); panel.Children.Add(clearSessions); panel.Children.Add(updateRow);
+        panel.Children.Add(continueOnFailure); panel.Children.Add(remember); panel.Children.Add(clearSessions); panel.Children.Add(showGamePresetPanel); panel.Children.Add(updateRow);
         panel.Children.Add(new TextBlock { Text = "Signed packages install automatically after validation. Unsigned packages always ask once before Apple Installer opens.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(validation); panel.Children.Add(save);
         return panel;
