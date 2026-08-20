@@ -67,6 +67,21 @@ Require(GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/games/123/e
     "A valid Roblox game URL was not normalized.");
 Require(!GamePreset.TryNormalizeRobloxGameUrl("https://roblox.com.evil.example/games/123", out _),
     "A lookalike Roblox game URL was accepted.");
+const string privateServerShare = "https://www.roblox.com/share?code=b5f0d0b82d5a53419841df9f978bed53&type=Server";
+Require(GamePreset.TryNormalizeRobloxGameUrl(privateServerShare, out var normalizedPrivateServer)
+        && normalizedPrivateServer == privateServerShare,
+    "A Roblox private server share URL was rejected or changed.");
+Require(GamePreset.TryNormalizeRobloxGameUrl(
+            "https://roblox.com/share?code=share-code%2Bwith%2Fsymbols&type=server&source=invite",
+            out var canonicalPrivateServer)
+        && canonicalPrivateServer == "https://www.roblox.com/share?code=share-code%2Bwith%2Fsymbols&type=server&source=invite",
+    "A bare-host private server share URL was not canonicalized while preserving its query.");
+Require(!GamePreset.TryNormalizeRobloxGameUrl("http://www.roblox.com/share?code=secret&type=Server", out _),
+    "An HTTP private server share URL was accepted.");
+Require(!GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/share?type=Server", out _),
+    "A private server share URL without a code was accepted.");
+Require(!GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/share?code=secret&type=Experience", out _),
+    "A non-server Roblox share URL was accepted as a private server link.");
 var resolvedSettings = GameSettings.Resolve(
     new GameSettings { GraphicsQuality = 3, FpsLimit = 60 },
     new GameSettings { GraphicsQuality = 6 },
