@@ -153,7 +153,7 @@ public sealed class MacGitHubReleaseUpdateSource : IPlatformUpdateSource
             PathSafety.EnsureOwnerOnlyDirectory(expansionParent);
             var expanded = await _commandRunner.RunAsync(
                 "/usr/sbin/pkgutil",
-                ["--expand-full", "--", packagePath, expansionRoot],
+                ["--expand-full", packagePath, expansionRoot],
                 cancellationToken).ConfigureAwait(false);
             if (!expanded.Succeeded) return null;
 

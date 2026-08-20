@@ -57,6 +57,7 @@ public sealed class MainWindow : Window
     private readonly ListBox _accountsRail = new();
     private readonly Dictionary<string, Border> _accountCards = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CheckBox> _accountChecks = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Window> _utilityWindows = new(StringComparer.Ordinal);
     private readonly AvaloniaAccountBrowserSessionService _browserSessions;
     private readonly SerializedLaunchCoordinator? _launches;
     private readonly CoreClientWindowManager? _clients;
@@ -98,8 +99,11 @@ public sealed class MainWindow : Window
         _activity.IsReadOnly = true;
         _activity.AcceptsReturn = true;
         _activity.TextWrapping = TextWrapping.NoWrap;
-        _activity.MinHeight = 96;
+        _activity.MinHeight = 0;
         _activity.VerticalAlignment = VerticalAlignment.Stretch;
+        _activity.ClipToBounds = true;
+        ScrollViewer.SetHorizontalScrollBarVisibility(_activity, ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(_activity, ScrollBarVisibility.Auto);
         _activity.Background = InputBrush;
         _activity.Foreground = TextBrush;
         _activity.BorderBrush = ControlBorderBrush;
@@ -162,6 +166,11 @@ public sealed class MainWindow : Window
         grid.Children.Add(workspace);
         Content = grid;
         Opened += async (_, _) => await InitializeAsync();
+        Closed += (_, _) =>
+        {
+            foreach (var utilityWindow in _utilityWindows.Values.ToArray()) utilityWindow.Close();
+            _utilityWindows.Clear();
+        };
     }
 
     private Control BuildWorkspaceHeader()
@@ -210,8 +219,69 @@ public sealed class MainWindow : Window
     {
         var button = new Button { Content = title, Padding = new Thickness(13, 7) };
         StyleButton(button, secondary: true);
-        button.Click += (_, _) => SelectPage(pageKey);
+        button.Click += (_, _) => OpenUtilityWindow(pageKey);
         panel.Children.Add(button);
+    }
+
+    private void OpenUtilityWindow(string pageKey)
+    {
+        if (_utilityWindows.TryGetValue(pageKey, out var existing))
+        {
+            existing.WindowState = WindowState.Normal;
+            existing.Activate();
+            return;
+        }
+
+        var page = _viewModel.Pages.FirstOrDefault(candidate => string.Equals(candidate.Key, pageKey, StringComparison.Ordinal));
+        if (page is null) return;
+
+        Window? window = null;
+        void Refresh()
+        {
+            if (window is not null) window.Content = BuildUtilityWindowContent(page, Refresh);
+        }
+
+        window = new Window
+        {
+            Title = $"{page.Title} — Roblox Account Manager",
+            Width = pageKey == "settings" ? 1120 : 920,
+            Height = pageKey == "settings" ? 780 : 680,
+            MinWidth = pageKey == "settings" ? 920 : 720,
+            MinHeight = 520,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = AppBackgroundBrush,
+            Foreground = TextBrush
+        };
+        window.Closed += (_, _) => _utilityWindows.Remove(pageKey);
+        window.Content = BuildUtilityWindowContent(page, Refresh);
+        _utilityWindows[pageKey] = window;
+        window.Show(this);
+        window.Activate();
+    }
+
+    private Control BuildUtilityWindowContent(NavigationItemViewModel page, Action refresh)
+    {
+        var header = new StackPanel { Spacing = 3, Margin = new Thickness(0, 0, 0, 14) };
+        header.Children.Add(new TextBlock { Text = page.Title, FontSize = 25, FontWeight = FontWeight.Bold });
+        header.Children.Add(new TextBlock { Text = page.Description, Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap });
+        var content = page.Key switch
+        {
+            "settings" => BuildSettingsPage(),
+            "plugins" => BuildPluginsPage(refresh),
+            "diagnostics" => BuildDiagnosticsPage(),
+            _ => new TextBlock { Text = "This utility window is unavailable." }
+        };
+        var scroll = new ScrollViewer
+        {
+            Content = content,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Top
+        };
+        var layout = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), RowSpacing = 0, Children = { header, scroll } };
+        Grid.SetRow(scroll, 1);
+        return new Border { Background = AppBackgroundBrush, Padding = new Thickness(22), Child = layout };
     }
 
     private Border BuildSidebar()
@@ -568,7 +638,16 @@ public sealed class MainWindow : Window
 
         Grid.SetRow(_activity, 2);
         layout.Children.Add(_activity);
-        return new Border { Background = SurfaceBrush, BorderBrush = ControlBorderBrush, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), Padding = new Thickness(13), Child = layout };
+        return new Border
+        {
+            Background = SurfaceBrush,
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            ClipToBounds = true,
+            Padding = new Thickness(13),
+            Child = layout
+        };
     }
 
     private void RefreshQueueSummary()
@@ -828,24 +907,7 @@ public sealed class MainWindow : Window
         Grid.SetColumn(login, 2);
         Grid.SetColumn(launch, 3);
 
-        var sessionHeader = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Background = ElevatedBrush, MinHeight = 46 };
-        var sessionName = _viewModel.SelectedAccount?.Label ?? "No profile selected";
-        var sessionTitle = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(15, 0) };
-        sessionTitle.Children.Add(new Ellipse { Width = 8, Height = 8, Fill = AccentBrush });
-        sessionTitle.Children.Add(new TextBlock { Text = sessionName, FontSize = 13, FontWeight = FontWeight.SemiBold });
-        sessionTitle.Children.Add(new TextBlock { Text = "•  SESSION", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush, VerticalAlignment = VerticalAlignment.Center });
-        sessionHeader.Children.Add(sessionTitle);
-        var sessionActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
-        var browse = new Button { Content = "Browse", Padding = new Thickness(14, 5) };
-        StyleButton(browse, secondary: true);
-        browse.Click += (_, _) => SelectPage("browser");
-        var clients = new Button { Content = "Clients", Padding = new Thickness(14, 5) };
-        StyleButton(clients, secondary: true);
-        clients.Click += (_, _) => SelectPage("clients");
-        sessionActions.Children.Add(browse);
-        sessionActions.Children.Add(clients);
-        Grid.SetColumn(sessionActions, 1);
-        sessionHeader.Children.Add(sessionActions);
+        var sessionHeader = BuildSessionNavigationBar();
 
         _browserHost.MinHeight = 160;
         _browserHost.HorizontalAlignment = HorizontalAlignment.Stretch;
@@ -889,6 +951,30 @@ public sealed class MainWindow : Window
         Grid.SetRow(hint, 2);
         workspace.Children.Add(hint);
         return workspace;
+    }
+
+    private Grid BuildSessionNavigationBar()
+    {
+        var sessionHeader = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Background = ElevatedBrush, MinHeight = 46 };
+        var sessionName = _viewModel.SelectedAccount?.Label ?? "No profile selected";
+        var sessionTitle = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(15, 0) };
+        sessionTitle.Children.Add(new Ellipse { Width = 8, Height = 8, Fill = AccentBrush });
+        sessionTitle.Children.Add(new TextBlock { Text = sessionName, FontSize = 13, FontWeight = FontWeight.SemiBold });
+        sessionTitle.Children.Add(new TextBlock { Text = "•  SESSION", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush, VerticalAlignment = VerticalAlignment.Center });
+        sessionHeader.Children.Add(sessionTitle);
+
+        var sessionActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
+        var browse = new Button { Content = "Browse", Padding = new Thickness(14, 5) };
+        StyleButton(browse, secondary: true);
+        browse.Click += (_, _) => SelectPage("browser");
+        var clients = new Button { Content = "Clients", Padding = new Thickness(14, 5) };
+        StyleButton(clients, secondary: true);
+        clients.Click += (_, _) => SelectPage("clients");
+        sessionActions.Children.Add(browse);
+        sessionActions.Children.Add(clients);
+        Grid.SetColumn(sessionActions, 1);
+        sessionHeader.Children.Add(sessionActions);
+        return sessionHeader;
     }
 
     private async Task HandlePresetActionAsync(string action)
@@ -1021,6 +1107,7 @@ public sealed class MainWindow : Window
     private Control BuildClientsPage()
     {
         var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(BuildSessionNavigationBar());
         if (_clients is null)
         {
             panel.Children.Add(new TextBlock { Text = "Client management is unavailable on this platform." });
@@ -1044,7 +1131,7 @@ public sealed class MainWindow : Window
     private async Task RefreshClientsAsync(StackPanel panel)
     {
         if (_clients is null) return;
-        while (panel.Children.Count > 2) panel.Children.RemoveAt(2);
+        while (panel.Children.Count > 3) panel.Children.RemoveAt(3);
         var windows = await _clients.GetWindowsAsync();
         foreach (var window in windows)
         {
@@ -1059,7 +1146,23 @@ public sealed class MainWindow : Window
         if (windows.Count == 0) panel.Children.Add(new TextBlock { Text = "No RAM-managed Roblox clients are running.", Opacity = 0.65 });
     }
 
-    private Control BuildActivityPage() => Card(new StackPanel { Spacing = 8, Children = { new TextBlock { Text = "Sanitized activity", FontWeight = FontWeight.SemiBold }, new TextBlock { Text = _viewModel.Activity, TextWrapping = TextWrapping.Wrap } } });
+    private Control BuildActivityPage()
+    {
+        var log = new TextBlock { Text = _viewModel.Activity, TextWrapping = TextWrapping.NoWrap };
+        var scroll = new ScrollViewer
+        {
+            Content = log,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            VerticalContentAlignment = VerticalAlignment.Top
+        };
+        var layout = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), RowSpacing = 8 };
+        layout.Children.Add(new TextBlock { Text = "Sanitized activity", FontWeight = FontWeight.SemiBold });
+        Grid.SetRow(scroll, 1);
+        layout.Children.Add(scroll);
+        return Card(layout);
+    }
 
     private Control BuildSettingsPage()
     {
@@ -1075,13 +1178,23 @@ public sealed class MainWindow : Window
         return Card(tabs);
     }
 
-    private static ScrollViewer ScrollSettings(Control content) => new()
+    private static ScrollViewer ScrollSettings(Control content)
     {
-        Content = content,
-        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-        HorizontalContentAlignment = HorizontalAlignment.Stretch
-    };
+        var viewer = new ScrollViewer
+        {
+            Content = content,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Top
+        };
+
+        // A newly selected settings tab must start at its first section. Without an explicit
+        // top alignment Avalonia can preserve the focused numeric editor's bring-into-view
+        // offset, which hides the General heading and timeout controls on macOS.
+        viewer.AttachedToVisualTree += (_, _) => viewer.Offset = new Vector(0, 0);
+        return viewer;
+    }
 
     private Control BuildGeneralSettingsTab()
     {
@@ -1272,7 +1385,7 @@ public sealed class MainWindow : Window
         return parsed;
     }
 
-    private Control BuildPluginsPage()
+    private Control BuildPluginsPage(Action? refresh = null)
     {
         var panel = new StackPanel { Spacing = 8 };
         panel.Children.Add(new TextBlock { Text = "Plugins", FontSize = 18, FontWeight = FontWeight.SemiBold });
@@ -1286,19 +1399,19 @@ public sealed class MainWindow : Window
             var source = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "roblox-plugin");
             var result = await _viewModel.PluginHost.InstallFromDirectoryAsync(source, userConfirmed: true);
             _viewModel.AppendActivity(result.Succeeded ? $"Installed plugin {result.PluginId}." : $"Plugin install rejected: {result.DiagnosticCode}.");
-            RenderPage();
+            if (refresh is null) RenderPage(); else refresh();
         };
         panel.Children.Add(install);
-        var refresh = new Button { Content = "Refresh installed plugins" };
-        refresh.Click += async (_, _) =>
+        var refreshPlugins = new Button { Content = "Refresh installed plugins" };
+        refreshPlugins.Click += async (_, _) =>
         {
             if (_viewModel.PluginHost is null) return;
             var ids = await _viewModel.PluginHost.GetInstalledPluginIdsAsync();
             var running = await _viewModel.PluginHost.GetRunningPluginIdsAsync();
             _viewModel.AppendActivity(ids.Count == 0 ? "No macOS plugins are installed." : $"Installed plugins: {string.Join(", ", ids)}; running: {string.Join(", ", running)}");
-            RenderPage();
+            if (refresh is null) RenderPage(); else refresh();
         };
-        panel.Children.Add(refresh);
+        panel.Children.Add(refreshPlugins);
         if (_viewModel.PluginHost is not null)
         {
             var ids = _viewModel.PluginHost.GetInstalledPluginIdsAsync().AsTask().GetAwaiter().GetResult();
@@ -1310,14 +1423,14 @@ public sealed class MainWindow : Window
                 {
                     var result = await _viewModel.PluginHost.StartAsync(id, userConfirmed: true);
                     _viewModel.AppendActivity(result.Succeeded ? $"Started plugin {id}." : $"Plugin start rejected: {result.DiagnosticCode}.");
-                    RenderPage();
+                    if (refresh is null) RenderPage(); else refresh();
                 };
                 var stop = new Button { Content = "Stop", IsEnabled = running.Contains(id) };
                 stop.Click += async (_, _) =>
                 {
                     var result = await _viewModel.PluginHost.StopAsync(id);
                     _viewModel.AppendActivity(result.Succeeded ? $"Stopped plugin {id}." : $"Plugin stop rejected: {result.DiagnosticCode}.");
-                    RenderPage();
+                    if (refresh is null) RenderPage(); else refresh();
                 };
                 panel.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { new TextBlock { Text = id, Width = 300, VerticalAlignment = VerticalAlignment.Center }, start, stop } });
             }
