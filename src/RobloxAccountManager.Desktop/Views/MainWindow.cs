@@ -87,6 +87,7 @@ public sealed class MainWindow : Window
         _clients = clients;
         _updateSource = updateSource;
         _validationMode = validationMode;
+        _browserSessions.NavigationDiagnostic += AppendNavigationDiagnostic;
         Title = "Roblox Account Manager";
         Width = 1380;
         Height = 860;
@@ -1743,6 +1744,14 @@ public sealed class MainWindow : Window
                     if (!_viewModel.Settings.ContinueOnFailure) break;
                     continue;
                 }
+                if (OperatingSystem.IsMacOS())
+                {
+                    foreach (var attempt in result.Attempts)
+                    {
+                        _viewModel.AppendActivity(
+                            $"{item.Label}: macOS native attempt {attempt.Attempt}={LaunchDiagnostics.SanitiseCode(attempt.DiagnosticCode)}.");
+                    }
+                }
                 item.State = result.Succeeded ? LaunchQueueState.Running : LaunchQueueState.Failed;
                 item.Detail = result.Succeeded ? "Verified process started" : result.FailureKind.ToString();
                 RefreshQueueSummary();
@@ -1807,11 +1816,13 @@ public sealed class MainWindow : Window
                         previousStatus = status;
                         _viewModel.AppendActivity($"{account.Label}: {DescribeMacPlayStatus(status)}.");
                     });
-                return await coordinator.CaptureAsync(
+                var launchUri = await coordinator.CaptureAsync(
                     account.Id,
                     new Uri(gameUrl),
                     TimeSpan.FromSeconds(Math.Clamp(_viewModel.Settings.LaunchTimeoutSeconds, 15, 180)),
                     cancellationToken);
+                _viewModel.AppendActivity($"{account.Label}: Roblox launch handoff captured; native launch starting.");
+                return launchUri;
             }
 
             var pending = _browserSessions.BeginLaunchCapture(account.Id, cancellationToken);
@@ -1911,6 +1922,19 @@ public sealed class MainWindow : Window
         RobloxPlayControlStatus.WrongOrigin => "Roblox Play control blocked on an untrusted page",
         _ => "Roblox Play control is not ready"
     };
+
+    private void AppendNavigationDiagnostic(string message)
+    {
+        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
+        {
+            _viewModel.AppendActivity(message);
+            return;
+        }
+
+        Avalonia.Threading.Dispatcher.UIThread.Post(
+            () => _viewModel.AppendActivity(message),
+            Avalonia.Threading.DispatcherPriority.Normal);
+    }
 
     private async Task<bool> OpenAccountAsync(AccountProfile account, bool navigate = true)
     {

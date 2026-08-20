@@ -84,6 +84,28 @@ var newWindowLaunch = RobloxNavigationCapturePolicy.Evaluate(
 Require(newWindowLaunch?.Accepted == true,
     "A Roblox launch opened as a WebView new-window navigation was not captured.");
 
+var resourceGate = new RobloxNavigationGate();
+resourceGate.CommitTopLevelNavigation(new Uri("https://www.roblox.com/games/123/Test"), succeeded: true);
+Require(resourceGate.TryBeginLaunch(), "The resource-route gate did not enter a pending launch state.");
+var resourceDiagnostics = new List<string>();
+var resourceLaunch = RobloxNavigationCapturePolicy.Evaluate(
+    resourceGate,
+    new Uri("roblox-player:1+gameinfo:resource-route-ticket"),
+    "web-resource",
+    resourceDiagnostics.Add);
+Require(resourceLaunch?.Accepted == true
+        && resourceDiagnostics.SequenceEqual(["macos-route: web-resource scheme=roblox-player outcome=accepted"]),
+    "The WebView resource route was not captured with a redacted diagnostic description.");
+var duplicateLaunch = RobloxNavigationCapturePolicy.Evaluate(
+    resourceGate,
+    new Uri("roblox-player:1+gameinfo:duplicate-route-ticket"),
+    "new-window",
+    resourceDiagnostics.Add);
+Require(duplicateLaunch?.Accepted == false
+        && duplicateLaunch.DiagnosticCode == "launch-not-pending"
+        && resourceDiagnostics[^1] == "macos-route: new-window scheme=roblox-player outcome=rejected:launch-not-pending",
+    "A duplicate WebView route consumed the launch twice or leaked its ticket.");
+
 var launchSession = new FakeMacBrowserLaunchSession(
     new Uri("roblox-player:1+gameinfo:captured-ticket"),
     clickAfterPolls: 2);
