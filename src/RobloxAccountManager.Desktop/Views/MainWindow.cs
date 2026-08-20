@@ -319,6 +319,7 @@ public sealed class MainWindow : Window
             if (_suppressAccountSelection) return;
             foreach (var added in args.AddedItems.OfType<AccountProfile>()) _queueSelectedAccounts.Add(added.Id);
             foreach (var removed in args.RemovedItems.OfType<AccountProfile>()) _queueSelectedAccounts.Remove(removed.Id);
+            await SaveAsync();
             if (_accountsRail.SelectedItem is not AccountProfile account)
             {
                 if (_accountsRail.SelectedItems is null || _accountsRail.SelectedItems.Count == 0)
@@ -429,7 +430,7 @@ public sealed class MainWindow : Window
         var selectionActions = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 8 };
         var selectAll = new Button { Content = "Select all", Padding = new Thickness(10, 6) };
         StyleButton(selectAll, secondary: true);
-        selectAll.Click += (_, _) =>
+        selectAll.Click += async (_, _) =>
         {
             foreach (var account in _viewModel.Accounts) _queueSelectedAccounts.Add(account.Id);
             if (_viewModel.SelectedAccount is null && _viewModel.Accounts.Count > 0)
@@ -445,13 +446,14 @@ public sealed class MainWindow : Window
                 }
             }
             finally { _suppressAccountSelection = false; }
+            await SaveAsync();
             RefreshAccountRail();
             RenderPage();
         };
         selectionActions.Children.Add(selectAll);
         var selectNone = new Button { Content = "Select none", Padding = new Thickness(10, 6) };
         StyleButton(selectNone, secondary: true);
-        selectNone.Click += (_, _) =>
+        selectNone.Click += async (_, _) =>
         {
             _queueSelectedAccounts.Clear();
             _viewModel.SelectedAccount = null;
@@ -459,6 +461,7 @@ public sealed class MainWindow : Window
             _suppressAccountSelection = true;
             try { _accountsRail.SelectedItems?.Clear(); }
             finally { _suppressAccountSelection = false; }
+            await SaveAsync();
             RefreshAccountRail();
             RenderPage();
         };
@@ -543,6 +546,7 @@ public sealed class MainWindow : Window
         {
             if (open.IsChecked == true) _queueSelectedAccounts.Add(account.Id);
             else _queueSelectedAccounts.Remove(account.Id);
+            await SaveAsync();
             _suppressAccountSelection = true;
             try
             {
@@ -799,24 +803,31 @@ public sealed class MainWindow : Window
             };
             _activity.Text = _viewModel.Activity;
             var startupPlan = DesktopStartupPlan.Create(_viewModel.Accounts, _validationMode);
+            var restoredAccounts = DesktopStartupPlan.RestoreSelectedAccounts(_viewModel.Accounts, _viewModel.Settings);
             RenderPage();
-            if (startupPlan.InitialAccount is not null)
+            if (restoredAccounts.Count > 0)
             {
-                _viewModel.SelectedAccount = startupPlan.InitialAccount;
-                _queueSelectedAccounts.Add(_viewModel.SelectedAccount.Id);
+                _viewModel.SelectedAccount = restoredAccounts[0];
+                foreach (var account in restoredAccounts) _queueSelectedAccounts.Add(account.Id);
                 if (_validationMode != DesktopValidationMode.BrowserStartup)
                 {
                     _suppressAccountSelection = true;
-                    try { _accountsRail.SelectedItems?.Add(_viewModel.SelectedAccount); }
+                    try
+                    {
+                        if (_accountsRail.SelectedItems is not null)
+                        {
+                            foreach (var account in restoredAccounts) _accountsRail.SelectedItems.Add(account);
+                        }
+                    }
                     finally { _suppressAccountSelection = false; }
                 }
                 UpdateAccountSelectionVisuals();
                 RenderPage();
             }
-            if (startupPlan.ActivateBrowserOnStartup && startupPlan.InitialAccount is not null)
+            if (startupPlan.ActivateBrowserOnStartup && restoredAccounts.Count > 0)
             {
                 await Task.Delay(250);
-                await ValidateBrowserStartupAsync(startupPlan.InitialAccount);
+                await ValidateBrowserStartupAsync(restoredAccounts[0]);
             }
             else if (_validationMode == DesktopValidationMode.GuiStartup)
             {
@@ -1976,7 +1987,22 @@ public sealed class MainWindow : Window
 
     private async Task SaveAsync()
     {
-        try { await _viewModel.SaveAsync(); }
+        try
+        {
+            if (_viewModel.Settings.RememberSelections)
+            {
+                _viewModel.Settings.LastSelectedProfileIds = _viewModel.Accounts
+                    .Where(account => _queueSelectedAccounts.Contains(account.Id))
+                    .Select(account => account.Id)
+                    .ToList();
+            }
+            else
+            {
+                _viewModel.Settings.LastSelectedProfileIds.Clear();
+            }
+
+            await _viewModel.SaveAsync();
+        }
         catch (Exception exception) { _viewModel.AppendActivity($"Could not save local data: {exception.Message}"); }
     }
 

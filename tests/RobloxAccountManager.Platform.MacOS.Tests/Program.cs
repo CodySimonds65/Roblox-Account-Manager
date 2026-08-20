@@ -107,6 +107,22 @@ try
         [logsRoot]);
     Check(missing.StatusCode == "session-log-not-found",
         "A missing macOS Roblox session log did not produce a safe diagnostic code.");
+
+    var crashStart = DateTimeOffset.UtcNow.AddSeconds(-10);
+    var crashRoot = Path.Combine(diagnosticsRoot, "crash-reports");
+    Directory.CreateDirectory(crashRoot);
+    var crashPath = Path.Combine(crashRoot, "RobloxPlayer_vm-crash.ips");
+    await File.WriteAllTextAsync(crashPath,
+        "{\"process\":\"RobloxPlayer\",\"exception\":\"EXC_CRASH\",\"url\":\"https://www.roblox.com/share?code=crash-secret\",\"authorization\":\"Bearer crash-token\"}");
+    File.SetLastWriteTimeUtc(crashPath, crashStart.UtcDateTime.AddSeconds(2));
+    var crash = MacRobloxDiagnostics.Collect(crashStart, [crashRoot], artifactRoot);
+    Check(crash.StatusCode == "crash-report-found"
+          && crash.Summary.Any(line => line.Contains("crash report", StringComparison.OrdinalIgnoreCase)),
+        "A Roblox crash report was not surfaced when no session log matched.");
+    Check(crash.RedactedTail.Any(line => line.Contains("[REDACTED]", StringComparison.Ordinal))
+          && crash.RedactedTail.All(line => !line.Contains("crash-secret", StringComparison.Ordinal))
+          && crash.RedactedTail.All(line => !line.Contains("crash-token", StringComparison.Ordinal)),
+        "Sensitive data was retained in the redacted Roblox crash report.");
 }
 finally
 {

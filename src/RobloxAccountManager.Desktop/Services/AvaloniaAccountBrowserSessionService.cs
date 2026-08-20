@@ -100,9 +100,20 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
         view.NavigationCompleted += (_, args) => gate.CommitTopLevelNavigation(args.Request, args.IsSuccess);
         view.NavigationStarted += (_, args) =>
         {
-            if (args.Request is null || !RobloxNavigationGate.IsRobloxScheme(args.Request)) return;
+            var result = RobloxNavigationCapturePolicy.Evaluate(gate, args.Request);
+            if (result is null) return;
             args.Cancel = true;
-            var result = gate.Evaluate(args.Request);
+            if (result.Accepted)
+            {
+                var pending = Interlocked.Exchange(ref session.PendingLaunch, null);
+                pending?.TrySetResult(result);
+            }
+        };
+        view.NewWindowRequested += (_, args) =>
+        {
+            var result = RobloxNavigationCapturePolicy.Evaluate(gate, args.Request);
+            if (result is null) return;
+            args.Handled = true;
             if (result.Accepted)
             {
                 var pending = Interlocked.Exchange(ref session.PendingLaunch, null);
