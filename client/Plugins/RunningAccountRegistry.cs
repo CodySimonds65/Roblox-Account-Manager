@@ -22,6 +22,7 @@ public sealed class RunningAccountRegistry : IDisposable
     // transient HWND loss is not mistaken for a dead process, while still
     // cleaning up clients that have been closed natively.
     private static readonly TimeSpan MissingWindowGracePeriod = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ExecutableIdentityStartupGracePeriod = TimeSpan.FromSeconds(2);
 
     public event EventHandler<ManagedAccountSnapshot>? AccountChanged;
     public event EventHandler<ManagedAccountSnapshot>? AccountExited;
@@ -56,7 +57,7 @@ public sealed class RunningAccountRegistry : IDisposable
         if (process.HasExited)
             throw new InvalidOperationException("A process that has already exited cannot be registered.");
         var startTicks = process.StartTime.ToUniversalTime().Ticks;
-        var executablePath = TryGetExecutablePath(process);
+        var executablePath = TryGetExecutablePathDuringStartup(process);
         if (string.IsNullOrWhiteSpace(executablePath))
             throw new InvalidOperationException("The process executable identity could not be verified.");
         lock (_gate)
@@ -633,6 +634,30 @@ public sealed class RunningAccountRegistry : IDisposable
         {
             return null;
         }
+    }
+
+    private static string? TryGetExecutablePathDuringStartup(Process process)
+    {
+        var deadline = DateTime.UtcNow + ExecutableIdentityStartupGracePeriod;
+        do
+        {
+            try
+            {
+                process.Refresh();
+                if (process.HasExited) return null;
+                var executablePath = TryGetExecutablePath(process);
+                if (!string.IsNullOrWhiteSpace(executablePath)) return executablePath;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+            {
+                if (process.HasExited) return null;
+            }
+
+            Thread.Sleep(25);
+        }
+        while (DateTime.UtcNow < deadline);
+
+        return null;
     }
 
     private static Process? TryGetValidatedProcess(RunningAccountRecord expected)
