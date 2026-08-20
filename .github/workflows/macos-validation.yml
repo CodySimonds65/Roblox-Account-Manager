@@ -46,22 +46,36 @@ jobs:
           set -euo pipefail
           app="artifacts/Roblox Account Manager.app"
           pkg="artifacts/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned.pkg"
+          newer_pkg="$RUNNER_TEMP/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned-v2.pkg"
+          component_pkg="$RUNNER_TEMP/RobloxAccountManager-validation-${{ matrix.rid }}-component-v1.pkg"
+          component_newer_pkg="$RUNNER_TEMP/RobloxAccountManager-validation-${{ matrix.rid }}-component-v2.pkg"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
           bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" 1
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 2" "$app/Contents/Info.plist"
+          bash build/macos/package-pkg.sh --unsigned "$app" "$newer_pkg" "${{ matrix.rid }}" 2
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
+          bash build/macos/package-pkg.sh --component --unsigned "$app" "$component_pkg" "${{ matrix.rid }}" 1
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 2" "$app/Contents/Info.plist"
+          bash build/macos/package-pkg.sh --component --unsigned "$app" "$component_newer_pkg" "${{ matrix.rid }}" 2
       - name: Smoke-test unsigned PKG installation
         run: |
           set -euo pipefail
-          image="$RUNNER_TEMP/ram-pkg-install.dmg"
-          mountpoint="$RUNNER_TEMP/ram-pkg-install-volume"
           pkg="artifacts/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned.pkg"
-          mkdir -p "$mountpoint"
-          hdiutil create -quiet -size 512m -fs APFS -volname "RAM PKG Smoke" "$image"
-          hdiutil attach -quiet -nobrowse -mountpoint "$mountpoint" "$image"
-          cleanup() { hdiutil detach -quiet "$mountpoint" || true; }
-          trap cleanup EXIT
-          sudo -n installer -allowUntrusted -pkg "$pkg" -target "$mountpoint"
-          test -d "$mountpoint/Applications/Roblox Account Manager.app"
-          test -x "$mountpoint/Applications/Roblox Account Manager.app/Contents/MacOS/RobloxAccountManager"
+          newer_pkg="$RUNNER_TEMP/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned-v2.pkg"
+          component_pkg="$RUNNER_TEMP/RobloxAccountManager-validation-${{ matrix.rid }}-component-v1.pkg"
+          component_newer_pkg="$RUNNER_TEMP/RobloxAccountManager-validation-${{ matrix.rid }}-component-v2.pkg"
+          bash build/macos/smoke-install-pkg.sh "$pkg" "$newer_pkg"
+          bash build/macos/smoke-install-pkg.sh "$component_pkg" "$component_newer_pkg"
+          # Release workflows use the component format. The isolated-volume
+          # tests above run on both architectures; the host-root smoke is
+          # limited to Apple Silicon because the Intel hosted runner does not
+          # materialize unsigned app payloads under /Applications even though
+          # installer reports success.
+          if [[ "${{ matrix.rid }}" == "osx-arm64" ]]; then
+            bash build/macos/smoke-install-root-pkg.sh "$component_pkg"
+          else
+            echo "Skipping host-root PKG smoke on Intel; isolated target-volume coverage passed."
+          fi
       - name: Upload macOS validation artifacts
         uses: actions/upload-artifact@v4
         with:

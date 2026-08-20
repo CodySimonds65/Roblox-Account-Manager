@@ -1566,15 +1566,43 @@ public sealed class MainWindow : Window
 
             var result = await _viewModel.UpdateInstaller.InstallAsync(package, userConfirmed: true);
             _viewModel.AppendActivity(result.Accepted
-                ? $"{channel} update verified; Apple Installer opened."
+                ? $"{channel} update verified; Apple Installer opened. Restart RAM after installation completes."
                 : $"{channel} update rejected: {result.DiagnosticCode}.");
         }
         catch (OperationCanceledException) { }
+        catch (System.Net.Http.HttpRequestException exception)
+            when (IsTlsFailure(exception))
+        {
+            _viewModel.AppendActivity("Update check skipped: TLS connection could not be established. Check the system date, certificates, proxy, or network and retry.");
+        }
+        catch (System.Net.Http.HttpRequestException)
+        {
+            _viewModel.AppendActivity("Update check skipped: the update service could not be reached. Retry when online.");
+        }
         catch (Exception exception)
         {
             _viewModel.AppendActivity($"Update check failed safely: {LaunchDiagnostics.SanitiseCode(exception.Message)}.");
         }
     }
+
+    private static bool ContainsException<T>(Exception exception)
+        where T : Exception
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is T)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsTlsFailure(System.Net.Http.HttpRequestException exception) =>
+        ContainsException<System.Security.Authentication.AuthenticationException>(exception)
+        || exception.Message.Contains("SSL connection could not be established", StringComparison.OrdinalIgnoreCase)
+        || exception.Message.Contains("TLS", StringComparison.OrdinalIgnoreCase);
 
     private async Task RunLaunchQueueAsync(GamePreset? preset, IReadOnlyList<AccountProfile> accounts)
     {

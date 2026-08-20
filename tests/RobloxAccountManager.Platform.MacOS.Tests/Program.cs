@@ -24,6 +24,10 @@ void Skip(string message)
     skipped++;
 }
 
+var installerHandoff = Contracts.UpdateInstallResult.InstallerOpened();
+Check(installerHandoff.Accepted && installerHandoff.DiagnosticCode == "installer-opened",
+    "The macOS update result did not distinguish an installer handoff from completed installation.");
+
 // sem_unlink's native call is not made off-host; its return/errno mapping is pure and exhaustive.
 Check(MacSemaphoreMapping.Map(0, 0).Status == SingletonReleaseStatus.Removed,
     "sem_unlink(0) was not mapped to Removed.");

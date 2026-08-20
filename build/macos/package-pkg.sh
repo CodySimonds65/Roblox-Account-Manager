@@ -13,12 +13,14 @@ die() {
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  package-pkg.sh <app> <output-pkg> <rid> <numeric-version> <Developer-ID-Installer-identity> [Developer-ID-Application-identity]
-  package-pkg.sh --unsigned <app> <output-pkg> <rid> <numeric-version>
+  package-pkg.sh [--component] <app> <output-pkg> <rid> <numeric-version> <Developer-ID-Installer-identity> [Developer-ID-Application-identity]
+  package-pkg.sh [--component] --unsigned <app> <output-pkg> <rid> <numeric-version>
   package-pkg.sh --verify <signed-and-stapled-pkg> [Developer-ID-Installer-identity]
 
-The build form creates a script-free root package. Gatekeeper and staple
-validation are performed by the --verify form after notarization/stapling.
+The default build form creates a script-free root package with an explicit
+Applications/ payload. --component creates the legacy component form for
+compatibility testing. Gatekeeper and staple validation are performed by the
+--verify form after notarization/stapling.
 The --unsigned form is an explicitly labeled temporary testing path; it never
 claims Gatekeeper trust and must not be used for public releases.
 EOF
@@ -59,6 +61,7 @@ validate_script_free_component() {
   local temp_root="$2"
   local expected_installer_label="${3:-}"
   local require_signature="${4:-true}"
+  local expected_install_location="${5:-any}"
   local payload_list="$temp_root/payload-files.txt"
   local expanded="$temp_root/expanded"
 
@@ -72,26 +75,48 @@ validate_script_free_component() {
   fi
 
   pkgutil --payload-files "$package_path" > "$payload_list"
-  if ! awk '
-    BEGIN {
-      prefix1 = "Applications/Roblox Account Manager.app/"
-    }
-    $0 == "" { next }
+  rejected_payloads="$temp_root/rejected-payloads.txt"
+  : > "$rejected_payloads"
+  while IFS= read -r payload_path; do
+    [[ -z "$payload_path" ]] && continue
+
     # pkgutil emits component payload paths relative to the package root and
     # prefixes them with ./ on macOS. Reject absolute/traversal paths before
-    # normalizing that harmless presentation prefix.
-    $0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/ { exit 1 }
-    path = $0
-    sub(/^\.\//, "", path)
-    path == "" || path == "." { next }
-    path == "Applications" || path == "Applications/" ||
-      path == "Applications/Roblox Account Manager.app" ||
-      path == "Applications/Roblox Account Manager.app/" ||
-    index(path, prefix1) == 1 { next }
-    { exit 1 }
-  ' "$payload_list"; then
+    # normalizing that harmless presentation prefix. This is intentionally
+    # shell-native because macOS ships BSD awk, whose grammar differs from
+    # the awk implementations used by the Linux CI runners.
+    case "$payload_path" in
+      /*|..|../*|*/..|*"/../"*)
+        printf '%s\n' "$payload_path" >> "$rejected_payloads"
+        continue
+        ;;
+    esac
+
+    path="${payload_path#./}"
+    [[ -z "$path" || "$path" == "." ]] && continue
+    allowed=false
+
+    if [[ "$expected_install_location" == "any" || "$expected_install_location" == "/" ]]; then
+      case "$path" in
+        Applications|Applications/|"Applications/Roblox Account Manager.app"|"Applications/Roblox Account Manager.app/"|"Applications/Roblox Account Manager.app/"*)
+          allowed=true
+          ;;
+      esac
+    fi
+    if [[ "$expected_install_location" == "any" || "$expected_install_location" == "/Applications" ]]; then
+      case "$path" in
+        "Roblox Account Manager.app"|"Roblox Account Manager.app/"|"Roblox Account Manager.app/"*)
+          allowed=true
+          ;;
+      esac
+    fi
+
+    [[ "$allowed" == true ]] || printf '%s\n' "$payload_path" >> "$rejected_payloads"
+  done < "$payload_list"
+
+  if [[ -s "$rejected_payloads" ]]; then
     echo "Rejected PKG payload entries:" >&2
-    sed -n '1,80p' "$payload_list" >&2
+    sed -n '1,80p' "$rejected_payloads" >&2
     die "PKG payload contains an absolute, escaping, or unexpected path."
   fi
   if grep -Eiq '(^|/)(Scripts|[^/]*\.sh)(/|$)' "$payload_list"; then
@@ -104,8 +129,13 @@ validate_script_free_component() {
   [[ -f "$expanded/PackageInfo" ]] || die "expanded PKG is missing PackageInfo."
   grep -Eq "<pkg-info[^>]*identifier=\"$PACKAGE_IDENTIFIER\"" "$expanded/PackageInfo" || \
     die "PKG identifier is not stable."
-  grep -Eq '<pkg-info[^>]*install-location="/"' "$expanded/PackageInfo" || \
-    die "PKG install location is not the root volume."
+  if [[ "$expected_install_location" == "any" ]]; then
+    grep -Eq '<pkg-info[^>]*install-location="(/|/Applications)"' "$expanded/PackageInfo" || \
+      die "PKG install location is neither the root volume nor /Applications."
+  else
+    grep -Fq "install-location=\"$expected_install_location\"" "$expanded/PackageInfo" || \
+      die "PKG install location does not match $expected_install_location."
+  fi
 }
 
 verify_package() {
@@ -122,7 +152,7 @@ verify_package() {
     expected_installer_label="$(resolve_identity_label "$3")" || die "identity is not installed: $3"
     [[ "$expected_installer_label" == *"Developer ID Installer"* ]] || die "identity is not a Developer ID Installer certificate: $3"
   fi
-  validate_script_free_component "$package_path" "$temp_root" "$expected_installer_label"
+  validate_script_free_component "$package_path" "$temp_root" "$expected_installer_label" true any
   spctl --assess --type install --verbose=2 "$package_path"
   require_command xcrun
   xcrun stapler validate "$package_path"
@@ -135,8 +165,14 @@ if [[ "$1" == "--verify" ]]; then
   exit 0
 fi
 
+package_format="root"
+if [[ "${1:-}" == "--component" ]]; then
+  package_format="component"
+  shift
+fi
+
 unsigned=false
-if [[ "$1" == "--unsigned" ]]; then
+if [[ "${1:-}" == "--unsigned" ]]; then
   [[ $# == 5 ]] || usage
   unsigned=true
   app_path="$(canonical_file "$2")"
@@ -244,23 +280,31 @@ if [[ -L "$output_path" ]]; then
 fi
 rm -f -- "$output_path"
 
-# Build a root package with an explicit Applications/ payload. Component
-# packages normally infer this placement from --component and
-# --install-location, but macOS Installer can record a successful component
-# upgrade without materializing the bundle when the previous receipt exists
-# but the old app directory is gone. A root package makes the destination
-# unambiguous: target volume + Applications + bundle name.
-package_root="$temp_root/package-root"
-mkdir -p "$package_root/Applications"
-ditto -- "$app_path" "$package_root/Applications/Roblox Account Manager.app"
-chmod -R u-w "$package_root"
-pkgbuild_args=(
-  --root "$package_root"
-  --install-location /
-  --identifier "$PACKAGE_IDENTIFIER"
-  --version "$version"
-  --ownership recommended
-)
+package_install_location="/"
+if [[ "$package_format" == "component" ]]; then
+  package_install_location="/Applications"
+  pkgbuild_args=(
+    --component "$app_path"
+    --install-location /Applications
+    --identifier "$PACKAGE_IDENTIFIER"
+    --version "$version"
+  )
+else
+  # Root packages make the destination explicit: target volume + Applications
+  # + bundle name. The component form remains available for A/B compatibility
+  # testing and legacy package validation.
+  package_root="$temp_root/package-root"
+  mkdir -p "$package_root/Applications"
+  ditto -- "$app_path" "$package_root/Applications/Roblox Account Manager.app"
+  chmod -R u-w "$package_root"
+  pkgbuild_args=(
+    --root "$package_root"
+    --install-location /
+    --identifier "$PACKAGE_IDENTIFIER"
+    --version "$version"
+    --ownership recommended
+  )
+fi
 if [[ "$unsigned" == false ]]; then
   pkgbuild_args+=(--sign "$installer_identity")
 fi
@@ -268,9 +312,9 @@ pkgbuild_args+=("$output_path")
 pkgbuild "${pkgbuild_args[@]}"
 
 if [[ "$unsigned" == true ]]; then
-  validate_script_free_component "$output_path" "$temp_root" "" false
-  echo "Created UNSIGNED test-only root PKG: $output_path"
+  validate_script_free_component "$output_path" "$temp_root" "" false "$package_install_location"
+  echo "Created UNSIGNED test-only $package_format PKG: $output_path"
 else
-  validate_script_free_component "$output_path" "$temp_root" "$installer_identity_label" true
-  echo "Created signed, script-free root PKG: $output_path"
+  validate_script_free_component "$output_path" "$temp_root" "$installer_identity_label" true "$package_install_location"
+  echo "Created signed, script-free $package_format PKG: $output_path"
 fi

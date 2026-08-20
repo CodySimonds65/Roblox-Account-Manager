@@ -158,11 +158,20 @@ jobs:
           spctl --assess --type execute --verbose=2 "$app"
 
           pkg="dist/RobloxAccountManager-${version}-${{ matrix.rid }}.pkg"
-          bash build/macos/package-pkg.sh "$app" "$pkg" "${{ matrix.rid }}" "$package_version" "$INSTALLER_IDENTITY" "$SIGNING_IDENTITY"
+          bash build/macos/package-pkg.sh --component "$app" "$pkg" "${{ matrix.rid }}" "$package_version" "$INSTALLER_IDENTITY" "$SIGNING_IDENTITY"
           xcrun notarytool submit "$pkg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait
           xcrun stapler staple "$pkg"
           bash build/macos/package-pkg.sh --verify "$pkg" "$INSTALLER_IDENTITY"
           (cd dist && shasum -a 256 "$(basename "$pkg")" > "$(basename "$pkg").sha256")
+      - name: Smoke-test exact signed release PKG on the runner root
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve.outputs.release_tag }}"; version="${version#v}"
+          if [[ "${{ matrix.rid }}" == "osx-arm64" ]]; then
+            bash build/macos/smoke-install-root-pkg.sh "dist/RobloxAccountManager-${version}-${{ matrix.rid }}.pkg"
+          else
+            echo "Skipping host-root PKG smoke on Intel; isolated target-volume coverage is used in validation."
+          fi
       - name: Stage architecture artifacts
         uses: actions/upload-artifact@v4
         with:

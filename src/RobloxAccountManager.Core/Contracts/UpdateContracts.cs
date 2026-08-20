@@ -17,6 +17,15 @@ public sealed record UpdateInstallResult(
     bool Accepted,
     string DiagnosticCode)
 {
+    /// <summary>
+    /// The platform installer accepted the handoff. This does not claim that the
+    /// separate installer process has finished copying the application bundle.
+    /// </summary>
+    public static UpdateInstallResult InstallerOpened() => new(true, "installer-opened");
+
+    // Keep the legacy diagnostic stable for platform adapters outside this
+    // repository. New code should use InstallerOpened() when it has only
+    // handed the package to a separate installer process.
     public static UpdateInstallResult Success() => new(true, "installer-started");
 
     public static UpdateInstallResult Rejected(string code) => new(false, code);
