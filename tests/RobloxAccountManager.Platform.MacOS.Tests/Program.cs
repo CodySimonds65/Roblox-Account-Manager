@@ -51,6 +51,65 @@ var commandResult = new MacProcessCommandResult(0, "auth-ticket-token", "auth-ti
 Check(!commandResult.ToString().Contains("auth-ticket-token", StringComparison.Ordinal),
     "Process command diagnostics leaked sensitive command output.");
 
+var clientInfo = new MacBundleInfo(
+    "/Applications/Roblox.app",
+    MacBundleDiscovery.RobloxBundleIdentifier,
+    "/Applications/Roblox.app/Contents/MacOS/RobloxPlayer",
+    "2.700.0",
+    "2700000",
+    true,
+    "bundle-fingerprint",
+    "executable-fingerprint",
+    "plist-fingerprint");
+Check(MacRobloxDiagnostics.DescribeClient(clientInfo).Contains("2.700.0", StringComparison.Ordinal)
+      && MacRobloxDiagnostics.DescribeClient(clientInfo).Contains("2700000", StringComparison.Ordinal),
+    "The macOS Roblox client version/build was not formatted for startup diagnostics.");
+
+var diagnosticsRoot = Path.Combine(Path.GetTempPath(), "ram-mac-diagnostics-" + Guid.NewGuid().ToString("N"));
+try
+{
+    var logsRoot = Path.Combine(diagnosticsRoot, "logs");
+    var artifactRoot = Path.Combine(diagnosticsRoot, "artifacts");
+    Directory.CreateDirectory(logsRoot);
+    var processStart = new DateTimeOffset(2026, 8, 20, 21, 50, 10, TimeSpan.Zero);
+    var logPath = Path.Combine(logsRoot, "2.700.0_20260820T215010Z_Player_A1B2_last.log");
+    await File.WriteAllLinesAsync(logPath,
+    [
+        "2026-08-20T21:50:11Z [FLog::Output] RobloxChannel has been set to production",
+        "2026-08-20T21:50:12Z [FLog::UpdateController] updateRequired TRUE",
+        "2026-08-20T21:50:13Z [FLog::Network] Sending disconnect with reason: 285",
+        "2026-08-20T21:50:14Z [FLog::Error] launch failed at https://www.roblox.com/share?code=share-secret&type=Server token=auth-ticket-token"
+    ]);
+
+    var diagnostics = MacRobloxDiagnostics.Collect(
+        processStart,
+        [logsRoot],
+        artifactRoot);
+    Check(diagnostics.StatusCode == "matched-session-log" && diagnostics.LogVersion == "2.700.0",
+        "The matching macOS Roblox session log was not selected.");
+    Check(diagnostics.Summary.Any(line => line.Contains("production", StringComparison.Ordinal))
+          && diagnostics.Summary.Any(line => line.Contains("required", StringComparison.OrdinalIgnoreCase))
+          && diagnostics.Summary.Any(line => line.Contains("285", StringComparison.Ordinal)),
+        "The macOS Roblox session markers were not summarized.");
+    Check(diagnostics.RedactedTail.Any(line => line.Contains("[REDACTED]", StringComparison.Ordinal))
+          && diagnostics.RedactedTail.All(line => !line.Contains("share-secret", StringComparison.Ordinal))
+          && diagnostics.RedactedTail.All(line => !line.Contains("auth-ticket-token", StringComparison.Ordinal)),
+        "Sensitive Roblox launch data was retained in the redacted log tail.");
+    Check(diagnostics.ArtifactPath is not null && File.Exists(diagnostics.ArtifactPath)
+          && !File.ReadAllText(diagnostics.ArtifactPath).Contains("share-secret", StringComparison.Ordinal),
+        "The macOS Roblox diagnostic artifact was not written safely.");
+
+    var missing = MacRobloxDiagnostics.Collect(
+        processStart.AddHours(1),
+        [logsRoot]);
+    Check(missing.StatusCode == "session-log-not-found",
+        "A missing macOS Roblox session log did not produce a safe diagnostic code.");
+}
+finally
+{
+    if (Directory.Exists(diagnosticsRoot)) Directory.Delete(diagnosticsRoot, recursive: true);
+}
+
 var unconfiguredDiscovery = new MacBundleDiscovery();
 _ = new MacCorePlatformLauncher(unconfiguredDiscovery);
 passed++;
