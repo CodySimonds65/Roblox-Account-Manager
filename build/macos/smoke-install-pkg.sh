@@ -125,7 +125,7 @@ inspect_package_metadata() {
   local package_version
   local install_location
 
-  /usr/bin/mkdir -p -- "$expansion"
+  /bin/mkdir -p -- "$expansion"
   /usr/sbin/pkgutil --expand-full "$package_path" "$expansion/expanded" ||
     die "could not expand PKG metadata: $package_path"
   [[ ! -d "$expansion/expanded/Scripts" ]] || die "PKG contains installer scripts: $package_path"
@@ -223,7 +223,7 @@ echo "Initial PKG version: $initial_version"
 echo "Newer PKG version: $newer_version"
 (( initial_version < newer_version )) || die "newer PKG version is not greater than the initial PKG version"
 
-/usr/bin/mkdir -p -- "$mountpoint"
+/bin/mkdir -p -- "$mountpoint"
 /usr/bin/hdiutil create -quiet -size 512m -fs APFS -volname "RAM PKG Smoke" "$image"
 /usr/bin/hdiutil attach -quiet -nobrowse -mountpoint "$mountpoint" "$image"
 mounted=true
