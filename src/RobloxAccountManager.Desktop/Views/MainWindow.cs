@@ -1362,6 +1362,16 @@ public sealed class MainWindow : Window
 
             if (package.IsUnsigned)
             {
+                if (_viewModel.UpdateInstaller is MacPkgUpdateInstaller macInstaller)
+                {
+                    var validationError = await macInstaller.ValidateAsync(package);
+                    if (validationError is not null)
+                    {
+                        _viewModel.AppendActivity($"Unsigned update rejected before prompt: {validationError}.");
+                        return;
+                    }
+                }
+
                 var approved = await ConfirmAsync("An unsigned development update was downloaded and verified. Install it now? Apple may require Open Anyway approval in Privacy & Security.");
                 if (!approved)
                 {

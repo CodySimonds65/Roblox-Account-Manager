@@ -126,7 +126,12 @@ public sealed class MacGitHubReleaseUpdateSource : IPlatformUpdateSource
                     throw new InvalidDataException($"Checksum validation failed for {packageName}.");
             }
 
-            if (File.Exists(stagedPath)) File.Delete(stagedPath);
+            PathSafety.RejectSymlinkComponents(stagedPath);
+            if (File.Exists(stagedPath))
+            {
+                PathSafety.RejectSymlink(stagedPath);
+                File.Delete(stagedPath);
+            }
             File.Move(temporaryPath, stagedPath);
             PathSafety.RejectSymlinkComponents(stagedPath);
             PathSafety.RejectSymlink(stagedPath);
@@ -151,6 +156,8 @@ public sealed class MacGitHubReleaseUpdateSource : IPlatformUpdateSource
                 ["--expand-full", "--", packagePath, expansionRoot],
                 cancellationToken).ConfigureAwait(false);
             if (!expanded.Succeeded) return null;
+
+            RejectUnsafeExpandedEntries(expansionRoot);
 
             var packageInfos = Directory.EnumerateFiles(expansionRoot, "PackageInfo", SearchOption.AllDirectories).ToArray();
             if (packageInfos.Length != 1) return null;
@@ -203,6 +210,21 @@ public sealed class MacGitHubReleaseUpdateSource : IPlatformUpdateSource
         if (!Version.TryParse(value, out var parsed) || parsed is null) return false;
         version = parsed;
         return true;
+    }
+
+    private static void RejectUnsafeExpandedEntries(string root)
+    {
+        var pending = new Stack<string>([root]);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            PathSafety.RejectSymlinkDirectory(directory);
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory, "*", SearchOption.TopDirectoryOnly))
+            {
+                PathSafety.RejectSymlink(entry);
+                if (Directory.Exists(entry)) pending.Push(entry);
+            }
+        }
     }
 
     private static void TryDelete(string path)
