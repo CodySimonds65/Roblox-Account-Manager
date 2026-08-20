@@ -227,7 +227,7 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
 
         var signature = await _commandRunner.RunAsync(
             "/usr/sbin/pkgutil",
-            ["--check-signature", "--", fullPath],
+            ["--check-signature", fullPath],
             cancellationToken).ConfigureAwait(false);
         var signatureOutput = signature.StandardOutput + "\n" + signature.StandardError;
         var signatureIsTrusted = signature.Succeeded
@@ -361,7 +361,7 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
         {
             var expanded = await _commandRunner.RunAsync(
                 "/usr/sbin/pkgutil",
-                ["--expand-full", "--", packagePath, expansionRoot],
+                ["--expand-full", packagePath, expansionRoot],
                 cancellationToken).ConfigureAwait(false);
             if (!expanded.Succeeded)
             {

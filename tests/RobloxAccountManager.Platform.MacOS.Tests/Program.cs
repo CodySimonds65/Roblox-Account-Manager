@@ -575,6 +575,15 @@ sealed class RecordingCommandRunner(
         var values = arguments.ToArray();
         Calls.Add((executable, values));
         if (string.Equals(executable, "/usr/sbin/pkgutil", StringComparison.Ordinal)
+            && values.Contains("--", StringComparer.Ordinal))
+        {
+            // pkgutil's subcommands take positional paths directly; an option terminator is
+            // not part of its command grammar. Keep this fake strict so the macOS regression
+            // cannot silently return to the failing invocation used by the VM package.
+            return Task.FromResult(new MacProcessCommandResult(64, string.Empty, "invalid option --"));
+        }
+
+        if (string.Equals(executable, "/usr/sbin/pkgutil", StringComparison.Ordinal)
             && values.Contains("--check-signature", StringComparer.Ordinal))
         {
             return Task.FromResult(signatureResult);

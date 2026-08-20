@@ -1075,13 +1075,23 @@ public sealed class MainWindow : Window
         return Card(tabs);
     }
 
-    private static ScrollViewer ScrollSettings(Control content) => new()
+    private static ScrollViewer ScrollSettings(Control content)
     {
-        Content = content,
-        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-        HorizontalContentAlignment = HorizontalAlignment.Stretch
-    };
+        var viewer = new ScrollViewer
+        {
+            Content = content,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Top
+        };
+
+        // A newly selected settings tab must start at its first section. Without an explicit
+        // top alignment Avalonia can preserve the focused numeric editor's bring-into-view
+        // offset, which hides the General heading and timeout controls on macOS.
+        viewer.AttachedToVisualTree += (_, _) => viewer.Offset = new Vector(0, 0);
+        return viewer;
+    }
 
     private Control BuildGeneralSettingsTab()
     {
