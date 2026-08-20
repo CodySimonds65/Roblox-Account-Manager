@@ -140,15 +140,15 @@ inspect_package_metadata() {
   package_attribute() {
     local attribute="$1"
     local value
-    value="$(/usr/bin/sed -nE "s/.*${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p" "$package_info" | /usr/bin/head -n 1)"
+    value="$(/usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p" "$package_info" | /usr/bin/head -n 1)"
     if [[ -z "$value" ]]; then
-      value="$(/usr/bin/sed -nE "s/.*${attribute}[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" "$package_info" | /usr/bin/head -n 1)"
+      value="$(/usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" "$package_info" | /usr/bin/head -n 1)"
     fi
     if [[ -z "$value" ]]; then
-      value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p")"
+      value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p")"
     fi
     if [[ -z "$value" ]]; then
-      value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*${attribute}[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p")"
+      value="$(printf '%s\n' "$package_info_header" | /usr/bin/sed -nE "s/.*[[:space:]]${attribute}[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p")"
     fi
     printf '%s\n' "$value"
   }
