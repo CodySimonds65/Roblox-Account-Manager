@@ -66,7 +66,10 @@ jobs:
           component_newer_pkg="$RUNNER_TEMP/RobloxAccountManager-validation-${{ matrix.rid }}-component-v2.pkg"
           bash build/macos/smoke-install-pkg.sh "$pkg" "$newer_pkg"
           bash build/macos/smoke-install-pkg.sh "$component_pkg" "$component_newer_pkg"
-          bash build/macos/smoke-install-root-pkg.sh "$pkg"
+          # Release workflows use the component format; exercise that exact
+          # format against the runner root while the default root format is
+          # still covered on a disposable volume above.
+          bash build/macos/smoke-install-root-pkg.sh "$component_pkg"
       - name: Upload macOS validation artifacts
         uses: actions/upload-artifact@v4
         with:

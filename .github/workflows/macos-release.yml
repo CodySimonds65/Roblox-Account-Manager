@@ -158,7 +158,7 @@ jobs:
           spctl --assess --type execute --verbose=2 "$app"
 
           pkg="dist/RobloxAccountManager-${version}-${{ matrix.rid }}.pkg"
-          bash build/macos/package-pkg.sh "$app" "$pkg" "${{ matrix.rid }}" "$package_version" "$INSTALLER_IDENTITY" "$SIGNING_IDENTITY"
+          bash build/macos/package-pkg.sh --component "$app" "$pkg" "${{ matrix.rid }}" "$package_version" "$INSTALLER_IDENTITY" "$SIGNING_IDENTITY"
           xcrun notarytool submit "$pkg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait
           xcrun stapler staple "$pkg"
           bash build/macos/package-pkg.sh --verify "$pkg" "$INSTALLER_IDENTITY"
