@@ -110,7 +110,7 @@ identifier="$(package_attribute identifier)"
 package_version="$(package_attribute version)"
 install_location="$(package_attribute install-location)"
 [[ "$identifier" == "$package_identifier" ]] || die "PackageInfo identifier mismatch: $identifier"
-[[ "$package_version" =~ ^[0-9]+$ ]] || die "PackageInfo version is not numeric: ${package_version:-<missing>}"
+[[ "$package_version" =~ ^[0-9]+(\.[0-9]+)*$ ]] || die "PackageInfo version is not numeric: ${package_version:-<missing>}"
 case "$layout:$install_location" in
   root:/|component:/Applications) ;;
   *) die "payload layout and PackageInfo install-location disagree" ;;

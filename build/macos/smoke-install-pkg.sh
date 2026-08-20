@@ -156,7 +156,7 @@ inspect_package_metadata() {
   package_version="$(package_attribute version)"
   install_location="$(package_attribute install-location)"
   [[ "$identifier" == "$PACKAGE_IDENTIFIER" ]] || die "PKG identifier mismatch: $package_path"
-  [[ "$package_version" =~ ^[0-9]+$ ]] || die "PKG version is not numeric: ${package_version:-<missing>} ($package_path)"
+  [[ "$package_version" =~ ^[0-9]+(\.[0-9]+)*$ ]] || die "PKG version is not numeric: ${package_version:-<missing>} ($package_path)"
 
   case "$layout:$install_location" in
     root:/|component:/Applications) ;;
@@ -238,7 +238,10 @@ echo "Initial PKG payload layout: $initial_layout"
 echo "Newer PKG payload layout: $newer_layout"
 echo "Initial PKG version: $initial_version"
 echo "Newer PKG version: $newer_version"
-(( initial_version < newer_version )) || die "newer PKG version is not greater than the initial PKG version"
+[[ "$initial_version" != "$newer_version" ]] || die "newer PKG version is not greater than the initial PKG version"
+sorted_versions="$(printf '%s\n' "$initial_version" "$newer_version" | /usr/bin/sort -n)"
+[[ "$(printf '%s\n' "$sorted_versions" | /usr/bin/tail -n 1)" == "$newer_version" ]] ||
+  die "newer PKG version is not greater than the initial PKG version"
 
 /bin/mkdir -p -- "$mountpoint"
 /usr/bin/hdiutil create -quiet -size 512m -fs APFS -volname "RAM PKG Smoke" "$image"
