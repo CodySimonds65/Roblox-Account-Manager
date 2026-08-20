@@ -511,7 +511,7 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
 
             var lipo = await _commandRunner.RunAsync(
                 "/usr/bin/lipo",
-                ["-info", "--", executable],
+                ["-info", executable],
                 cancellationToken).ConfigureAwait(false);
             var architectureOutput = lipo.StandardOutput + "\n" + lipo.StandardError;
             var architecture = _expectedRid == "osx-arm64" ? "arm64" : "x86_64";

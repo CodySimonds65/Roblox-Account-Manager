@@ -311,6 +311,12 @@ try
         hash,
         pkgPath);
     Check(await installer.ValidateAsync(validPackage) is null, "A valid signed PKG was rejected.");
+    var lipoCall = signedRunner.Calls.LastOrDefault(call => string.Equals(call.Executable, "/usr/bin/lipo", StringComparison.Ordinal));
+    Check(lipoCall.Executable is not null
+        && lipoCall.Arguments.Count == 2
+        && lipoCall.Arguments[0] == "-info"
+        && lipoCall.Arguments[1].EndsWith(Path.Combine("Contents", "MacOS", "RobloxAccountManager"), StringComparison.Ordinal),
+        "The architecture check passed an unsupported option terminator to macOS lipo.");
     var prepared = await installer.PrepareVerifiedPackageAsync(validPackage);
     Check(prepared.Error is null && prepared.Path is not null
         && !string.Equals(Path.GetFullPath(prepared.Path), Path.GetFullPath(pkgPath), StringComparison.Ordinal),
@@ -623,6 +629,13 @@ sealed class RecordingCommandRunner(
 
         if (string.Equals(executable, "/usr/bin/lipo", StringComparison.Ordinal))
         {
+            if (values.Contains("--", StringComparer.Ordinal))
+            {
+                // macOS lipo does not accept an option terminator before its positional input.
+                // Keep this fake strict so the real VM invocation cannot regress unnoticed.
+                return Task.FromResult(new MacProcessCommandResult(64, string.Empty, "unknown flag: --"));
+            }
+
             return Task.FromResult(new MacProcessCommandResult(0, $"Non-fat file: {architecture}", string.Empty));
         }
 
