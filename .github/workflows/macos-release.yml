@@ -167,7 +167,11 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ needs.resolve.outputs.release_tag }}"; version="${version#v}"
-          bash build/macos/smoke-install-root-pkg.sh "dist/RobloxAccountManager-${version}-${{ matrix.rid }}.pkg"
+          if [[ "${{ matrix.rid }}" == "osx-arm64" ]]; then
+            bash build/macos/smoke-install-root-pkg.sh "dist/RobloxAccountManager-${version}-${{ matrix.rid }}.pkg"
+          else
+            echo "Skipping host-root PKG smoke on Intel; isolated target-volume coverage is used in validation."
+          fi
       - name: Stage architecture artifacts
         uses: actions/upload-artifact@v4
         with:

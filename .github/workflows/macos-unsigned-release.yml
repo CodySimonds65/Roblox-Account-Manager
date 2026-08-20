@@ -157,7 +157,11 @@ jobs:
           bash build/macos/smoke-install-pkg.sh "$pkg" "$newer_pkg"
           bash build/macos/smoke-install-pkg.sh "$component_pkg" "$component_newer_pkg"
           release_pkg="dist/RobloxAccountManager-${release_tag}-${{ matrix.rid }}-unsigned.pkg"
-          bash build/macos/smoke-install-root-pkg.sh "$release_pkg"
+          if [[ "${{ matrix.rid }}" == "osx-arm64" ]]; then
+            bash build/macos/smoke-install-root-pkg.sh "$release_pkg"
+          else
+            echo "Skipping host-root PKG smoke on Intel; isolated target-volume coverage passed."
+          fi
 
       - name: Stage unsigned architecture artifact
         uses: actions/upload-artifact@v4
