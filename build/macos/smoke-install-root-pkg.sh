@@ -26,6 +26,19 @@ package_path="$(cd -- "$(dirname -- "$package_path")" && pwd -P)/$(basename -- "
 [[ -f "$package_path" && ! -L "$package_path" ]] || die "PKG does not exist or is a symlink: $package_path"
 [[ ! -e "$APP_PATH" && ! -L "$APP_PATH" ]] || die "refusing to overwrite an existing application: $APP_PATH"
 
+# A hosted runner can retain a receipt from an earlier validation attempt even
+# after the application bundle was removed. Installer may report a successful
+# upgrade while restoring no files in that state, so make the host-root test
+# deterministic by forgetting only this exact package identifier first.
+if receipt_info="$(sudo -n /usr/sbin/pkgutil --pkg-info "$package_identifier" 2>/dev/null)"; then
+  echo "Removing stale root-volume receipt for $package_identifier."
+  sudo -n /usr/sbin/pkgutil --forget "$package_identifier" >/dev/null ||
+    die "could not forget the stale root-volume receipt: $package_identifier"
+fi
+if sudo -n /usr/sbin/pkgutil --pkg-info "$package_identifier" >/dev/null 2>&1; then
+  die "root-volume receipt remained after cleanup: $package_identifier"
+fi
+
 cleanup() {
   set +e
   if [[ -e "$APP_PATH" || -L "$APP_PATH" ]]; then
