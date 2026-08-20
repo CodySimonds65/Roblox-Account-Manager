@@ -48,6 +48,20 @@ jobs:
           pkg="artifacts/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned.pkg"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1" "$app/Contents/Info.plist"
           bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "${{ matrix.rid }}" 1
+      - name: Smoke-test unsigned PKG installation
+        run: |
+          set -euo pipefail
+          image="$RUNNER_TEMP/ram-pkg-install.dmg"
+          mountpoint="$RUNNER_TEMP/ram-pkg-install-volume"
+          pkg="artifacts/RobloxAccountManager-validation-${{ matrix.rid }}-unsigned.pkg"
+          mkdir -p "$mountpoint"
+          hdiutil create -quiet -size 512m -fs APFS -volname "RAM PKG Smoke" "$image"
+          hdiutil attach -quiet -nobrowse -mountpoint "$mountpoint" "$image"
+          cleanup() { hdiutil detach -quiet "$mountpoint" || true; }
+          trap cleanup EXIT
+          sudo -n installer -allowUntrusted -pkg "$pkg" -target "$mountpoint"
+          test -d "$mountpoint/Applications/Roblox Account Manager.app"
+          test -x "$mountpoint/Applications/Roblox Account Manager.app/Contents/MacOS/RobloxAccountManager"
       - name: Upload macOS validation artifacts
         uses: actions/upload-artifact@v4
         with:

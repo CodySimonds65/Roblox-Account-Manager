@@ -130,6 +130,23 @@ jobs:
             echo "Users must explicitly approve it in macOS Privacy & Security."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Smoke-test unsigned PKG installation
+        run: |
+          set -euo pipefail
+          image="$RUNNER_TEMP/ram-pkg-install.dmg"
+          mountpoint="$RUNNER_TEMP/ram-pkg-install-volume"
+          release_tag="${{ needs.resolve.outputs.release_tag }}"
+          release_tag="${release_tag#v}"
+          pkg="dist/RobloxAccountManager-${release_tag}-${{ matrix.rid }}-unsigned.pkg"
+          mkdir -p "$mountpoint"
+          hdiutil create -quiet -size 512m -fs APFS -volname "RAM PKG Smoke" "$image"
+          hdiutil attach -quiet -nobrowse -mountpoint "$mountpoint" "$image"
+          cleanup() { hdiutil detach -quiet "$mountpoint" || true; }
+          trap cleanup EXIT
+          sudo -n installer -allowUntrusted -pkg "$pkg" -target "$mountpoint"
+          test -d "$mountpoint/Applications/Roblox Account Manager.app"
+          test -x "$mountpoint/Applications/Roblox Account Manager.app/Contents/MacOS/RobloxAccountManager"
+
       - name: Stage unsigned architecture artifact
         uses: actions/upload-artifact@v4
         with:

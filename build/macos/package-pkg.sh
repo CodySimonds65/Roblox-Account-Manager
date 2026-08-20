@@ -17,7 +17,7 @@ Usage:
   package-pkg.sh --unsigned <app> <output-pkg> <rid> <numeric-version>
   package-pkg.sh --verify <signed-and-stapled-pkg> [Developer-ID-Installer-identity]
 
-The build form creates a script-free component package. Gatekeeper and staple
+The build form creates a script-free root package. Gatekeeper and staple
 validation are performed by the --verify form after notarization/stapling.
 The --unsigned form is an explicitly labeled temporary testing path; it never
 claims Gatekeeper trust and must not be used for public releases.
@@ -75,7 +75,6 @@ validate_script_free_component() {
   if ! awk '
     BEGIN {
       prefix1 = "Applications/Roblox Account Manager.app/"
-      prefix2 = "Roblox Account Manager.app/"
     }
     $0 == "" { next }
     # pkgutil emits component payload paths relative to the package root and
@@ -88,9 +87,7 @@ validate_script_free_component() {
     path == "Applications" || path == "Applications/" ||
       path == "Applications/Roblox Account Manager.app" ||
       path == "Applications/Roblox Account Manager.app/" ||
-      path == "Roblox Account Manager.app" ||
-      path == "Roblox Account Manager.app/" { next }
-    index(path, prefix1) == 1 || index(path, prefix2) == 1 { next }
+    index(path, prefix1) == 1 { next }
     { exit 1 }
   ' "$payload_list"; then
     echo "Rejected PKG payload entries:" >&2
@@ -103,10 +100,12 @@ validate_script_free_component() {
 
   [[ ! -e "$expanded" ]] || die "PKG expansion destination already exists."
   pkgutil --expand "$package_path" "$expanded"
-  [[ ! -d "$expanded/Scripts" ]] || die "PKG contains a Scripts directory; component packages must be script-free."
+  [[ ! -d "$expanded/Scripts" ]] || die "PKG contains a Scripts directory; packages must be script-free."
   [[ -f "$expanded/PackageInfo" ]] || die "expanded PKG is missing PackageInfo."
   grep -Eq "<pkg-info[^>]*identifier=\"$PACKAGE_IDENTIFIER\"" "$expanded/PackageInfo" || \
     die "PKG identifier is not stable."
+  grep -Eq '<pkg-info[^>]*install-location="/"' "$expanded/PackageInfo" || \
+    die "PKG install location is not the root volume."
 }
 
 verify_package() {
@@ -244,11 +243,23 @@ if [[ -L "$output_path" ]]; then
   die "refusing to replace a symlink output path: $output_path"
 fi
 rm -f -- "$output_path"
+
+# Build a root package with an explicit Applications/ payload. Component
+# packages normally infer this placement from --component and
+# --install-location, but macOS Installer can record a successful component
+# upgrade without materializing the bundle when the previous receipt exists
+# but the old app directory is gone. A root package makes the destination
+# unambiguous: target volume + Applications + bundle name.
+package_root="$temp_root/package-root"
+mkdir -p "$package_root/Applications"
+ditto -- "$app_path" "$package_root/Applications/Roblox Account Manager.app"
+chmod -R u-w "$package_root"
 pkgbuild_args=(
-  --component "$app_path"
-  --install-location /Applications
+  --root "$package_root"
+  --install-location /
   --identifier "$PACKAGE_IDENTIFIER"
   --version "$version"
+  --ownership recommended
 )
 if [[ "$unsigned" == false ]]; then
   pkgbuild_args+=(--sign "$installer_identity")
@@ -258,8 +269,8 @@ pkgbuild "${pkgbuild_args[@]}"
 
 if [[ "$unsigned" == true ]]; then
   validate_script_free_component "$output_path" "$temp_root" "" false
-  echo "Created UNSIGNED test-only component PKG: $output_path"
+  echo "Created UNSIGNED test-only root PKG: $output_path"
 else
   validate_script_free_component "$output_path" "$temp_root" "$installer_identity_label" true
-  echo "Created signed, script-free component PKG: $output_path"
+  echo "Created signed, script-free root PKG: $output_path"
 fi

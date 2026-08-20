@@ -311,6 +311,15 @@ try
         hash,
         pkgPath);
     Check(await installer.ValidateAsync(validPackage) is null, "A valid signed PKG was rejected.");
+    var explicitRootInstaller = new MacPkgUpdateInstaller(
+        new RecordingCommandRunner(signedRunner.SignatureResult, useApplicationsPayload: true),
+        expectedRid: "osx-arm64",
+        trust,
+        updateRoot,
+        "2",
+        "2.0");
+    Check(await explicitRootInstaller.ValidateAsync(validPackage) is null,
+        "A PKG with an explicit Applications/ payload root was rejected.");
     var lipoCall = signedRunner.Calls.LastOrDefault(call => string.Equals(call.Executable, "/usr/bin/lipo", StringComparison.Ordinal));
     Check(lipoCall.Executable is not null
         && lipoCall.Arguments.Count == 2
@@ -567,7 +576,8 @@ sealed class RecordingCommandRunner(
     string architecture = "arm64",
     bool includeUnexpectedPayload = false,
     bool includeScripts = false,
-    bool includeScriptDeclaration = false) : IMacProcessCommandRunner
+    bool includeScriptDeclaration = false,
+    bool useApplicationsPayload = false) : IMacProcessCommandRunner
 {
     public List<(string Executable, IReadOnlyList<string> Arguments)> Calls { get; } = [];
     public MacProcessCommandResult SignatureResult => signatureResult;
@@ -599,12 +609,15 @@ sealed class RecordingCommandRunner(
             && values.Contains("--expand-full", StringComparer.Ordinal))
         {
             var expansionRoot = values[^1];
-            var appContents = Path.Combine(expansionRoot, "Payload", "Roblox Account Manager.app", "Contents");
+            var payloadAppRoot = Path.Combine(expansionRoot, "Payload",
+                useApplicationsPayload ? "Applications/Roblox Account Manager.app" : "Roblox Account Manager.app");
+            var appContents = Path.Combine(payloadAppRoot, "Contents");
             var payload = Path.Combine(appContents, "MacOS");
             Directory.CreateDirectory(payload);
             var scriptXml = includeScriptDeclaration ? "<scripts><custom file=\"run-me\" /></scripts>" : string.Empty;
+            var installLocation = useApplicationsPayload ? "/" : "/Applications";
             File.WriteAllText(Path.Combine(expansionRoot, "PackageInfo"),
-                $"<pkg-info identifier=\"{packageIdentifier}\" version=\"{packageVersion}\" install-location=\"/Applications\">{scriptXml}</pkg-info>");
+                $"<pkg-info identifier=\"{packageIdentifier}\" version=\"{packageVersion}\" install-location=\"{installLocation}\">{scriptXml}</pkg-info>");
             File.WriteAllText(Path.Combine(appContents, "Info.plist"),
                 "<?xml version=\"1.0\"?><plist><dict>" +
                 "<key>CFBundleIdentifier</key><string>io.github.codysimonds65.roblox-account-manager</string>" +
