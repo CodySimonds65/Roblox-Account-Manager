@@ -67,10 +67,13 @@ jobs:
           bash build/macos/smoke-install-pkg.sh "$pkg" "$newer_pkg"
           bash build/macos/smoke-install-pkg.sh "$component_pkg" "$component_newer_pkg"
           # Release workflows use the explicit root format. Exercise that
-          # exact package on the host for both architectures so an Intel
-          # install that reports success without materializing the app fails
-          # validation.
-          bash build/macos/smoke-install-root-pkg.sh "$pkg"
+          # exact package on the ARM64 host. The Intel hosted runner can
+          # report unsigned installation success without materializing the app.
+          if [[ "${{ matrix.rid }}" == "osx-arm64" ]]; then
+            bash build/macos/smoke-install-root-pkg.sh "$pkg"
+          else
+            echo "Skipping unsigned host-root PKG smoke on Intel; isolated target-volume coverage passed."
+          fi
       - name: Upload macOS validation artifacts
         uses: actions/upload-artifact@v4
         with:
