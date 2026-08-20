@@ -213,7 +213,7 @@ public static partial class MacRobloxDiagnostics
     [GeneratedRegex(@"Sending disconnect with reason:\s*(?<reason>\d+)", RegexOptions.IgnoreCase)]
     private static partial Regex DisconnectReasonRegex();
 
-    [GeneratedRegex(@"(?<prefix>(?:code|privateServerLinkCode|token|ticket|auth|secret|password)(?:=|:\s*))[^\s&]+", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"(?<prefix>(?:code|privateServerLinkCode|token|ticket|auth|authTicket|authorization|cookie|access_token|accessToken|secret|password)(?:=|:\s*))[^\s&]+", RegexOptions.IgnoreCase)]
     private static partial Regex SensitiveParameterRegex();
 
     [GeneratedRegex(@"https?://[^\s]+", RegexOptions.IgnoreCase)]

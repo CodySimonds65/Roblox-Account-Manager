@@ -74,6 +74,20 @@ Require(capturedLaunchUri.Scheme == "roblox-player"
         && launchStatuses is [RobloxPlayControlStatus.NotFound, RobloxPlayControlStatus.Clicked],
     "The macOS launch coordinator did not capture after clicking Play in the expected order.");
 
+var transientScriptSession = new FakeMacBrowserLaunchSession(
+    new Uri("roblox-player:1+gameinfo:transient-script"),
+    clickAfterPolls: 1,
+    scriptFailures: 1);
+var transientCapture = await new MacBrowserLaunchCoordinator(
+        transientScriptSession,
+        pollInterval: TimeSpan.FromMilliseconds(1))
+    .CaptureAsync(
+        "account-id",
+        new Uri("https://www.roblox.com/games/123/Test"),
+        TimeSpan.FromSeconds(1));
+Require(transientCapture.Scheme == "roblox-player",
+    "A transient WebView script failure prevented a later Play click.");
+
 var timeoutSession = new FakeMacBrowserLaunchSession(
     new Uri("roblox-player:1+gameinfo:never-captured"),
     clickAfterPolls: int.MaxValue);
@@ -107,7 +121,7 @@ Require(recycledAccountRow is Border && rowBuildCount == 1,
 
 Console.WriteLine("Desktop startup and preset policy tests passed.");
 
-sealed class FakeMacBrowserLaunchSession(Uri launchUri, int clickAfterPolls) : IMacBrowserLaunchSession
+sealed class FakeMacBrowserLaunchSession(Uri launchUri, int clickAfterPolls, int scriptFailures = 0) : IMacBrowserLaunchSession
 {
     private readonly TaskCompletionSource<BrowserNavigationResult> _capture =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -142,6 +156,11 @@ sealed class FakeMacBrowserLaunchSession(Uri launchUri, int clickAfterPolls) : I
         CancellationToken cancellationToken)
     {
         Events.Add("script");
+        if (Interlocked.Decrement(ref scriptFailures) >= 0)
+        {
+            throw new InvalidOperationException("document-not-ready");
+        }
+
         if (Interlocked.Increment(ref _polls) >= clickAfterPolls)
         {
             _capture.TrySetResult(new BrowserNavigationResult(true, launchUri));

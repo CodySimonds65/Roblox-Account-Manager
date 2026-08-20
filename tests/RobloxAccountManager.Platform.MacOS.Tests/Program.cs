@@ -78,7 +78,7 @@ try
         "2026-08-20T21:50:11Z [FLog::Output] RobloxChannel has been set to production",
         "2026-08-20T21:50:12Z [FLog::UpdateController] updateRequired TRUE",
         "2026-08-20T21:50:13Z [FLog::Network] Sending disconnect with reason: 285",
-        "2026-08-20T21:50:14Z [FLog::Error] launch failed at https://www.roblox.com/share?code=share-secret&type=Server token=auth-ticket-token"
+        "2026-08-20T21:50:14Z [FLog::Error] launch failed at https://www.roblox.com/share?code=share-secret&type=Server token=auth-ticket-token Cookie: session-secret authorization=Bearer-auth access_token=access-secret"
     ]);
 
     var diagnostics = MacRobloxDiagnostics.Collect(
@@ -93,7 +93,10 @@ try
         "The macOS Roblox session markers were not summarized.");
     Check(diagnostics.RedactedTail.Any(line => line.Contains("[REDACTED]", StringComparison.Ordinal))
           && diagnostics.RedactedTail.All(line => !line.Contains("share-secret", StringComparison.Ordinal))
-          && diagnostics.RedactedTail.All(line => !line.Contains("auth-ticket-token", StringComparison.Ordinal)),
+          && diagnostics.RedactedTail.All(line => !line.Contains("auth-ticket-token", StringComparison.Ordinal))
+          && diagnostics.RedactedTail.All(line => !line.Contains("session-secret", StringComparison.Ordinal))
+          && diagnostics.RedactedTail.All(line => !line.Contains("Bearer-auth", StringComparison.Ordinal))
+          && diagnostics.RedactedTail.All(line => !line.Contains("access-secret", StringComparison.Ordinal)),
         "Sensitive Roblox launch data was retained in the redacted log tail.");
     Check(diagnostics.ArtifactPath is not null && File.Exists(diagnostics.ArtifactPath)
           && !File.ReadAllText(diagnostics.ArtifactPath).Contains("share-secret", StringComparison.Ordinal),

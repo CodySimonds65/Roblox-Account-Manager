@@ -52,10 +52,23 @@ public sealed class MacBrowserLaunchCoordinator
             await _session.NavigateAsync(accountId, navigationUri, launchTimeout.Token);
             while (true)
             {
-                var status = RobloxPlayControl.ParseResult(await _session.InvokeScriptAsync(
-                    accountId,
-                    RobloxPlayControl.Script,
-                    launchTimeout.Token));
+                RobloxPlayControlStatus status;
+                try
+                {
+                    status = RobloxPlayControl.ParseResult(await _session.InvokeScriptAsync(
+                        accountId,
+                        RobloxPlayControl.Script,
+                        launchTimeout.Token));
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception)
+                {
+                    status = RobloxPlayControlStatus.Unknown;
+                }
+
                 _statusSink?.Invoke(status);
                 if (status == RobloxPlayControlStatus.Clicked)
                 {
