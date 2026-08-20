@@ -62,6 +62,7 @@ validate_script_free_component() {
   local expected_installer_label="${3:-}"
   local require_signature="${4:-true}"
   local expected_install_location="${5:-any}"
+  local reject_relocation="${6:-false}"
   local payload_list="$temp_root/payload-files.txt"
   local expanded="$temp_root/expanded"
 
@@ -129,6 +130,9 @@ validate_script_free_component() {
   [[ -f "$expanded/PackageInfo" ]] || die "expanded PKG is missing PackageInfo."
   grep -Eq "<pkg-info[^>]*identifier=\"$PACKAGE_IDENTIFIER\"" "$expanded/PackageInfo" || \
     die "PKG identifier is not stable."
+  if [[ "$reject_relocation" == true ]] && grep -Eiq '<relocate([[:space:]>]|$)' "$expanded/PackageInfo"; then
+    die "root-target PKG contains relocatable bundle metadata."
+  fi
   if [[ "$expected_install_location" == "any" ]]; then
     grep -Eq '<pkg-info[^>]*install-location="(/|/Applications)"' "$expanded/PackageInfo" || \
       die "PKG install location is neither the root volume nor /Applications."
@@ -152,7 +156,17 @@ verify_package() {
     expected_installer_label="$(resolve_identity_label "$3")" || die "identity is not installed: $3"
     [[ "$expected_installer_label" == *"Developer ID Installer"* ]] || die "identity is not a Developer ID Installer certificate: $3"
   fi
-  validate_script_free_component "$package_path" "$temp_root" "$expected_installer_label" true any
+  root_package=false
+  while IFS= read -r payload_path; do
+    path="${payload_path#./}"
+    case "$path" in
+      "Applications/Roblox Account Manager.app"|"Applications/Roblox Account Manager.app/"*)
+        root_package=true
+        break
+        ;;
+    esac
+  done < <(pkgutil --payload-files "$package_path")
+  validate_script_free_component "$package_path" "$temp_root" "$expected_installer_label" true any "$root_package"
   spctl --assess --type install --verbose=2 "$package_path"
   require_command xcrun
   xcrun stapler validate "$package_path"
@@ -281,6 +295,7 @@ fi
 rm -f -- "$output_path"
 
 package_install_location="/"
+reject_relocation=false
 if [[ "$package_format" == "component" ]]; then
   package_install_location="/Applications"
   pkgbuild_args=(
@@ -291,14 +306,39 @@ if [[ "$package_format" == "component" ]]; then
   )
 else
   # Root packages make the destination explicit: target volume + Applications
-  # + bundle name. The component form remains available for A/B compatibility
-  # testing and legacy package validation.
+  # + bundle name. The explicit component plist is required because pkgbuild
+  # otherwise adds bundle relocation metadata to --root packages, allowing
+  # Installer to select a matching bundle outside /Applications.
   package_root="$temp_root/package-root"
   mkdir -p "$package_root/Applications"
   ditto -- "$app_path" "$package_root/Applications/Roblox Account Manager.app"
   chmod -R u-w "$package_root"
+  component_plist="$temp_root/root-component.plist"
+  cat > "$component_plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+  <dict>
+    <key>BundleHasStrictIdentifier</key>
+    <true/>
+    <key>BundleIsRelocatable</key>
+    <false/>
+    <key>BundleIsVersionChecked</key>
+    <true/>
+    <key>BundleOverwriteAction</key>
+    <string>upgrade</string>
+    <key>RootRelativeBundlePath</key>
+    <string>Applications/Roblox Account Manager.app</string>
+  </dict>
+</array>
+</plist>
+EOF
+  plutil -lint "$component_plist" >/dev/null || die "root package component plist is invalid."
+  reject_relocation=true
   pkgbuild_args=(
     --root "$package_root"
+    --component-plist "$component_plist"
     --install-location /
     --identifier "$PACKAGE_IDENTIFIER"
     --version "$version"
@@ -312,9 +352,9 @@ pkgbuild_args+=("$output_path")
 pkgbuild "${pkgbuild_args[@]}"
 
 if [[ "$unsigned" == true ]]; then
-  validate_script_free_component "$output_path" "$temp_root" "" false "$package_install_location"
+  validate_script_free_component "$output_path" "$temp_root" "" false "$package_install_location" "$reject_relocation"
   echo "Created UNSIGNED test-only $package_format PKG: $output_path"
 else
-  validate_script_free_component "$output_path" "$temp_root" "$installer_identity_label" true "$package_install_location"
+  validate_script_free_component "$output_path" "$temp_root" "$installer_identity_label" true "$package_install_location" "$reject_relocation"
   echo "Created signed, script-free $package_format PKG: $output_path"
 fi
