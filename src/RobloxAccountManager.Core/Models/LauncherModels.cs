@@ -58,6 +58,7 @@ public sealed class LauncherSettings
 {
     public bool UpdateChecksEnabled { get; set; } = true;
     public UpdateChannel UpdateChannel { get; set; } = UpdateChannel.Signed;
+    public bool ShowGamePresetPanel { get; set; } = true;
     public int LaunchTimeoutSeconds { get; set; } = 45;
     public int LaunchDelaySeconds { get; set; }
     public bool ContinueOnFailure { get; set; } = true;

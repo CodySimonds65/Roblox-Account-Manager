@@ -92,11 +92,12 @@ try
     var persistedPresets = await presetStore.LoadAsync();
     Require(persistedPresets.Count == 1 && persistedPresets[0].Name == "Custom game",
         "Built-in presets were persisted instead of remaining runtime-only.");
-    Require(new LauncherSettings().UpdateChannel == UpdateChannel.Signed,
-        "The default update channel was not Signed.");
-    await settingsStore.SaveAsync(new LauncherSettings { UpdateChannel = UpdateChannel.Unsigned });
-    Require((await settingsStore.LoadAsync()).UpdateChannel == UpdateChannel.Unsigned,
-        "The update channel did not survive a settings-file round trip.");
+    Require(new LauncherSettings().UpdateChannel == UpdateChannel.Signed && new LauncherSettings().ShowGamePresetPanel,
+        "The default update channel or game preset visibility was incorrect.");
+    await settingsStore.SaveAsync(new LauncherSettings { UpdateChannel = UpdateChannel.Unsigned, ShowGamePresetPanel = false });
+    var roundTrippedSettings = await settingsStore.LoadAsync();
+    Require(roundTrippedSettings.UpdateChannel == UpdateChannel.Unsigned && !roundTrippedSettings.ShowGamePresetPanel,
+        "The update channel or game preset visibility did not survive a settings-file round trip.");
     await accounts.SaveAsync([new AccountProfile { Id = Guid.NewGuid().ToString("N"), Label = "Imported" }]);
     var loadedAccounts = await accounts.LoadAsync();
     Require(loadedAccounts.Count == 1 && loadedAccounts[0].Label == "Imported", "Portable account storage did not round-trip.");
@@ -108,6 +109,7 @@ try
         RobloxSettingsConsentGranted = true,
         UnsignedUpdatesConsentGranted = true,
         UpdateChannel = UpdateChannel.Unsigned,
+        ShowGamePresetPanel = false,
         ClearBrowserDataOnNextStart = true
     };
     await ProfileTransferService.ExportAsync(
@@ -120,6 +122,7 @@ try
             && !imported.Settings.RobloxSettingsConsentGranted
             && !imported.Settings.UnsignedUpdatesConsentGranted
             && !imported.Settings.ClearBrowserDataOnNextStart
+            && !imported.Settings.ShowGamePresetPanel
             && imported.Settings.UpdateChannel == UpdateChannel.Unsigned,
         "Profile import carried sensitive local consent into the current installation.");
 }
