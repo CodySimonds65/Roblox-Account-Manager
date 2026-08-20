@@ -799,9 +799,12 @@ public sealed class MainWindow : Window
             {
                 _viewModel.SelectedAccount = startupPlan.InitialAccount;
                 _queueSelectedAccounts.Add(_viewModel.SelectedAccount.Id);
-                _suppressAccountSelection = true;
-                try { _accountsRail.SelectedItems?.Add(_viewModel.SelectedAccount); }
-                finally { _suppressAccountSelection = false; }
+                if (_validationMode != DesktopValidationMode.BrowserStartup)
+                {
+                    _suppressAccountSelection = true;
+                    try { _accountsRail.SelectedItems?.Add(_viewModel.SelectedAccount); }
+                    finally { _suppressAccountSelection = false; }
+                }
                 UpdateAccountSelectionVisuals();
                 RenderPage();
             }
