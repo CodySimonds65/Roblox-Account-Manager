@@ -14,6 +14,7 @@ public sealed record MacRobloxLaunchDiagnostics(
 public static partial class MacRobloxDiagnostics
 {
     private static readonly TimeSpan SessionMatchWindow = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan CrashReportMatchWindow = TimeSpan.FromMinutes(5);
     private const int MaxTailLines = 240;
     private const int MaxTailBytes = 256 * 1024;
 
@@ -27,9 +28,28 @@ public static partial class MacRobloxDiagnostics
         IEnumerable<string>? logDirectories = null,
         string? artifactDirectory = null)
     {
-        var candidate = FindSessionLog(processStartUtc, logDirectories ?? GetDefaultLogDirectories());
+        var directories = (logDirectories ?? GetDefaultLogDirectories())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var crashReports = FindRecentCrashReports(processStartUtc, directories);
+        var candidate = FindSessionLog(processStartUtc, directories);
         if (candidate is null)
         {
+            var crashTail = ReadCrashReportTail(crashReports);
+            if (crashReports.Count > 0)
+            {
+                var redactedCrashTail = crashTail.Select(RedactSensitive).ToArray();
+                var crashSummary = SummarizeCrashReports(crashReports);
+                var crashArtifactPath = WriteArtifact(redactedCrashTail, artifactDirectory);
+                return new MacRobloxLaunchDiagnostics(
+                    "crash-report-found",
+                    null,
+                    null,
+                    crashSummary,
+                    redactedCrashTail,
+                    crashArtifactPath);
+            }
+
             return new MacRobloxLaunchDiagnostics(
                 "session-log-not-found",
                 null,
@@ -57,6 +77,13 @@ public static partial class MacRobloxDiagnostics
 
         var redactedTail = tail.Select(RedactSensitive).ToArray();
         var summary = Summarize(candidate.Value, tail);
+        if (crashReports.Count > 0)
+        {
+            summary = summary.Concat(SummarizeCrashReports(crashReports)).ToArray();
+            redactedTail = redactedTail
+                .Concat(ReadCrashReportTail(crashReports).Select(RedactSensitive))
+                .ToArray();
+        }
         var artifactPath = WriteArtifact(redactedTail, artifactDirectory);
         return new MacRobloxLaunchDiagnostics(
             "matched-session-log",
@@ -82,7 +109,8 @@ public static partial class MacRobloxDiagnostics
         [
             Path.Combine(home, "Library", "Logs", "Roblox"),
             Path.Combine(home, "Library", "Logs", "RobloxPlayer"),
-            Path.Combine(home, "Library", "Application Support", "Roblox", "logs")
+            Path.Combine(home, "Library", "Application Support", "Roblox", "logs"),
+            Path.Combine(home, "Library", "Logs", "DiagnosticReports")
         ];
     }
 
@@ -143,6 +171,84 @@ public static partial class MacRobloxDiagnostics
         }
 
         return lines.ToArray();
+    }
+
+    private static IReadOnlyList<string> ReadCrashReportTail(IReadOnlyList<string> paths)
+    {
+        var lines = new List<string>();
+        foreach (var path in paths)
+        {
+            try
+            {
+                lines.Add($"--- {Path.GetFileName(path)} ---");
+                lines.AddRange(ReadTail(path));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                lines.Add($"--- {Path.GetFileName(path)} could not be read ---");
+            }
+        }
+
+        return lines;
+    }
+
+    private static IReadOnlyList<string> SummarizeCrashReports(IReadOnlyList<string> paths) =>
+        [
+            $"Roblox crash report(s) found: {string.Join(", ", paths.Select(Path.GetFileName))}.",
+            "Roblox crash-report evidence was collected for this launch attempt."
+        ];
+
+    private static IReadOnlyList<string> FindRecentCrashReports(
+        DateTimeOffset processStartUtc,
+        IEnumerable<string> directories)
+    {
+        var latestAllowed = DateTimeOffset.UtcNow.AddMinutes(1);
+        var earliestAllowed = processStartUtc.Subtract(CrashReportMatchWindow);
+        var paths = new List<string>();
+        foreach (var directory in directories)
+        {
+            if (!Directory.Exists(directory)) continue;
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (var path in files)
+            {
+                var fileName = Path.GetFileName(path);
+                if (!fileName.Contains("Roblox", StringComparison.OrdinalIgnoreCase)
+                    || (!path.EndsWith(".crash", StringComparison.OrdinalIgnoreCase)
+                        && !path.EndsWith(".ips", StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                DateTimeOffset lastWriteUtc;
+                try
+                {
+                    lastWriteUtc = new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    continue;
+                }
+
+                if (lastWriteUtc >= earliestAllowed && lastWriteUtc <= latestAllowed)
+                {
+                    paths.Add(path);
+                }
+            }
+        }
+
+        return paths
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
     }
 
     private static IReadOnlyList<string> Summarize(SessionLog session, IReadOnlyList<string> tail)
@@ -213,7 +319,7 @@ public static partial class MacRobloxDiagnostics
     [GeneratedRegex(@"Sending disconnect with reason:\s*(?<reason>\d+)", RegexOptions.IgnoreCase)]
     private static partial Regex DisconnectReasonRegex();
 
-    [GeneratedRegex(@"(?<prefix>(?:code|privateServerLinkCode|token|ticket|auth|authTicket|authorization|cookie|access_token|accessToken|secret|password)(?:=|:\s*))[^\s&]+", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"(?<prefix>(?:code|privateServerLinkCode|token|ticket|auth|authTicket|authorization|cookie|access_token|accessToken|secret|password)(?:=|""?\s*:\s*""?))[^\r\n&"",}]+", RegexOptions.IgnoreCase)]
     private static partial Regex SensitiveParameterRegex();
 
     [GeneratedRegex(@"https?://[^\s]+", RegexOptions.IgnoreCase)]

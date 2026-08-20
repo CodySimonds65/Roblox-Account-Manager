@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using RobloxAccountManager.Core.Contracts;
 using RobloxAccountManager.Core.Models;
+using RobloxAccountManager.Core.Navigation;
 using RobloxAccountManager.Desktop;
 using RobloxAccountManager.Desktop.Services;
 
@@ -26,6 +27,23 @@ Require(ReferenceEquals(guiStartup.InitialAccount, account) && !guiStartup.Activ
 var browserStartup = DesktopStartupPlan.Create(accounts, DesktopValidationMode.BrowserStartup);
 Require(ReferenceEquals(browserStartup.InitialAccount, account) && browserStartup.ActivateBrowserOnStartup,
     "Browser startup validation did not opt into explicit WebView activation.");
+
+var secondAccount = new AccountProfile { Id = Guid.NewGuid().ToString("N"), Label = "Second account" };
+var thirdAccount = new AccountProfile { Id = Guid.NewGuid().ToString("N"), Label = "Third account" };
+var remembered = DesktopStartupPlan.RestoreSelectedAccounts(
+    [account, secondAccount, thirdAccount],
+    new LauncherSettings
+    {
+        RememberSelections = true,
+        LastSelectedProfileIds = [thirdAccount.Id, secondAccount.Id]
+    });
+Require(remembered.SequenceEqual([secondAccount, thirdAccount]),
+    "Remembered account selection was not restored in account-list order.");
+var fallback = DesktopStartupPlan.RestoreSelectedAccounts(
+    [account, secondAccount],
+    new LauncherSettings { RememberSelections = true, LastSelectedProfileIds = ["missing"] });
+Require(fallback.SequenceEqual([account]),
+    "A selection containing only removed accounts did not fall back to the first account.");
 
 var presets = new List<GamePreset>
 {
@@ -56,6 +74,15 @@ Require(RobloxPlayControl.Script.Contains("location.hostname", StringComparison.
         && RobloxPlayControl.Script.Contains("roblox.com", StringComparison.OrdinalIgnoreCase)
         && RobloxPlayControl.Script.Contains("Play", StringComparison.Ordinal),
     "The Play-control script did not restrict itself to a trusted Roblox Play action.");
+
+var navigationGate = new RobloxNavigationGate();
+navigationGate.CommitTopLevelNavigation(new Uri("https://www.roblox.com/games/123/Test"), succeeded: true);
+Require(navigationGate.TryBeginLaunch(), "The navigation gate did not enter a pending launch state.");
+var newWindowLaunch = RobloxNavigationCapturePolicy.Evaluate(
+    navigationGate,
+    new Uri("roblox-player:1+gameinfo:new-window-ticket"));
+Require(newWindowLaunch?.Accepted == true,
+    "A Roblox launch opened as a WebView new-window navigation was not captured.");
 
 var launchSession = new FakeMacBrowserLaunchSession(
     new Uri("roblox-player:1+gameinfo:captured-ticket"),

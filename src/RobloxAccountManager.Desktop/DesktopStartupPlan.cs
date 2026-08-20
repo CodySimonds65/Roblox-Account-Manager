@@ -11,6 +11,26 @@ public enum DesktopValidationMode
 
 public sealed record DesktopStartupPlan(AccountProfile? InitialAccount, bool ActivateBrowserOnStartup)
 {
+    public static IReadOnlyList<AccountProfile> RestoreSelectedAccounts(
+        IReadOnlyList<AccountProfile> accounts,
+        LauncherSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(accounts);
+        ArgumentNullException.ThrowIfNull(settings);
+
+        if (settings.RememberSelections && settings.LastSelectedProfileIds.Count > 0)
+        {
+            var rememberedIds = settings.LastSelectedProfileIds.ToHashSet(StringComparer.Ordinal);
+            var remembered = accounts.Where(account => rememberedIds.Contains(account.Id)).ToArray();
+            if (remembered.Length > 0)
+            {
+                return remembered;
+            }
+        }
+
+        return accounts.Take(1).ToArray();
+    }
+
     public static DesktopStartupPlan Create(
         IReadOnlyList<AccountProfile> accounts,
         DesktopValidationMode validationMode)
