@@ -18,7 +18,7 @@ public sealed class UnsupportedWebsiteDataStoreRemover : IAccountBrowserDataStor
 /// Owns one NativeWebView and one persistent store identity per account. Views
 /// must be detached from their visual parent before RemoveAsync is called.
 /// </summary>
-public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessionService
+public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessionService, IMacBrowserLaunchSession
 {
     private readonly Dictionary<string, Session> _sessions = new(StringComparer.Ordinal);
     private readonly string _windowsDataDirectory;

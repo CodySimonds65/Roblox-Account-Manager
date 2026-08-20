@@ -1,5 +1,6 @@
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
+using RobloxAccountManager.Core.Contracts;
 using RobloxAccountManager.Core.Models;
 using RobloxAccountManager.Desktop;
 using RobloxAccountManager.Desktop.Services;
@@ -56,6 +57,41 @@ Require(RobloxPlayControl.Script.Contains("location.hostname", StringComparison.
         && RobloxPlayControl.Script.Contains("Play", StringComparison.Ordinal),
     "The Play-control script did not restrict itself to a trusted Roblox Play action.");
 
+var launchSession = new FakeMacBrowserLaunchSession(
+    new Uri("roblox-player:1+gameinfo:captured-ticket"),
+    clickAfterPolls: 2);
+var launchStatuses = new List<RobloxPlayControlStatus>();
+var launchCoordinator = new MacBrowserLaunchCoordinator(
+    launchSession,
+    launchStatuses.Add,
+    TimeSpan.FromMilliseconds(1));
+var capturedLaunchUri = await launchCoordinator.CaptureAsync(
+    "account-id",
+    new Uri("https://www.roblox.com/games/123/Test"),
+    TimeSpan.FromSeconds(1));
+Require(capturedLaunchUri.Scheme == "roblox-player"
+        && launchSession.Events.SequenceEqual(["capture", "navigate", "script", "script"])
+        && launchStatuses is [RobloxPlayControlStatus.NotFound, RobloxPlayControlStatus.Clicked],
+    "The macOS launch coordinator did not capture after clicking Play in the expected order.");
+
+var timeoutSession = new FakeMacBrowserLaunchSession(
+    new Uri("roblox-player:1+gameinfo:never-captured"),
+    clickAfterPolls: int.MaxValue);
+try
+{
+    await new MacBrowserLaunchCoordinator(timeoutSession, pollInterval: TimeSpan.FromMilliseconds(1))
+        .CaptureAsync(
+            "account-id",
+            new Uri("https://www.roblox.com/games/123/Test"),
+            TimeSpan.FromMilliseconds(80));
+    throw new InvalidOperationException("The macOS Play/capture timeout unexpectedly completed.");
+}
+catch (TimeoutException)
+{
+    Require(timeoutSession.CaptureCanceled,
+        "A macOS Play/capture timeout did not cancel the pending browser capture.");
+}
+
 var rowBuildCount = 0;
 var accountTemplate = AccountRailTemplatePolicy.CreateTemplate(candidate =>
 {
@@ -70,3 +106,48 @@ Require(recycledAccountRow is Border && rowBuildCount == 1,
     "Account rail template recycling did not produce a safe placeholder without invoking the row builder.");
 
 Console.WriteLine("Desktop startup and preset policy tests passed.");
+
+sealed class FakeMacBrowserLaunchSession(Uri launchUri, int clickAfterPolls) : IMacBrowserLaunchSession
+{
+    private readonly TaskCompletionSource<BrowserNavigationResult> _capture =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _polls;
+
+    public List<string> Events { get; } = [];
+    public bool CaptureCanceled { get; private set; }
+
+    public Task<BrowserNavigationResult> BeginLaunchCapture(string accountId, CancellationToken cancellationToken)
+    {
+        Events.Add("capture");
+        cancellationToken.Register(() =>
+        {
+            CaptureCanceled = true;
+            _capture.TrySetCanceled(cancellationToken);
+        });
+        return _capture.Task;
+    }
+
+    public ValueTask<BrowserNavigationResult> NavigateAsync(
+        string accountId,
+        Uri navigationUri,
+        CancellationToken cancellationToken)
+    {
+        Events.Add("navigate");
+        return ValueTask.FromResult(new BrowserNavigationResult(true, diagnosticCode: "navigation-started"));
+    }
+
+    public ValueTask<string> InvokeScriptAsync(
+        string accountId,
+        string script,
+        CancellationToken cancellationToken)
+    {
+        Events.Add("script");
+        if (Interlocked.Increment(ref _polls) >= clickAfterPolls)
+        {
+            _capture.TrySetResult(new BrowserNavigationResult(true, launchUri));
+            return ValueTask.FromResult("clicked");
+        }
+
+        return ValueTask.FromResult("not-found");
+    }
+}

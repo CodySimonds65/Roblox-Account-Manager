@@ -789,6 +789,10 @@ public sealed class MainWindow : Window
         try
         {
             await _viewModel.LoadAsync();
+            if (OperatingSystem.IsMacOS())
+            {
+                await LogMacRobloxClientVersionAsync();
+            }
             _viewModel.PropertyChanged += (_, args) =>
             {
                 if (args.PropertyName == nameof(DesktopShellViewModel.Activity)) _activity.Text = _viewModel.Activity;
@@ -1683,7 +1687,10 @@ public sealed class MainWindow : Window
             foreach (var item in _viewModel.Queue)
             {
                 _launchCancellation.Token.ThrowIfCancellationRequested();
-                item.State = LaunchQueueState.Launching; item.Detail = "Waiting for Roblox launch URI";
+                item.State = LaunchQueueState.Launching;
+                item.Detail = OperatingSystem.IsMacOS()
+                    ? "Waiting for Roblox Play control"
+                    : "Waiting for Roblox launch URI";
                 RefreshQueueSummary();
                 GameSettings? gameSettings = preset.Settings;
                 if (_viewModel.Settings.GameOverrides.TryGetValue(gameUrl, out var urlSettings))
@@ -1700,6 +1707,7 @@ public sealed class MainWindow : Window
                     MaxAttempts: 3, RobloxBundlePath: await DiscoverRobloxBundleAsync(), UserConsentedToMultiInstanceChanges: true,
                     VerificationTimeout: TimeSpan.FromSeconds(Math.Clamp(_viewModel.Settings.LaunchTimeoutSeconds, 15, 180)));
                 LaunchResult result;
+                var launchStartedUtc = DateTimeOffset.UtcNow;
                 try
                 {
                     result = await _launches.LaunchAsync(request, _launchCancellation.Token);
@@ -1710,6 +1718,7 @@ public sealed class MainWindow : Window
                     item.Detail = "Launch canceled by settings or browser failure";
                     RefreshQueueSummary();
                     _viewModel.AppendActivity($"{item.Label}: {item.Detail}.");
+                    await AppendMacRobloxDiagnosticsAsync(launchStartedUtc);
                     if (!_viewModel.Settings.ContinueOnFailure) break;
                     continue;
                 }
@@ -1719,6 +1728,7 @@ public sealed class MainWindow : Window
                     item.Detail = LaunchDiagnostics.SanitiseCode(exception.Message);
                     RefreshQueueSummary();
                     _viewModel.AppendActivity($"{item.Label}: launch failed safely ({item.Detail}).");
+                    await AppendMacRobloxDiagnosticsAsync(launchStartedUtc);
                     if (!_viewModel.Settings.ContinueOnFailure) break;
                     continue;
                 }
@@ -1726,6 +1736,10 @@ public sealed class MainWindow : Window
                 item.Detail = result.Succeeded ? "Verified process started" : result.FailureKind.ToString();
                 RefreshQueueSummary();
                 _viewModel.AppendActivity($"{item.Label}: {item.Detail}.");
+                if (!result.Succeeded)
+                {
+                    await AppendMacRobloxDiagnosticsAsync(launchStartedUtc);
+                }
                 if (!result.Succeeded && !_viewModel.Settings.ContinueOnFailure) break;
                 if (_viewModel.Settings.LaunchDelaySeconds > 0) await Task.Delay(TimeSpan.FromSeconds(_viewModel.Settings.LaunchDelaySeconds), _launchCancellation.Token);
             }
@@ -1769,7 +1783,26 @@ public sealed class MainWindow : Window
             }
 
             _viewModel.SelectedAccount = account;
-            if (!await OpenAccountAsync(account)) throw new InvalidOperationException("browser-session-unavailable");
+            var isMacOS = OperatingSystem.IsMacOS();
+            if (!await OpenAccountAsync(account, navigate: !isMacOS)) throw new InvalidOperationException("browser-session-unavailable");
+            if (isMacOS)
+            {
+                RobloxPlayControlStatus? previousStatus = null;
+                var coordinator = new MacBrowserLaunchCoordinator(
+                    _browserSessions,
+                    status =>
+                    {
+                        if (status == previousStatus) return;
+                        previousStatus = status;
+                        _viewModel.AppendActivity($"{account.Label}: {DescribeMacPlayStatus(status)}.");
+                    });
+                return await coordinator.CaptureAsync(
+                    account.Id,
+                    new Uri(gameUrl),
+                    TimeSpan.FromSeconds(Math.Clamp(_viewModel.Settings.LaunchTimeoutSeconds, 15, 180)),
+                    cancellationToken);
+            }
+
             var pending = _browserSessions.BeginLaunchCapture(account.Id, cancellationToken);
             await _browserSessions.NavigateAsync(account.Id, new Uri(gameUrl), cancellationToken);
             var navigation = await pending.ConfigureAwait(true);
@@ -1820,6 +1853,53 @@ public sealed class MainWindow : Window
         var bundle = await discovery.DiscoverAsync();
         return bundle?.BundlePath;
     }
+
+    private async Task LogMacRobloxClientVersionAsync()
+    {
+        try
+        {
+            var bundle = await new MacBundleDiscovery().DiscoverAsync();
+            _viewModel.AppendActivity(MacRobloxDiagnostics.DescribeClient(bundle));
+        }
+        catch (Exception exception)
+        {
+            _viewModel.AppendActivity($"Roblox client diagnostics unavailable: {LaunchDiagnostics.SanitiseCode(exception.Message)}.");
+        }
+    }
+
+    private async Task AppendMacRobloxDiagnosticsAsync(DateTimeOffset processStartUtc)
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        try
+        {
+            var artifactDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "RobloxAltClient",
+                "diagnostics");
+            var diagnostics = await Task.Run(() => MacRobloxDiagnostics.Collect(processStartUtc, artifactDirectory: artifactDirectory));
+            foreach (var summary in diagnostics.Summary)
+            {
+                _viewModel.AppendActivity(summary);
+            }
+
+            if (diagnostics.ArtifactPath is not null)
+            {
+                _viewModel.AppendActivity($"Redacted Roblox diagnostic tail saved as {Path.GetFileName(diagnostics.ArtifactPath)}.");
+            }
+        }
+        catch (Exception exception)
+        {
+            _viewModel.AppendActivity($"Roblox log diagnostics unavailable: {LaunchDiagnostics.SanitiseCode(exception.Message)}.");
+        }
+    }
+
+    private static string DescribeMacPlayStatus(RobloxPlayControlStatus status) => status switch
+    {
+        RobloxPlayControlStatus.Clicked => "Play control clicked",
+        RobloxPlayControlStatus.NotFound => "Waiting for Roblox Play control",
+        RobloxPlayControlStatus.WrongOrigin => "Roblox Play control blocked on an untrusted page",
+        _ => "Roblox Play control is not ready"
+    };
 
     private async Task<bool> OpenAccountAsync(AccountProfile account, bool navigate = true)
     {
