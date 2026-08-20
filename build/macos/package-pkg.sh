@@ -75,36 +75,48 @@ validate_script_free_component() {
   fi
 
   pkgutil --payload-files "$package_path" > "$payload_list"
-  if ! awk -v expected_install_location="$expected_install_location" '
-    BEGIN {
-      root_prefix = "Applications/Roblox Account Manager.app/"
-      component_prefix = "Roblox Account Manager.app/"
-    }
-    $0 == "" { next }
+  rejected_payloads="$temp_root/rejected-payloads.txt"
+  : > "$rejected_payloads"
+  while IFS= read -r payload_path; do
+    [[ -z "$payload_path" ]] && continue
+
     # pkgutil emits component payload paths relative to the package root and
     # prefixes them with ./ on macOS. Reject absolute/traversal paths before
-    # normalizing that harmless presentation prefix.
-    $0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/ { exit 1 }
-    path = $0
-    sub(/^\.\//, "", path)
-    path == "" || path == "." { next }
-    allowed = 0
-    if (expected_install_location == "any" || expected_install_location == "/") {
-      allowed = path == "Applications" || path == "Applications/" ||
-        path == "Applications/Roblox Account Manager.app" ||
-        path == "Applications/Roblox Account Manager.app/" ||
-        index(path, root_prefix) == 1
-    }
-    if (expected_install_location == "any" || expected_install_location == "/Applications") {
-      allowed = allowed || path == "Roblox Account Manager.app" ||
-        path == "Roblox Account Manager.app/" ||
-        index(path, component_prefix) == 1
-    }
-    allowed { next }
-    { exit 1 }
-  ' "$payload_list"; then
+    # normalizing that harmless presentation prefix. This is intentionally
+    # shell-native because macOS ships BSD awk, whose grammar differs from
+    # the awk implementations used by the Linux CI runners.
+    case "$payload_path" in
+      /*|..|../*|*/..|*"/../"*)
+        printf '%s\n' "$payload_path" >> "$rejected_payloads"
+        continue
+        ;;
+    esac
+
+    path="${payload_path#./}"
+    [[ -z "$path" || "$path" == "." ]] && continue
+    allowed=false
+
+    if [[ "$expected_install_location" == "any" || "$expected_install_location" == "/" ]]; then
+      case "$path" in
+        Applications|Applications/|"Applications/Roblox Account Manager.app"|"Applications/Roblox Account Manager.app/"|"Applications/Roblox Account Manager.app/"*)
+          allowed=true
+          ;;
+      esac
+    fi
+    if [[ "$expected_install_location" == "any" || "$expected_install_location" == "/Applications" ]]; then
+      case "$path" in
+        "Roblox Account Manager.app"|"Roblox Account Manager.app/"|"Roblox Account Manager.app/"*)
+          allowed=true
+          ;;
+      esac
+    fi
+
+    [[ "$allowed" == true ]] || printf '%s\n' "$payload_path" >> "$rejected_payloads"
+  done < "$payload_list"
+
+  if [[ -s "$rejected_payloads" ]]; then
     echo "Rejected PKG payload entries:" >&2
-    sed -n '1,80p' "$payload_list" >&2
+    sed -n '1,80p' "$rejected_payloads" >&2
     die "PKG payload contains an absolute, escaping, or unexpected path."
   fi
   if grep -Eiq '(^|/)(Scripts|[^/]*\.sh)(/|$)' "$payload_list"; then
