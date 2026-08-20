@@ -13,6 +13,7 @@ public sealed record DesktopComposition(
     SerializedLaunchCoordinator? Launches,
     RobloxAccountManager.Core.Contracts.IClientWindowManager? Clients,
     RobloxAccountManager.Core.Contracts.IPlatformUpdateInstaller? Updates,
+    RobloxAccountManager.Core.Contracts.IPlatformUpdateSource? UpdateSource,
     AccountStore Accounts,
     GamePresetStore Presets,
     SettingsStore Settings,
@@ -34,6 +35,7 @@ public sealed record DesktopComposition(
         SerializedLaunchCoordinator? launches = null;
         RobloxAccountManager.Core.Contracts.IClientWindowManager? clients = null;
         RobloxAccountManager.Core.Contracts.IPlatformUpdateInstaller? updates = null;
+        RobloxAccountManager.Core.Contracts.IPlatformUpdateSource? updateSource = null;
         RobloxAccountManager.Core.Contracts.IRobloxSettingsAdapter? robloxSettings = null;
         RobloxAccountManager.Core.Contracts.IPluginHostFacade? plugins = null;
         if (platform == RobloxPlatform.MacOS)
@@ -49,11 +51,11 @@ public sealed record DesktopComposition(
             clients = new MacCoreClientWindowManager(new MacAccessibilityWindowManager(nativeLocator), coreLocator);
             robloxSettings = new MacRobloxSettingsAdapter();
             plugins = new MacPluginHostFacade();
+            updateSource = new MacGitHubReleaseUpdateSource(rid: MacPkgUpdateInstaller.GetCurrentRid());
             if (!string.IsNullOrWhiteSpace(trustedInstallerIdentity) || OperatingSystem.IsMacOS())
             {
                 try
                 {
-                    var unsignedMode = string.IsNullOrWhiteSpace(trustedInstallerIdentity);
                     updates = new MacPkgUpdateInstaller(
                         expectedRid: MacPkgUpdateInstaller.GetCurrentRid(),
                         trust: new MacPkgTrustConfiguration(
@@ -61,7 +63,7 @@ public sealed record DesktopComposition(
                             "io.github.codysimonds65.roblox-account-manager",
                             "io.github.codysimonds65.roblox-account-manager",
                             "RobloxAccountManager",
-                            AllowUnsignedPackages: unsignedMode));
+                            AllowUnsignedPackages: true));
                 }
                 catch (ArgumentException)
                 {
@@ -76,6 +78,6 @@ public sealed record DesktopComposition(
             pluginHostAvailable: plugins?.IsAvailable == true,
             nativeSettingsAvailable: robloxSettings is not null,
             browserProfileDeletionAvailable: dataStoreRemover.IsSupported);
-        return new DesktopComposition(capabilities, browserSessions, launches, clients, updates, accounts, presets, settings, robloxSettings, plugins);
+        return new DesktopComposition(capabilities, browserSessions, launches, clients, updates, updateSource, accounts, presets, settings, robloxSettings, plugins);
     }
 }

@@ -79,6 +79,24 @@ try
 {
     var paths = new LauncherDataPaths(storeRoot);
     var accounts = new AccountStore(paths);
+    var presetStore = new GamePresetStore(paths);
+    var settingsStore = new SettingsStore(paths);
+    var builtIns = GamePresetStore.EnsureBuiltIns([
+        new GamePreset("Duplicate Dungeon", "https://roblox.com/games/77649408247578/Dungeon-Quest-Reborn"),
+        new GamePreset("Custom game", "https://www.roblox.com/games/123/custom")]);
+    Require(builtIns.Count == 3 && builtIns.Count(x => x.IsBuiltIn) == 2
+            && builtIns[0].Name == "Dungeon Quest Reborn"
+            && GamePresetStore.EnsureBuiltIns(builtIns).Count == 3,
+        "Built-in presets were not inserted idempotently or deduplicated by URL.");
+    await presetStore.SaveAsync(builtIns);
+    var persistedPresets = await presetStore.LoadAsync();
+    Require(persistedPresets.Count == 1 && persistedPresets[0].Name == "Custom game",
+        "Built-in presets were persisted instead of remaining runtime-only.");
+    Require(new LauncherSettings().UpdateChannel == UpdateChannel.Signed,
+        "The default update channel was not Signed.");
+    await settingsStore.SaveAsync(new LauncherSettings { UpdateChannel = UpdateChannel.Unsigned });
+    Require((await settingsStore.LoadAsync()).UpdateChannel == UpdateChannel.Unsigned,
+        "The update channel did not survive a settings-file round trip.");
     await accounts.SaveAsync([new AccountProfile { Id = Guid.NewGuid().ToString("N"), Label = "Imported" }]);
     var loadedAccounts = await accounts.LoadAsync();
     Require(loadedAccounts.Count == 1 && loadedAccounts[0].Label == "Imported", "Portable account storage did not round-trip.");
@@ -89,6 +107,7 @@ try
         MultiInstanceConsentGranted = true,
         RobloxSettingsConsentGranted = true,
         UnsignedUpdatesConsentGranted = true,
+        UpdateChannel = UpdateChannel.Unsigned,
         ClearBrowserDataOnNextStart = true
     };
     await ProfileTransferService.ExportAsync(
@@ -100,7 +119,8 @@ try
     Require(!imported.Settings.MultiInstanceConsentGranted
             && !imported.Settings.RobloxSettingsConsentGranted
             && !imported.Settings.UnsignedUpdatesConsentGranted
-            && !imported.Settings.ClearBrowserDataOnNextStart,
+            && !imported.Settings.ClearBrowserDataOnNextStart
+            && imported.Settings.UpdateChannel == UpdateChannel.Unsigned,
         "Profile import carried sensitive local consent into the current installation.");
 }
 finally
