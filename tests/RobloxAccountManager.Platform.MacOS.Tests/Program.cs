@@ -210,7 +210,8 @@ try
         Path.Combine(plistMetadataFallbackMacOs, "RobloxPlayer"),
         [1, 2, 3]);
 
-    var plistMetadataFallback = await new MacBundleDiscovery()
+    var plistMetadataFallback = await new MacBundleDiscovery(
+            new RobloxMetadataFallbackCommandRunner())
         .ValidateManagedRuntimeAsync(plistMetadataFallbackRoot);
     Check(plistMetadataFallback is not null
           && plistMetadataFallback.BundleIdentifier == MacBundleDiscovery.RobloxBundleIdentifier
@@ -825,6 +826,32 @@ sealed class RecordingCommandRunner(
             }
 
             return Task.FromResult(new MacProcessCommandResult(0, $"Non-fat file: {architecture}", string.Empty));
+        }
+
+        return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
+    }
+}
+
+sealed class RobloxMetadataFallbackCommandRunner : IMacProcessCommandRunner
+{
+    public Task<MacProcessCommandResult> RunAsync(
+        string executable,
+        IEnumerable<string> arguments,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var values = arguments.ToArray();
+        if (string.Equals(executable, "/usr/bin/plutil", StringComparison.Ordinal))
+        {
+            var key = values.Length > 1 ? values[1] : string.Empty;
+            return string.Equals(key, "CFBundleExecutable", StringComparison.Ordinal)
+                ? Task.FromResult(new MacProcessCommandResult(0, "RobloxPlayer", string.Empty))
+                : Task.FromResult(new MacProcessCommandResult(1, string.Empty, "missing plist key"));
+        }
+
+        if (string.Equals(executable, "/usr/bin/codesign", StringComparison.Ordinal))
+        {
+            return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
         }
 
         return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
