@@ -18,9 +18,9 @@ public sealed class RunningAccountRegistry : IDisposable
     private DateTime _lastInputUtc = DateTime.UtcNow;
 
     // Roblox can briefly destroy and recreate its render window while changing
-    // graphics modes or leaving a game.  Keep a bounded grace period so that a
-    // transient HWND loss is not mistaken for a dead process, while still
-    // cleaning up clients that have been closed natively.
+    // graphics modes or leaving a game.  Keep a bounded observation period so
+    // that a transient HWND loss can be diagnosed without being mistaken for a
+    // dead process. A missing window is never a reason to close a live client.
     private static readonly TimeSpan MissingWindowGracePeriod = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ExecutableIdentityStartupGracePeriod = TimeSpan.FromSeconds(2);
 
@@ -137,16 +137,21 @@ public sealed class RunningAccountRegistry : IDisposable
             liveRecord = currentRecord with
             {
                 WindowHandle = liveWindow.ToInt64(),
-                MissingWindowSinceUtc = liveWindow == nint.Zero ? currentRecord.MissingWindowSinceUtc : null
+                MissingWindowSinceUtc = liveWindow == nint.Zero
+                    ? currentRecord.MissingWindowSinceUtc ?? DateTime.UtcNow
+                    : null,
+                MissingWindowDiagnosticReported = liveWindow == nint.Zero
+                    ? currentRecord.MissingWindowDiagnosticReported
+                    : false
             };
-            if (currentRecord.WindowHandle != liveRecord.WindowHandle)
+            if (currentRecord != liveRecord)
             {
                 _records[accountId] = liveRecord;
                 SaveLocked();
             }
         }
         var current = liveRecord.ToSnapshot();
-        if (!current.IsRunning || current.ProcessId != process.Id ||
+        if (liveWindow == nint.Zero || !current.IsRunning || current.ProcessId != process.Id ||
             current.ProcessStartTimeUtcTicks != expected.ProcessStartTimeUtcTicks)
             return false;
         snapshot = current;
@@ -369,7 +374,7 @@ public sealed class RunningAccountRegistry : IDisposable
         List<ManagedAccountSnapshot> changed = [];
         List<ManagedAccountSnapshot> exited = [];
         List<Process> wrappersToDetach = [];
-        List<string> missingWindowAccounts = [];
+        List<string> missingWindowDiagnostics = [];
         List<string> invalidatedAccounts = [];
         var now = DateTime.UtcNow;
         lock (_gate)
@@ -416,10 +421,19 @@ public sealed class RunningAccountRegistry : IDisposable
                     {
                         WindowHandle = hwnd.ToInt64(),
                         MissingWindowSinceUtc = missingSince,
+                        MissingWindowDiagnosticReported = hwnd == nint.Zero
+                            ? record.MissingWindowDiagnosticReported
+                            : false,
                         LastActivityUtc = hwnd != nint.Zero && (foreground == hwnd || GetAncestor(foreground, GA_ROOT) == GetAncestor(hwnd, GA_ROOT)) ? _lastInputUtc : record.LastActivityUtc
                     };
-                    if (hwnd == nint.Zero && missingSince is not null && now - missingSince.Value >= MissingWindowGracePeriod && !_stopping.Contains(record.AccountId))
-                        missingWindowAccounts.Add(record.AccountId);
+                    if (hwnd == nint.Zero && missingSince is not null &&
+                        now - missingSince.Value >= MissingWindowGracePeriod &&
+                        !record.MissingWindowDiagnosticReported)
+                    {
+                        snapshot = snapshot with { MissingWindowDiagnosticReported = true };
+                        missingWindowDiagnostics.Add(
+                            $"Account {record.Label} (PID {record.ProcessId}) has no discoverable Roblox window after {MissingWindowGracePeriod.TotalSeconds:0} seconds, but the validated process is still alive; no termination was requested.");
+                    }
                     if (snapshot != record)
                     {
                         _records[record.AccountId] = snapshot;
@@ -471,12 +485,7 @@ public sealed class RunningAccountRegistry : IDisposable
 
         foreach (var snapshot in changed) AccountChanged?.Invoke(this, snapshot);
         foreach (var snapshot in exited) RaiseAccountExited(snapshot);
-        foreach (var accountId in missingWindowAccounts)
-        {
-            try { AccountStopping?.Invoke(this, accountId); }
-            catch (Exception ex) { Diagnostic?.Invoke(this, $"Account-stop handler failed for {accountId}: {ex.Message}"); }
-            _ = TerminateAccountAsync(accountId);
-        }
+        foreach (var diagnostic in missingWindowDiagnostics) Diagnostic?.Invoke(this, diagnostic);
     }
 
     private void RaiseAccountExited(ManagedAccountSnapshot snapshot)
@@ -602,7 +611,8 @@ public sealed class RunningAccountRegistry : IDisposable
         DateTime LastActivityUtc,
         long WindowHandle = 0,
         string ExecutablePath = "",
-        DateTime? MissingWindowSinceUtc = null)
+        DateTime? MissingWindowSinceUtc = null,
+        bool MissingWindowDiagnosticReported = false)
     {
         public ManagedAccountSnapshot ToSnapshot()
         {
@@ -622,7 +632,7 @@ public sealed class RunningAccountRegistry : IDisposable
                 windowHandle == nint.Zero ? 96u : GetDpiForWindow(windowHandle),
                 windowHandle != nint.Zero && IsIconic(GetAncestor(windowHandle, GA_ROOT)),
                 LastActivityUtc,
-                windowHandle != nint.Zero,
+                true,
                 processRoot);
         }
     }

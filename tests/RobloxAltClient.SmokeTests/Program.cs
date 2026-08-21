@@ -399,6 +399,53 @@ finally
     if (Directory.Exists(terminationStateRoot)) Directory.Delete(terminationStateRoot, recursive: true);
 }
 
+var missingWindowStateRoot = Path.Combine(Path.GetTempPath(), "RobloxAltClient-missing-window-" + Guid.NewGuid().ToString("N"));
+try
+{
+    using var missingWindowRegistry = new RunningAccountRegistry(missingWindowStateRoot);
+    using var windowlessProcess = Process.Start(new ProcessStartInfo("cmd.exe", "/c ping 127.0.0.1 -n 30 > nul")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true
+    }) ?? throw new InvalidOperationException("The windowless helper process did not start.");
+    var missingWindowSignal = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var stoppingObserved = false;
+    EventHandler<string> missingWindowDiagnostic = (_, message) =>
+    {
+        if (message.Contains("no discoverable Roblox window", StringComparison.Ordinal))
+            missingWindowSignal.TrySetResult(message);
+    };
+    EventHandler<string> stopping = (_, _) => stoppingObserved = true;
+    missingWindowRegistry.Diagnostic += missingWindowDiagnostic;
+    missingWindowRegistry.AccountStopping += stopping;
+    try
+    {
+        missingWindowRegistry.Register(new AccountProfile { Id = "missing-window-test", Label = "Missing window test" }, windowlessProcess);
+        var diagnostic = await AwaitSignalAsync(missingWindowSignal.Task, TimeSpan.FromSeconds(15),
+            "The registry did not report the live process with a missing window.");
+        Require(diagnostic.Contains("no termination was requested", StringComparison.Ordinal),
+            "The missing-window diagnostic did not confirm that termination was suppressed.");
+        Require(!windowlessProcess.HasExited, "A live process with a missing window was terminated by the watchdog.");
+        var snapshot = missingWindowRegistry.Snapshot().Single(account => account.AccountId == "missing-window-test");
+        Require(snapshot.IsRunning && snapshot.WindowHandle == nint.Zero,
+            "A live process with a missing window was not represented as running without an HWND.");
+        Require(!stoppingObserved, "A missing-window transition incorrectly raised AccountStopping.");
+    }
+    finally
+    {
+        missingWindowRegistry.Diagnostic -= missingWindowDiagnostic;
+        missingWindowRegistry.AccountStopping -= stopping;
+        if (!windowlessProcess.HasExited)
+        {
+            try { windowlessProcess.Kill(entireProcessTree: true); } catch { }
+        }
+    }
+}
+finally
+{
+    if (Directory.Exists(missingWindowStateRoot)) Directory.Delete(missingWindowStateRoot, recursive: true);
+}
+
 Console.WriteLine("Managed-account termination smoke tests passed.");
 
 var legacySettings = JsonSerializer.Deserialize<LauncherSettings>("{}");
