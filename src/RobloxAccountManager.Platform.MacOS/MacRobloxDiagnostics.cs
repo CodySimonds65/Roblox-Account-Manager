@@ -325,6 +325,6 @@ public static partial class MacRobloxDiagnostics
     [GeneratedRegex(@"https?://[^\s]+", RegexOptions.IgnoreCase)]
     private static partial Regex HttpUrlRegex();
 
-    [GeneratedRegex(@"roblox(?:-player)?://[^\s]+", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"roblox(?:-player)?:(?:/{0,2})[^\s]+", RegexOptions.IgnoreCase)]
     private static partial Regex RobloxSchemeRegex();
 }

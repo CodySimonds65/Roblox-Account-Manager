@@ -72,7 +72,7 @@ public sealed class MacCoreProcessLocator : Contracts.IRobloxProcessLocator
                 result.Status == LaunchVerificationStatus.TimedOut
                     ? Contracts.LaunchFailureKind.ProcessNotFound
                     : Contracts.LaunchFailureKind.VerificationFailed,
-                result.Status.ToString());
+                MacLaunchDiagnostics.DescribeVerificationFailure(result));
     }
 
     public ValueTask<IReadOnlyList<Contracts.RobloxProcessInfo>> GetManagedProcessesAsync(CancellationToken cancellationToken = default)
@@ -186,7 +186,10 @@ public sealed class MacCorePlatformLauncher : Contracts.IRobloxPlatformLauncher
                 cancellationToken).ConfigureAwait(false);
             return command.Succeeded
                 ? Contracts.PlatformLaunchResult.Success(validatedBundle.SourceFingerprint)
-                : new Contracts.PlatformLaunchResult(false, Contracts.LaunchFailureKind.LauncherRejected, "macos-open-failed");
+                : new Contracts.PlatformLaunchResult(
+                    false,
+                    Contracts.LaunchFailureKind.LauncherRejected,
+                    MacLaunchDiagnostics.DescribeOpenFailure(command));
         }
         finally
         {

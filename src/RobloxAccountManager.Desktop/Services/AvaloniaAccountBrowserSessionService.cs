@@ -82,6 +82,7 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
             OperatingSystem.IsWindows() ? RobloxPlatform.Windows : RobloxPlatform.Unknown;
         var view = new NativeWebView();
         var gate = new RobloxNavigationGate();
+        var routeTracker = new MacNavigationCaptureTracker();
         view.EnvironmentRequested += (_, args) =>
         {
             args.EnableDevTools = false;
@@ -99,7 +100,7 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
             }
         };
         var descriptor = new BrowserSessionDescriptor(accountId, profileName, dataStoreIdentifier.ToString("D"), platform);
-        var session = new Session(descriptor, view, gate, dataStoreIdentifier);
+        var session = new Session(descriptor, view, gate, routeTracker, dataStoreIdentifier);
         view.NavigationCompleted += (_, args) => gate.CommitTopLevelNavigation(args.Request, args.IsSuccess);
         view.NavigationStarted += (_, args) =>
         {
@@ -174,12 +175,24 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
         }
     }
 
-    private BrowserNavigationResult? EvaluateRoute(Session session, string route, Uri? request) =>
-        RobloxNavigationCapturePolicy.Evaluate(
+    private BrowserNavigationResult? EvaluateRoute(Session session, string route, Uri? request)
+    {
+        if (request is not null && session.RouteTracker.TryConsumeDuplicate(request))
+        {
+            var duplicate = BrowserNavigationResult.Rejected("duplicate-after-capture");
+            ReportDiagnostic(session, RobloxNavigationCapturePolicy.DescribeRoute(route, request, duplicate));
+            return duplicate;
+        }
+
+        var result = RobloxNavigationCapturePolicy.Evaluate(
             session.Gate,
             request,
             route,
             message => ReportDiagnostic(session, message));
+        if (result?.Accepted == true && request is not null)
+            session.RouteTracker.RecordAccepted(request);
+        return result;
+    }
 
     private static void CompletePendingLaunch(Session session, BrowserNavigationResult? result)
     {
@@ -232,17 +245,24 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
 
     private sealed class Session
     {
-        public Session(BrowserSessionDescriptor descriptor, NativeWebView view, RobloxNavigationGate gate, Guid dataStoreIdentifier)
+        public Session(
+            BrowserSessionDescriptor descriptor,
+            NativeWebView view,
+            RobloxNavigationGate gate,
+            MacNavigationCaptureTracker routeTracker,
+            Guid dataStoreIdentifier)
         {
             Descriptor = descriptor;
             View = view;
             Gate = gate;
+            RouteTracker = routeTracker;
             DataStoreIdentifier = dataStoreIdentifier;
         }
 
         public BrowserSessionDescriptor Descriptor { get; }
         public NativeWebView View { get; }
         public RobloxNavigationGate Gate { get; }
+        public MacNavigationCaptureTracker RouteTracker { get; }
         public Guid DataStoreIdentifier { get; }
         public TaskCompletionSource<BrowserNavigationResult>? PendingLaunch;
     }

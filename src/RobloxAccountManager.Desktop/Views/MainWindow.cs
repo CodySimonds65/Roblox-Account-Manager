@@ -1630,7 +1630,10 @@ public sealed class MainWindow : Window
                     var validationError = await macInstaller.ValidateAsync(package);
                     if (validationError is not null)
                     {
-                        _viewModel.AppendActivity($"Unsigned update rejected before prompt: {validationError}.");
+                        _viewModel.AppendActivity(
+                            MacUpdateActivityFormatter.FormatUnsignedValidationRejection(
+                                validationError,
+                                macInstaller.CurrentPackageVersion));
                         return;
                     }
                 }
@@ -1919,7 +1922,7 @@ public sealed class MainWindow : Window
     {
         RobloxPlayControlStatus.Clicked => "Play control clicked",
         RobloxPlayControlStatus.NotFound => "Waiting for Roblox Play control",
-        RobloxPlayControlStatus.WrongOrigin => "Roblox Play control blocked on an untrusted page",
+        RobloxPlayControlStatus.WrongOrigin => "Waiting for Roblox page to finish loading",
         _ => "Roblox Play control is not ready"
     };
 
