@@ -26,46 +26,13 @@ The client requests administrator approval once at startup; additional account l
 
 ## Build it yourself
 
-Requires Windows, the .NET 8 SDK or newer, and Microsoft WebView2 Runtime.
+Requires the .NET 8 SDK or newer. Windows builds also require the Microsoft WebView2 Runtime; macOS builds require macOS 14 or newer.
 
-```text
-build-client.cmd
-```
+- **Windows:** Run `build-client.cmd`; the output is `release\RobloxAccountManager.exe`.
+- **macOS:** Publish for `osx-arm64` or `osx-x64`, then package the app with `build/macos/package-app.sh`.
+- **Source:** Windows code is under `client\`; cross-platform code is under `src\`.
 
-Output: `release\RobloxAccountManager.exe`. The source is under `client\` and licensed under Apache 2.0.
-
-### macOS development build
-
-The cross-platform implementation is under `src/`. It requires macOS 14 or newer because each account uses a persistent, uniquely identified WKWebView data store. The Avalonia frontend includes account profiles, isolated browser sessions, presets, launch queues, external client management, diagnostics, scoped settings, plugin capability status, and update handoff. Build the shared contracts, macOS adapter, and Avalonia frontend with:
-
-```text
-dotnet run --project tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release
-dotnet build src/RobloxAccountManager.Platform.MacOS/RobloxAccountManager.Platform.MacOS.csproj -c Release
-dotnet publish src/RobloxAccountManager.Desktop/RobloxAccountManager.Desktop.csproj -c Release -r osx-arm64 --self-contained true
-bash build/macos/package-app.sh bin/Release/net8.0/osx-arm64/publish "Roblox Account Manager.app" 0.0.0
-```
-
-Use `osx-x64` for Intel. The development build is not a replacement for the Windows release until the real-Mac two/four-client matrix and signed, notarized PKG checks pass. Cloning or re-signing Roblox requires explicit consent; Accessibility is optional and only controls focus/tiling of external client windows.
-
-The package step creates a normal macOS application bundle. Open `Roblox Account Manager.app` in Finder, or launch it from Terminal with:
-
-```text
-open "Roblox Account Manager.app"
-```
-
-To verify that Apple Installer actually materialized a package on a target volume, without modifying that volume, run:
-
-```text
-bash build/macos/verify-installed-pkg.sh "$HOME/Downloads/RobloxAccountManager-<version>-osx-x64-unsigned.pkg" /
-```
-
-This checks the PKG payload, internal `PackageInfo`, physical application files, and package receipt. A successful Installer transaction alone is not treated as proof that the application bundle exists.
-
-Unsigned development bundles may require **System Settings → Privacy & Security → Open Anyway**. During the unsigned phase, update packages are checksum- and payload-validated before Apple Installer is opened, but macOS approval remains the user's responsibility. The release workflow publishes separate `osx-arm64` and `osx-x64` script-free PKGs signed with Developer ID Installer, notarized, stapled, and checksum-paired. The package has no installer scripts and installs the signed app under `/Applications`; the packaging validator also accepts legacy component PKGs for compatibility testing.
-
-While Apple signing credentials are being configured, the repository also provides a manually triggered temporary unsigned release path. Its assets include `-unsigned` in the filename and are never presented as certified. Users must explicitly approve the installer and app through macOS **Privacy & Security → Open Anyway**. These packages are for testing only; use the signed workflow for normal distribution.
-
-macOS launching is fail-closed unless the selected Roblox bundle passes exact bundle-ID, approved-location, strict Developer ID, Gatekeeper, and designated-requirement checks. These checks do not prove the publisher's Team ID; that pinning is intentionally omitted so unsigned RAM packages can launch without a maintainer-only Roblox signing secret. The RAM app and PKG remain independently signed and notarized when the signed release workflow is used.
+macOS support is experimental; use the Windows release for normal use. All source is licensed under Apache 2.0.
 
 ## Settings
 
