@@ -15,6 +15,7 @@ public sealed class ClientEmbeddingService
     private readonly Dictionary<string, EmbeddedWindow> _embedded = new(StringComparer.Ordinal);
     private string? _visibleAccountId;
     private nint _hostWindow;
+    private static readonly TimeSpan IdentityValidationCacheDuration = TimeSpan.FromMilliseconds(250);
 
     /// <summary>Decides whether an account is eligible for embedding/tab display; accounts returning false are unembedded.</summary>
     public Func<string, bool>? EmbedFilter { get; set; }
@@ -285,15 +286,21 @@ public sealed class ClientEmbeddingService
             var selected = string.Equals(window.AccountId, visibleAccountId, StringComparison.Ordinal);
             if (!selected)
             {
-                HideWindow(window.Root);
+                if (IsWindowVisible(window.Root)) HideWindow(window.Root);
+                window.HasAppliedDockBounds = false;
                 continue;
             }
-            if (!SetWindowPos(window.Root, nint.Zero, origin.X, origin.Y, width, height,
-                    SwpNoActivate | SwpNoZOrder | SwpFrameChanged | SwpShowWindow))
+            var target = new RECT(origin.X, origin.Y, origin.X + width, origin.Y + height);
+            if (window.HasAppliedDockBounds && window.LastAppliedDockBounds.Equals(target) && IsWindowVisible(window.Root))
+                continue;
+            if (!SetWindowPos(window.Root, nint.Zero, target.Left, target.Top, width, height,
+                    SwpNoActivate | SwpNoZOrder | SwpShowWindow))
             {
                 Diagnostics?.Invoke($"Dock layout failed for {window.AccountId} (Win32 {Marshal.GetLastWin32Error()}).");
                 continue;
             }
+            window.LastAppliedDockBounds = target;
+            window.HasAppliedDockBounds = true;
             if (!GetWindowRect(window.Root, out var actual) ||
                 actual.Left != origin.X || actual.Top != origin.Y ||
                 actual.Right != origin.X + width || actual.Bottom != origin.Y + height)
@@ -323,11 +330,12 @@ public sealed class ClientEmbeddingService
                 }
                 if (string.Equals(id, _visibleAccountId, StringComparison.Ordinal))
                 {
-                    DockWindow(embedded, hostWindow: _hostWindow);
+                    embedded.HasAppliedDockBounds = false;
                 }
                 else
                 {
-                    HideWindow(embedded.Root);
+                    if (IsWindowVisible(embedded.Root)) HideWindow(embedded.Root);
+                    embedded.HasAppliedDockBounds = false;
                 }
             }
         }
@@ -376,7 +384,17 @@ public sealed class ClientEmbeddingService
                GetAncestor(embedded.Root, GaRoot) == embedded.Root &&
                (GetWindowLongPtr(embedded.Root, GwlStyle).ToInt64() & WsChild) == 0 &&
                (GetWindowLongPtr(embedded.Root, GwlStyle).ToInt64() & WsPopup) != 0 &&
-               ValidateProcessIdentity((int)embedded.ProcessId, embedded.ProcessStartTimeUtcTicks, embedded.ExpectedProcessName);
+               ValidateProcessIdentityCached(embedded);
+    }
+
+    private static bool ValidateProcessIdentityCached(EmbeddedWindow embedded)
+    {
+        var now = DateTime.UtcNow;
+        if (embedded.IdentityValidatedUntilUtc > now) return embedded.IdentityValid;
+        var valid = ValidateProcessIdentity((int)embedded.ProcessId, embedded.ProcessStartTimeUtcTicks, embedded.ExpectedProcessName);
+        embedded.IdentityValid = valid;
+        embedded.IdentityValidatedUntilUtc = now + IdentityValidationCacheDuration;
+        return valid;
     }
 
     private static bool ValidateProcessIdentity(int processId, long expectedStartTicks, string? expectedProcessName)
@@ -413,22 +431,6 @@ public sealed class ClientEmbeddingService
                ValidateProcessIdentity((int)embedded.ProcessId, embedded.ProcessStartTimeUtcTicks, embedded.ExpectedProcessName) &&
                GetAncestor(embedded.Root, GaRoot) == embedded.Root &&
                (GetWindowLongPtr(embedded.Root, GwlStyle).ToInt64() & WsChild) == 0;
-    }
-
-    private static void DockWindow(EmbeddedWindow embedded, nint hostWindow)
-    {
-        if (!IsCurrent(embedded, hostWindow) || !GetClientRect(hostWindow, out var rect)) return;
-        var origin = new POINT();
-        if (!ClientToScreen(hostWindow, ref origin)) return;
-        var width = rect.Right - rect.Left;
-        var height = rect.Bottom - rect.Top;
-        if (width < 1 || height < 1) return;
-
-        // Showing an owned top-level window with SWP_NOACTIVATE keeps RAM's
-        // foreground state intact.  The physical click may activate Roblox
-        // naturally; this method never steals foreground itself.
-        SetWindowPos(embedded.Root, nint.Zero, origin.X, origin.Y, width, height,
-            SwpNoActivate | SwpNoZOrder | SwpFrameChanged | SwpShowWindow);
     }
 
     private static bool TrySetStyle(nint window, long style)
@@ -549,6 +551,10 @@ public sealed class ClientEmbeddingService
         public nint OwnerWindow { get; }
         public string AccountId { get; }
         public bool OriginalVisible { get; }
+        public DateTime IdentityValidatedUntilUtc { get; set; }
+        public bool IdentityValid { get; set; }
+        public bool HasAppliedDockBounds { get; set; }
+        public RECT LastAppliedDockBounds { get; set; }
     }
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)] private static extern nint GetWindowLongPtr(nint window, int index);
@@ -573,6 +579,14 @@ public sealed class ClientEmbeddingService
     [StructLayout(LayoutKind.Sequential)]
     private readonly struct RECT
     {
+        public RECT(int left, int top, int right, int bottom)
+        {
+            Left = left;
+            Top = top;
+            Right = right;
+            Bottom = bottom;
+        }
+
         public readonly int Left;
         public readonly int Top;
         public readonly int Right;

@@ -1447,6 +1447,16 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
         "Selecting the first native client did not hide every other docked client.");
     Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
         "Docking displayed more than one Roblox client at once.");
+    for (var iteration = 0; iteration < 120; iteration++)
+    {
+        nativeHost.SetBounds(-32000 + iteration % 9, -32000 + iteration % 7,
+            640 + iteration % 17, 480 + iteration % 13);
+        embeddings.Layout();
+    }
+    var finalHostBounds = nativeHost.Bounds;
+    var finalClientBounds = firstRoot.Bounds;
+    Require(finalClientBounds == finalHostBounds,
+        "Repeated dock layout did not leave the visible client aligned with the host viewport.");
     secondRoot.Show();
     secondRoot.SetOwner(firstOwner.Handle);
     Require(firstRoot.Visible && secondRoot.Visible,
