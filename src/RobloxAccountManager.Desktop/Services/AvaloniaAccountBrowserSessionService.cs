@@ -24,6 +24,8 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
     private readonly string _windowsDataDirectory;
     private readonly IAccountBrowserDataStoreRemover _storeRemover;
 
+    public event Action<string>? NavigationDiagnostic;
+
     public AvaloniaAccountBrowserSessionService(
         IAccountBrowserDataStoreRemover? storeRemover = null,
         string? windowsDataDirectory = null)
@@ -54,6 +56,7 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
             session.Gate.CancelPendingLaunch();
             throw new InvalidOperationException("A browser launch is already pending for this account.");
         }
+        ReportDiagnostic(session, "macos-capture-armed");
         var registration = cancellationToken.Register(() =>
         {
             if (ReferenceEquals(Interlocked.CompareExchange(ref session.PendingLaunch, null, pending), pending))
@@ -100,25 +103,29 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
         view.NavigationCompleted += (_, args) => gate.CommitTopLevelNavigation(args.Request, args.IsSuccess);
         view.NavigationStarted += (_, args) =>
         {
-            var result = RobloxNavigationCapturePolicy.Evaluate(gate, args.Request);
+            var result = EvaluateRoute(session, "navigation-started", args.Request);
             if (result is null) return;
             args.Cancel = true;
-            if (result.Accepted)
-            {
-                var pending = Interlocked.Exchange(ref session.PendingLaunch, null);
-                pending?.TrySetResult(result);
-            }
+            CompletePendingLaunch(session, result);
         };
         view.NewWindowRequested += (_, args) =>
         {
-            var result = RobloxNavigationCapturePolicy.Evaluate(gate, args.Request);
+            var result = EvaluateRoute(session, "new-window", args.Request);
             if (result is null) return;
             args.Handled = true;
-            if (result.Accepted)
+            CompletePendingLaunch(session, result);
+        };
+        if (descriptor.Platform == RobloxPlatform.MacOS)
+        {
+            // WKWebView can report an external-protocol request through
+            // WebResourceRequested before it reaches either navigation event.
+            // Capture it here, then let the later navigation event cancel the
+            // OS-level handoff.
+            view.WebResourceRequested += (_, args) =>
             {
-                var pending = Interlocked.Exchange(ref session.PendingLaunch, null);
-                pending?.TrySetResult(result);
-            }
+                var result = EvaluateRoute(session, "web-resource", args.Request.Uri);
+                CompletePendingLaunch(session, result);
+            };
         };
         _sessions.Add(accountId, session);
         return ValueTask.FromResult(descriptor);
@@ -165,6 +172,26 @@ public sealed class AvaloniaAccountBrowserSessionService : IAccountBrowserSessio
             Interlocked.Exchange(ref session.PendingLaunch, null)?.TrySetCanceled(cancellationToken);
             await ReleaseViewAsync(session.View, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private BrowserNavigationResult? EvaluateRoute(Session session, string route, Uri? request) =>
+        RobloxNavigationCapturePolicy.Evaluate(
+            session.Gate,
+            request,
+            route,
+            message => ReportDiagnostic(session, message));
+
+    private static void CompletePendingLaunch(Session session, BrowserNavigationResult? result)
+    {
+        if (result?.Accepted != true) return;
+        var pending = Interlocked.Exchange(ref session.PendingLaunch, null);
+        pending?.TrySetResult(result);
+    }
+
+    private void ReportDiagnostic(Session session, string message)
+    {
+        if (session.Descriptor.Platform == RobloxPlatform.MacOS)
+            NavigationDiagnostic?.Invoke(message);
     }
 
     private static async ValueTask ReleaseViewAsync(NativeWebView view, CancellationToken cancellationToken)
