@@ -240,6 +240,22 @@ var officialRequirements = new MacProcessCommandResult(
 Check(MacSignatureVerifier.IsAcceptedOfficialBundleSignature(
         officialSignature, officialGatekeeper, officialRequirements),
     "A valid Developer ID Roblox bundle was rejected when Team ID pinning was omitted.");
+if (OperatingSystem.IsMacOS())
+{
+    var signatureCommandRunner = new RecordingSignatureCommandRunner();
+    var verified = await new MacSignatureVerifier(signatureCommandRunner)
+        .VerifyAsync("/Applications/Roblox.app");
+    var requirementCall = signatureCommandRunner.Calls.Single(call =>
+        call.Arguments.Contains("--requirements", StringComparer.Ordinal));
+    Check(verified
+          && requirementCall.Arguments.Contains("-", StringComparer.Ordinal)
+          && !requirementCall.Arguments.Contains(":-", StringComparer.Ordinal),
+        "macOS signature verification did not request the designated requirement in the supported format.");
+}
+else
+{
+    Skip("The macOS signature command-shape test requires macOS.");
+}
 Check(MacSignatureVerifier.IsAcceptedOfficialBundleSignature(
         officialSignature with { StandardError = officialSignature.StandardError.Replace(
             "Roblox Corporation", "Other Developer") },
@@ -852,6 +868,41 @@ sealed class RobloxMetadataFallbackCommandRunner : IMacProcessCommandRunner
         if (string.Equals(executable, "/usr/bin/codesign", StringComparison.Ordinal))
         {
             return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
+        }
+
+        return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
+    }
+}
+
+sealed class RecordingSignatureCommandRunner : IMacProcessCommandRunner
+{
+    public List<(string Executable, IReadOnlyList<string> Arguments)> Calls { get; } = [];
+
+    public Task<MacProcessCommandResult> RunAsync(
+        string executable,
+        IEnumerable<string> arguments,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var values = arguments.ToArray();
+        Calls.Add((executable, values));
+        if (values.Contains("--requirements", StringComparer.Ordinal))
+        {
+            var formatIndex = Array.IndexOf(values, "--requirements") + 1;
+            var requirements = formatIndex < values.Length && values[formatIndex] == "-"
+                ? "designated => identifier \"com.roblox.RobloxPlayer\""
+                : string.Empty;
+            return Task.FromResult(new MacProcessCommandResult(0, requirements, string.Empty));
+        }
+
+        if (string.Equals(executable, "/usr/bin/codesign", StringComparison.Ordinal)
+            && values.Contains("--verbose=4", StringComparer.Ordinal))
+        {
+            return Task.FromResult(new MacProcessCommandResult(
+                0,
+                string.Empty,
+                "Authority=Developer ID Application: Roblox Corporation (ARBITRARY1)\n" +
+                "Identifier=com.roblox.RobloxPlayer"));
         }
 
         return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
