@@ -16,10 +16,12 @@ public partial class ClientsPanel : UserControl
     private readonly Queue<string> _diagnosticLines = new();
     private readonly NativeInputDiagnostics _nativeInputDiagnostics = new();
     private readonly DispatcherTimer _diagnosticTimer;
+    private readonly DispatcherTimer _relayoutTimer;
     private PluginRuntime? _runtime;
     private Window? _ownerWindow;
     private bool _attached;
     private bool _viewVisible;
+    private bool _relayoutPending;
 
     public ClientsPanel()
     {
@@ -29,6 +31,11 @@ public partial class ClientsPanel : UserControl
             Interval = TimeSpan.FromMilliseconds(75)
         };
         _diagnosticTimer.Tick += DiagnosticTimer_Tick;
+        _relayoutTimer = new DispatcherTimer(DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(16)
+        };
+        _relayoutTimer.Tick += RelayoutTimer_Tick;
     }
 
     /// <summary>Raised on the UI thread when an account's tab is created for the first time.</summary>
@@ -80,6 +87,8 @@ public partial class ClientsPanel : UserControl
         if (_runtime is not null && NativeClientHost.NativeHandle != nint.Zero)
             _runtime.ClientEmbeddings.ReleaseHostWindow(NativeClientHost.NativeHandle);
         _diagnosticTimer.Stop();
+        _relayoutTimer.Stop();
+        _relayoutPending = false;
         _attached = false;
     }
 
@@ -279,7 +288,22 @@ public partial class ClientsPanel : UserControl
     private void Relayout()
     {
         if (NativeClientHost.NativeHandle == nint.Zero || !IsLoaded || Visibility != Visibility.Visible) return;
+        _relayoutPending = true;
+        if (!_relayoutTimer.IsEnabled) _relayoutTimer.Start();
+    }
+
+    private void RelayoutTimer_Tick(object? sender, EventArgs e)
+    {
+        if (!_relayoutPending || NativeClientHost.NativeHandle == nint.Zero || !IsLoaded || Visibility != Visibility.Visible)
+        {
+            _relayoutPending = false;
+            _relayoutTimer.Stop();
+            return;
+        }
+
+        _relayoutPending = false;
         _runtime?.ClientEmbeddings.Layout();
+        if (!_relayoutPending) _relayoutTimer.Stop();
     }
 
     private void ClientsPanel_Loaded(object sender, RoutedEventArgs e) => Relayout();
