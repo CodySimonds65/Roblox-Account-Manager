@@ -193,6 +193,39 @@ _ = new MacCorePlatformLauncher(unconfiguredDiscovery);
 passed++;
 Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblox Team ID pin.");
 
+var plistMetadataFallbackRoot = Path.Combine(
+    Path.GetTempPath(),
+    "ram-mac-roblox-plist-fallback-" + Guid.NewGuid().ToString("N") + ".app");
+var plistMetadataFallbackContents = Path.Combine(plistMetadataFallbackRoot, "Contents");
+var plistMetadataFallbackMacOs = Path.Combine(plistMetadataFallbackContents, "MacOS");
+Directory.CreateDirectory(plistMetadataFallbackMacOs);
+try
+{
+    await File.WriteAllTextAsync(
+        Path.Combine(plistMetadataFallbackContents, "Info.plist"),
+        "<?xml version=\"1.0\"?><plist><dict>" +
+        "<key>CFBundleExecutable</key><string>RobloxPlayer</string>" +
+        "</dict></plist>");
+    await File.WriteAllBytesAsync(
+        Path.Combine(plistMetadataFallbackMacOs, "RobloxPlayer"),
+        [1, 2, 3]);
+
+    var plistMetadataFallback = await new MacBundleDiscovery(
+            new RobloxMetadataFallbackCommandRunner())
+        .ValidateManagedRuntimeAsync(plistMetadataFallbackRoot);
+    Check(plistMetadataFallback is not null
+          && plistMetadataFallback.BundleIdentifier == MacBundleDiscovery.RobloxBundleIdentifier
+          && plistMetadataFallback.ExecutablePath.EndsWith(
+              Path.Combine("Contents", "MacOS", "RobloxPlayer"),
+              StringComparison.OrdinalIgnoreCase),
+        "A Roblox bundle without root CFBundleIdentifier metadata was rejected.");
+}
+finally
+{
+    if (Directory.Exists(plistMetadataFallbackRoot))
+        Directory.Delete(plistMetadataFallbackRoot, recursive: true);
+}
+
 var officialSignature = new MacProcessCommandResult(
     0,
     string.Empty,
@@ -793,6 +826,32 @@ sealed class RecordingCommandRunner(
             }
 
             return Task.FromResult(new MacProcessCommandResult(0, $"Non-fat file: {architecture}", string.Empty));
+        }
+
+        return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
+    }
+}
+
+sealed class RobloxMetadataFallbackCommandRunner : IMacProcessCommandRunner
+{
+    public Task<MacProcessCommandResult> RunAsync(
+        string executable,
+        IEnumerable<string> arguments,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var values = arguments.ToArray();
+        if (string.Equals(executable, "/usr/bin/plutil", StringComparison.Ordinal))
+        {
+            var key = values.Length > 1 ? values[1] : string.Empty;
+            return string.Equals(key, "CFBundleExecutable", StringComparison.Ordinal)
+                ? Task.FromResult(new MacProcessCommandResult(0, "RobloxPlayer", string.Empty))
+                : Task.FromResult(new MacProcessCommandResult(1, string.Empty, "missing plist key"));
+        }
+
+        if (string.Equals(executable, "/usr/bin/codesign", StringComparison.Ordinal))
+        {
+            return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
         }
 
         return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
