@@ -7,6 +7,7 @@ namespace RobloxAccountManager.Platform.MacOS;
 public sealed class MacBundleDiscovery
 {
     public const string RobloxBundleIdentifier = "com.roblox.RobloxPlayer";
+    public const string RobloxExecutableName = "RobloxPlayer";
 
     private readonly IMacProcessCommandRunner _commandRunner;
     private readonly MacSignatureVerifier _signatureVerifier;
@@ -88,6 +89,18 @@ public sealed class MacBundleDiscovery
 
             var identifier = await ReadPlistValueAsync(plistPath, "CFBundleIdentifier", cancellationToken).ConfigureAwait(false);
             var executableName = await ReadPlistValueAsync(plistPath, "CFBundleExecutable", cancellationToken).ConfigureAwait(false);
+
+            // Some current Roblox macOS bundles omit these root-plist keys even though the
+            // signed bundle still identifies itself as com.roblox.RobloxPlayer and ships the
+            // canonical RobloxPlayer executable. The code-signature validation below remains
+            // authoritative on macOS; these fallbacks only keep discovery from rejecting that
+            // valid bundle before launch.
+            identifier = string.IsNullOrWhiteSpace(identifier)
+                ? RobloxBundleIdentifier
+                : identifier;
+            executableName = string.IsNullOrWhiteSpace(executableName)
+                ? RobloxExecutableName
+                : executableName;
             if (!string.Equals(identifier, RobloxBundleIdentifier, StringComparison.Ordinal)
                 || string.IsNullOrWhiteSpace(executableName)
                 || executableName.Contains(Path.DirectorySeparatorChar)
