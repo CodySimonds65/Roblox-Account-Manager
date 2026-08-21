@@ -283,7 +283,7 @@ public sealed class MacSignatureVerifier
             cancellationToken).ConfigureAwait(false);
         var requirements = await _commandRunner.RunAsync(
             "/usr/bin/codesign",
-            ["--display", "--requirements", ":-", "--", bundlePath],
+            ["--display", "--requirements", "-", "--", bundlePath],
             cancellationToken).ConfigureAwait(false);
         return IsAcceptedOfficialBundleSignature(details, gatekeeper, requirements);
     }
