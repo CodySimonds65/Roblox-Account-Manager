@@ -50,6 +50,65 @@ Check(!hello.ToString().Contains("auth-ticket-token", StringComparison.Ordinal),
 var commandResult = new MacProcessCommandResult(0, "auth-ticket-token", "auth-ticket-token");
 Check(!commandResult.ToString().Contains("auth-ticket-token", StringComparison.Ordinal),
     "Process command diagnostics leaked sensitive command output.");
+var redactedLaunchScheme = MacRobloxDiagnostics.RedactSensitive(
+    "roblox-player:1+gameinfo:private-ticket-secret");
+Check(!redactedLaunchScheme.Contains("private-ticket-secret", StringComparison.Ordinal),
+    "A single-colon Roblox launch scheme was not redacted from diagnostics.");
+var openDiagnostic = MacLaunchDiagnostics.DescribeOpenFailure(
+    new MacProcessCommandResult(
+        1,
+        "stdout-ticket-secret",
+        "LSOpenURLsWithRole failed for roblox-player://ticket=secret"));
+Check(openDiagnostic.Contains("exit=1", StringComparison.Ordinal)
+      && openDiagnostic.Contains("LSOpenURLsWithRole", StringComparison.Ordinal)
+      && !openDiagnostic.Contains("stdout-ticket-secret", StringComparison.Ordinal)
+      && !openDiagnostic.Contains("ticket=secret", StringComparison.Ordinal),
+    "The macOS open failure diagnostic did not preserve safe stderr context or redact ticket data.");
+
+var verificationDiagnostic = MacLaunchDiagnostics.DescribeVerificationFailure(
+    new LaunchVerificationResult(
+        LaunchVerificationStatus.TimedOut,
+        null,
+        false,
+        ["No new stable Roblox process identity was observed (before=0; candidates=0; final=0)."]));
+Check(verificationDiagnostic.Contains("macos-process-verification-timeout", StringComparison.Ordinal)
+      && verificationDiagnostic.Contains("before=0", StringComparison.Ordinal),
+    "The macOS process verification diagnostic did not retain the observed process counts.");
+
+if (OperatingSystem.IsMacOS())
+{
+    var openFailure = await new MacProcessCommandRunner().RunAsync(
+        "/usr/bin/open",
+        ["-a", "/definitely/missing/Roblox.app", "roblox-player:1+gameinfo:ticket-secret"]);
+    Check(!openFailure.Succeeded && !string.IsNullOrWhiteSpace(openFailure.StandardError),
+        "The macOS open handoff discarded its stderr diagnostics.");
+    Check(string.IsNullOrWhiteSpace(openFailure.StandardOutput),
+        "The macOS open handoff retained stdout that could contain a launch ticket.");
+}
+else
+{
+    Skip("The /usr/bin/open diagnostic capture test requires macOS.");
+}
+
+var verificationBundlePath = Path.Combine(Path.GetTempPath(), "ram-mac-verification-" + Guid.NewGuid().ToString("N") + ".app");
+Directory.CreateDirectory(verificationBundlePath);
+try
+{
+    var verification = await new MacLaunchVerificationService(new EmptyRobloxProcessLocator())
+        .WaitForNewProcessAsync(
+            new RobloxLaunchSnapshot(DateTimeOffset.UtcNow, Array.Empty<RobloxProcessInfo>()),
+            verificationBundlePath,
+            TimeSpan.FromMilliseconds(20));
+    Check(verification.Status == LaunchVerificationStatus.TimedOut
+          && verification.Warnings.Any(warning => warning.Contains("before=0", StringComparison.Ordinal)
+              && warning.Contains("candidates=0", StringComparison.Ordinal)
+              && warning.Contains("final=0", StringComparison.Ordinal)),
+        "A native Roblox launch timeout did not expose before/candidate/final process counts.");
+}
+finally
+{
+    Directory.Delete(verificationBundlePath, recursive: true);
+}
 
 var clientInfo = new MacBundleInfo(
     "/Applications/Roblox.app",
@@ -772,4 +831,14 @@ sealed class SequenceRobloxProcessLocator : IRobloxProcessLocator
 
     public bool IsSameProcess(RobloxProcessIdentity expected, RobloxProcessInfo actual) =>
         expected.Matches(actual.Identity) && actual.IsStable;
+}
+
+sealed class EmptyRobloxProcessLocator : IRobloxProcessLocator
+{
+    public RobloxLaunchSnapshot CaptureSnapshot() =>
+        new(DateTimeOffset.UtcNow, Array.Empty<RobloxProcessInfo>());
+
+    public RobloxProcessInfo? FindProcess(int processId) => null;
+
+    public bool IsSameProcess(RobloxProcessIdentity expected, RobloxProcessInfo actual) => false;
 }

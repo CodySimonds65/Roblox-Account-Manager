@@ -47,20 +47,18 @@ public sealed class MacProcessCommandRunner : IMacProcessCommandRunner
         }
 
         process.Start();
-        // `open` can echo the complete custom-scheme argument. Never retain that output because
-        // the URI may carry an authentication ticket. Other callers that need structured output
-        // (plutil/codesign entitlement extraction) still receive it.
+        // `open` can echo the complete custom-scheme argument on stdout. Never retain that
+        // stream because the URI may carry an authentication ticket. Its stderr is still safe
+        // to retain for diagnosing a rejected handoff (and is never the ticket-bearing stream).
         var captureOutput = !string.Equals(executable, "/usr/bin/open", StringComparison.Ordinal);
         var outputTask = captureOutput ? process.StandardOutput.ReadToEndAsync(cancellationToken) : null;
-        var errorTask = captureOutput ? process.StandardError.ReadToEndAsync(cancellationToken) : null;
+        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
         var discardOutput = captureOutput ? null : process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, cancellationToken);
-        var discardError = captureOutput ? null : process.StandardError.BaseStream.CopyToAsync(Stream.Null, cancellationToken);
         await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
         if (discardOutput is not null) await discardOutput.ConfigureAwait(false);
-        if (discardError is not null) await discardError.ConfigureAwait(false);
         return new MacProcessCommandResult(
             process.ExitCode,
             outputTask is null ? string.Empty : await outputTask.ConfigureAwait(false),
-            errorTask is null ? string.Empty : await errorTask.ConfigureAwait(false));
+            await errorTask.ConfigureAwait(false));
     }
 }

@@ -159,6 +159,40 @@ var transientCapture = await new MacBrowserLaunchCoordinator(
 Require(transientCapture.Scheme == "roblox-player",
     "A transient WebView script failure prevented a later Play click.");
 
+var transientOriginSession = new FakeMacBrowserLaunchSession(
+    new Uri("roblox-player:1+gameinfo:transient-origin"),
+    clickAfterPolls: int.MaxValue,
+    scriptedResults: ["wrong-origin", "clicked"]);
+var transientOriginCapture = await new MacBrowserLaunchCoordinator(
+        transientOriginSession,
+        pollInterval: TimeSpan.FromMilliseconds(1))
+    .CaptureAsync(
+        "account-id",
+        new Uri("https://www.roblox.com/games/123/Test"),
+        TimeSpan.FromSeconds(1));
+Require(transientOriginCapture.Scheme == "roblox-player",
+    "The initial WebView wrong-origin state incorrectly aborted a later Roblox Play click.");
+
+var schemeTimeoutSession = new FakeMacBrowserLaunchSession(
+    new Uri("roblox-player:1+gameinfo:missing-scheme"),
+    clickAfterPolls: int.MaxValue,
+    scriptedResults: ["clicked"],
+    completeCaptureOnClick: false);
+try
+{
+    await new MacBrowserLaunchCoordinator(schemeTimeoutSession, pollInterval: TimeSpan.FromMilliseconds(1))
+        .CaptureAsync(
+            "account-id",
+            new Uri("https://www.roblox.com/games/123/Test"),
+            TimeSpan.FromMilliseconds(80));
+    throw new InvalidOperationException("A missing macOS launch route unexpectedly completed.");
+}
+catch (TimeoutException exception)
+{
+    Require(exception.Message == "macos-launch-timeout-awaiting-scheme",
+        "A post-click macOS timeout did not identify the missing custom-scheme handoff.");
+}
+
 var timeoutSession = new FakeMacBrowserLaunchSession(
     new Uri("roblox-player:1+gameinfo:never-captured"),
     clickAfterPolls: int.MaxValue);
@@ -192,11 +226,17 @@ Require(recycledAccountRow is Border && rowBuildCount == 1,
 
 Console.WriteLine("Desktop startup and preset policy tests passed.");
 
-sealed class FakeMacBrowserLaunchSession(Uri launchUri, int clickAfterPolls, int scriptFailures = 0) : IMacBrowserLaunchSession
+sealed class FakeMacBrowserLaunchSession(
+    Uri launchUri,
+    int clickAfterPolls,
+    int scriptFailures = 0,
+    IReadOnlyList<string>? scriptedResults = null,
+    bool completeCaptureOnClick = true) : IMacBrowserLaunchSession
 {
     private readonly TaskCompletionSource<BrowserNavigationResult> _capture =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _polls;
+    private int _scriptedResultIndex;
 
     public List<string> Events { get; } = [];
     public bool CaptureCanceled { get; private set; }
@@ -232,9 +272,24 @@ sealed class FakeMacBrowserLaunchSession(Uri launchUri, int clickAfterPolls, int
             throw new InvalidOperationException("document-not-ready");
         }
 
+        if (scriptedResults is not null &&
+            Interlocked.Increment(ref _scriptedResultIndex) <= scriptedResults.Count)
+        {
+            var scriptedResult = scriptedResults[_scriptedResultIndex - 1];
+            if (completeCaptureOnClick && string.Equals(scriptedResult, "clicked", StringComparison.Ordinal))
+            {
+                _capture.TrySetResult(new BrowserNavigationResult(true, launchUri));
+            }
+
+            return ValueTask.FromResult(scriptedResult);
+        }
+
         if (Interlocked.Increment(ref _polls) >= clickAfterPolls)
         {
-            _capture.TrySetResult(new BrowserNavigationResult(true, launchUri));
+            if (completeCaptureOnClick)
+            {
+                _capture.TrySetResult(new BrowserNavigationResult(true, launchUri));
+            }
             return ValueTask.FromResult("clicked");
         }
 

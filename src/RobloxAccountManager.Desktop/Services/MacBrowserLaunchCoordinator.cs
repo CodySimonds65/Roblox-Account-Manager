@@ -47,6 +47,7 @@ public sealed class MacBrowserLaunchCoordinator
         using var launchTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         launchTimeout.CancelAfter(timeout);
         var pending = _session.BeginLaunchCapture(accountId, launchTimeout.Token);
+        var playClicked = false;
         try
         {
             await _session.NavigateAsync(accountId, navigationUri, launchTimeout.Token);
@@ -72,14 +73,15 @@ public sealed class MacBrowserLaunchCoordinator
                 _statusSink?.Invoke(status);
                 if (status == RobloxPlayControlStatus.Clicked)
                 {
+                    playClicked = true;
                     break;
                 }
 
-                if (status == RobloxPlayControlStatus.WrongOrigin)
-                {
-                    throw new InvalidOperationException("macos-play-wrong-origin");
-                }
-
+                // NavigateAsync returns as soon as the WebView navigation is requested. On
+                // macOS WKWebView can therefore report about:blank (or the previous document)
+                // for one or more script polls before the Roblox page commits. Treat the
+                // untrusted-origin result as transient during this bounded capture window;
+                // the timeout remains the fail-closed boundary if the page never reaches Roblox.
                 await Task.Delay(_pollInterval, launchTimeout.Token);
             }
 
@@ -94,7 +96,9 @@ public sealed class MacBrowserLaunchCoordinator
         catch (OperationCanceledException exception)
             when (launchTimeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException("macos-launch-timeout", exception);
+            throw new TimeoutException(
+                playClicked ? "macos-launch-timeout-awaiting-scheme" : "macos-launch-timeout-awaiting-play",
+                exception);
         }
         finally
         {

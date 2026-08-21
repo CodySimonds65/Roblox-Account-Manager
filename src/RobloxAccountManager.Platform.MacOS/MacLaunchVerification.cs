@@ -138,15 +138,19 @@ public sealed class MacLaunchVerificationService
                 && PathSafety.PathsEqual(process.Identity.BundlePath, expectedBundlePath)
                 && (_processLocator.FindProcess(process.ProcessId) is not { } current
                     || !_processLocator.IsSameProcess(process.Identity, current)));
-        var status = finalSnapshot.Processes.Any(
-            process => PathSafety.PathsEqual(process.Identity.BundlePath, expectedBundlePath))
+        var beforeBundleProcessCount = before.Processes.Count(
+            process => PathSafety.PathsEqual(process.Identity.BundlePath, expectedBundlePath));
+        var finalBundleProcessCount = finalSnapshot.Processes.Count(
+            process => PathSafety.PathsEqual(process.Identity.BundlePath, expectedBundlePath));
+        var status = finalBundleProcessCount > 0
             ? LaunchVerificationStatus.ExistingProcessOnly
             : LaunchVerificationStatus.TimedOut;
         return new LaunchVerificationResult(
             status,
             null,
             priorMissingAtTimeout,
-            ["No new stable Roblox process identity was observed before the verification timeout."]);
+            [$"No new stable Roblox process identity was observed before the verification timeout " +
+             $"(before={beforeBundleProcessCount}; candidates={candidates.Count}; final={finalBundleProcessCount})."]);
     }
 
     private async Task<bool> BundleStillMatchesAsync(
@@ -287,7 +291,7 @@ public sealed class MacOriginalBundleLaunchStrategy
                                 LaunchVerificationStatus.Failed,
                                 null,
                                 false,
-                                ["The macOS open command failed; no process was assigned to the account."]);
+                                [MacLaunchDiagnostics.DescribeOpenFailure(command)]);
                     }
                 }
             }
