@@ -41,7 +41,9 @@ public static class RobloxNavigationCapturePolicy
         ArgumentNullException.ThrowIfNull(result);
         var outcome = result.Accepted
             ? "accepted"
-            : $"rejected:{SanitiseToken(result.DiagnosticCode)}";
+            : string.Equals(result.DiagnosticCode, "duplicate-after-capture", StringComparison.Ordinal)
+                ? "duplicate-after-capture"
+                : $"rejected:{SanitiseToken(result.DiagnosticCode)}";
         return $"macos-route: {SanitiseToken(route)} scheme={SanitiseToken(request.Scheme)} outcome={outcome}";
     }
 

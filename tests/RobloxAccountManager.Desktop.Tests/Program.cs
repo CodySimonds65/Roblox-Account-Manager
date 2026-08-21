@@ -106,6 +106,24 @@ Require(duplicateLaunch?.Accepted == false
         && resourceDiagnostics[^1] == "macos-route: new-window scheme=roblox-player outcome=rejected:launch-not-pending",
     "A duplicate WebView route consumed the launch twice or leaked its ticket.");
 
+var duplicateAfterCaptureDiagnostic = RobloxNavigationCapturePolicy.DescribeRoute(
+    "navigation-started",
+    new Uri("roblox-player:1+gameinfo:duplicate-after-capture-ticket"),
+    BrowserNavigationResult.Rejected("duplicate-after-capture"));
+Require(duplicateAfterCaptureDiagnostic ==
+        "macos-route: navigation-started scheme=roblox-player outcome=duplicate-after-capture",
+    "A trailing WebView route was still described as a rejected launch instead of a handled duplicate.");
+
+var routeTracker = new MacNavigationCaptureTracker();
+var firstCapturedRoute = new Uri("roblox-player:1+gameinfo:first-captured-route");
+var secondCapturedRoute = new Uri("roblox-player:1+gameinfo:second-captured-route");
+routeTracker.RecordAccepted(firstCapturedRoute);
+routeTracker.RecordAccepted(secondCapturedRoute);
+Require(routeTracker.TryConsumeDuplicate(firstCapturedRoute)
+        && !routeTracker.TryConsumeDuplicate(firstCapturedRoute)
+        && routeTracker.TryConsumeDuplicate(secondCapturedRoute),
+    "A delayed duplicate route was not correlated without consuming a later launch.");
+
 var launchSession = new FakeMacBrowserLaunchSession(
     new Uri("roblox-player:1+gameinfo:captured-ticket"),
     clickAfterPolls: 2);
