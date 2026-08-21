@@ -76,6 +76,8 @@ public sealed class MacPkgUpdateInstaller : Contracts.IPlatformUpdateInstaller
 
     public Contracts.RobloxPlatform Platform => Contracts.RobloxPlatform.MacOS;
 
+    public ulong CurrentPackageVersion => _currentPackageVersion;
+
     public async ValueTask<Contracts.UpdateInstallResult> InstallAsync(
         Contracts.UpdatePackage package,
         bool userConfirmed,

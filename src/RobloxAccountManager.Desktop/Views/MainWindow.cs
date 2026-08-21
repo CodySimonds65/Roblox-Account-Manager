@@ -1630,7 +1630,10 @@ public sealed class MainWindow : Window
                     var validationError = await macInstaller.ValidateAsync(package);
                     if (validationError is not null)
                     {
-                        _viewModel.AppendActivity($"Unsigned update rejected before prompt: {validationError}.");
+                        _viewModel.AppendActivity(
+                            MacUpdateActivityFormatter.FormatUnsignedValidationRejection(
+                                validationError,
+                                macInstaller.CurrentPackageVersion));
                         return;
                     }
                 }

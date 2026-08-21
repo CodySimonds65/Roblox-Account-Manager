@@ -459,6 +459,8 @@ try
         updateRoot,
         "2",
         "2.0");
+    Check(wrongVersion.CurrentPackageVersion == 2,
+        "The installer did not expose the installed numeric PKG version for diagnostics.");
     Check(await wrongVersion.ValidateAsync(validPackage) == "pkg-version-mismatch",
         "A PKG with the wrong internal version was accepted.");
 

@@ -62,6 +62,10 @@ Require(DesktopPresetPolicy.TryResolveLaunchUrl(
         out var customUrl) && customUrl.Contains("/games/789/Typed-url", StringComparison.Ordinal),
     "The typed Custom URL was not used as the launch URL.");
 
+Require(MacUpdateActivityFormatter.FormatUnsignedValidationRejection("pkg-version-not-newer", 77) ==
+        "Unsigned update rejected before prompt: pkg-version-not-newer (installed pkg version: 77).",
+    "The unsigned update rejection did not include the installed PKG version.");
+
 Require(RobloxPlayControl.ParseResult("clicked") == RobloxPlayControlStatus.Clicked,
     "A clicked Roblox Play-control result was not recognized.");
 Require(RobloxPlayControl.ParseResult("\"not-found\"") == RobloxPlayControlStatus.NotFound,
