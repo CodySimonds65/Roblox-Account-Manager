@@ -2,7 +2,9 @@ using RobloxAccountManager.Platform.MacOS;
 using Contracts = RobloxAccountManager.Core.Contracts;
 using RobloxAccountManager.Core.Models;
 using System.Net;
+using System.Buffers.Binary;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Security.Cryptography;
 
 var passed = 0;
@@ -54,6 +56,16 @@ var redactedLaunchScheme = MacRobloxDiagnostics.RedactSensitive(
     "roblox-player:1+gameinfo:private-ticket-secret");
 Check(!redactedLaunchScheme.Contains("private-ticket-secret", StringComparison.Ordinal),
     "A single-colon Roblox launch scheme was not redacted from diagnostics.");
+
+var executableHeader = new byte[16];
+BinaryPrimitives.WriteUInt32LittleEndian(executableHeader.AsSpan(0, 4), 0xFEEDFACF);
+BinaryPrimitives.WriteUInt32LittleEndian(executableHeader.AsSpan(12, 4), (uint)MacMachOFileType.Executable);
+using (var executableHeaderStream = new MemoryStream(executableHeader))
+{
+    Check(MacCodeObjectDiscovery.TryReadFileType(executableHeaderStream, out var detectedFileType)
+          && detectedFileType == MacMachOFileType.Executable,
+        "An extensionless Mach-O executable header was not detected.");
+}
 var openDiagnostic = MacLaunchDiagnostics.DescribeOpenFailure(
     new MacProcessCommandResult(
         1,
@@ -161,6 +173,19 @@ try
           && !File.ReadAllText(diagnostics.ArtifactPath).Contains("share-secret", StringComparison.Ordinal),
         "The macOS Roblox diagnostic artifact was not written safely.");
 
+    var healthyStart = processStart.AddMinutes(10);
+    var healthyLogPath = Path.Combine(logsRoot, "2.700.0_20260820T220010Z_Player_C3D4_last.log");
+    await File.WriteAllLinesAsync(healthyLogPath,
+    [
+        "2026-08-20T22:00:11Z [FLog::Error] Asset (Animation) failed to load",
+        "2026-08-20T22:00:12Z [FLog::Output] Game join succeeded."
+    ]);
+    var healthyDiagnostics = MacRobloxDiagnostics.Collect(healthyStart, [logsRoot]);
+    Check(healthyDiagnostics.Summary.All(line =>
+            !line.Contains("fatal", StringComparison.OrdinalIgnoreCase)
+            && !line.Contains("crash marker", StringComparison.OrdinalIgnoreCase)),
+        "An ordinary Roblox asset error was incorrectly summarized as a fatal crash marker.");
+
     var missing = MacRobloxDiagnostics.Collect(
         processStart.AddHours(1),
         [logsRoot]);
@@ -182,6 +207,13 @@ try
           && crash.RedactedTail.All(line => !line.Contains("crash-secret", StringComparison.Ordinal))
           && crash.RedactedTail.All(line => !line.Contains("crash-token", StringComparison.Ordinal)),
         "Sensitive data was retained in the redacted Roblox crash report.");
+
+    var staleCrashPath = Path.Combine(crashRoot, "RobloxPlayer_stale.ips");
+    await File.WriteAllTextAsync(staleCrashPath, "{\"process\":\"RobloxPlayer\",\"exception\":\"EXC_CRASH\"}");
+    File.SetLastWriteTimeUtc(staleCrashPath, crashStart.UtcDateTime.AddMinutes(-1));
+    var correlatedCrash = MacRobloxDiagnostics.Collect(crashStart, [crashRoot], artifactRoot);
+    Check(correlatedCrash.Summary.All(line => !line.Contains("RobloxPlayer_stale.ips", StringComparison.Ordinal)),
+        "A stale crash report from an earlier launch was correlated to a later attempt.");
 }
 finally
 {
@@ -212,7 +244,13 @@ Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblo
             "<key>CFBundleVersion</key><string>1</string>" +
             "<key>LSMultipleInstancesProhibited</key><true/>" +
             "</dict></plist>");
-        await File.WriteAllBytesAsync(Path.Combine(sourceMacOs, "RobloxPlayer"), [1, 2, 3, 4]);
+        await File.WriteAllBytesAsync(Path.Combine(sourceMacOs, "RobloxPlayer"), executableHeader);
+        await File.WriteAllBytesAsync(Path.Combine(sourceMacOs, "RobloxCrashHandler"), executableHeader);
+        var dynamicLibraryHeader = executableHeader.ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            dynamicLibraryHeader.AsSpan(12, 4),
+            (uint)MacMachOFileType.DynamicLibrary);
+        await File.WriteAllBytesAsync(Path.Combine(sourceMacOs, "libmimalloc.3.dylib"), dynamicLibraryHeader);
 
         var runtimeRunner = new ManagedRuntimeTestCommandRunner();
         var testDiscovery = new MacBundleDiscovery(
@@ -242,6 +280,16 @@ Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblo
         var reused = await builder.BuildAsync(buildRequest);
         Check(reused.Status == MacRuntimeBuildStatus.Reused,
             "An unchanged managed Roblox runtime was rebuilt instead of reused.");
+        var runtimeStampPath = built.RuntimePath + ".runtime.json";
+        var runtimeStamp = JsonNode.Parse(await File.ReadAllTextAsync(runtimeStampPath))?.AsObject()
+            ?? throw new InvalidOperationException("The managed-runtime stamp was not valid JSON.");
+        Check(runtimeStamp["BuilderRevision"]?.GetValue<int>() == MacManagedRuntimeBuilder.CurrentRuntimeRevision,
+            "The managed-runtime stamp did not record the current signing revision.");
+        runtimeStamp.Remove("BuilderRevision");
+        await File.WriteAllTextAsync(runtimeStampPath, runtimeStamp.ToJsonString());
+        var upgraded = await builder.BuildAsync(buildRequest);
+        Check(upgraded.Status == MacRuntimeBuildStatus.Built,
+            "A slot created by the incomplete legacy signer was incorrectly reused.");
         await File.WriteAllTextAsync(
             managedPlist,
             managedPlistText.Replace("<false", "<true", StringComparison.Ordinal)
@@ -294,6 +342,16 @@ Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblo
                     && call.Arguments.Contains("--options", StringComparer.Ordinal)
                     && call.Arguments.Contains("runtime", StringComparer.Ordinal)),
                 "The managed Roblox clone was not signed with hardened-runtime options.");
+            Check(runtimeRunner.Calls.Any(call =>
+                    call.Executable == "/usr/bin/codesign"
+                    && call.Arguments.LastOrDefault()?.EndsWith("RobloxCrashHandler", StringComparison.Ordinal) == true
+                    && call.Arguments.Contains("--options", StringComparer.Ordinal)
+                    && call.Arguments.Contains("runtime", StringComparer.Ordinal)),
+                "The extensionless Roblox crash helper was not re-signed as hardened runtime code.");
+            Check(runtimeRunner.Calls.Any(call =>
+                    call.Executable == "/usr/bin/codesign"
+                    && call.Arguments.LastOrDefault()?.EndsWith("libmimalloc.3.dylib", StringComparison.Ordinal) == true),
+                "The nested Roblox dylib was not re-signed with the managed runtime.");
             Check(runtimeRunner.Calls.Any(call =>
                     call.Executable == "/usr/bin/plutil"
                     && call.Arguments.Contains(
@@ -1322,6 +1380,17 @@ sealed class ManagedRuntimeTestCommandRunner : IMacProcessCommandRunner
 
         if (values.Contains("--verbose=4", StringComparer.Ordinal))
         {
+            var target = values.LastOrDefault() ?? string.Empty;
+            if (!target.Contains(
+                    Path.Combine("Applications", "Roblox.app"),
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            {
+                return Task.FromResult(new MacProcessCommandResult(
+                    0,
+                    string.Empty,
+                    "Signature=adhoc\nIdentifier=com.roblox.RobloxPlayer\nTeamIdentifier=not set"));
+            }
+
             return Task.FromResult(new MacProcessCommandResult(
                 0,
                 string.Empty,
