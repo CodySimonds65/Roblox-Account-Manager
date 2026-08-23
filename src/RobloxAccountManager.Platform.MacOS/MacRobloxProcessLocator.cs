@@ -183,6 +183,9 @@ public sealed class MacManagedProcessRegistry
                 var registrations = new List<MacManagedProcessRegistration>();
                 foreach (var element in document.RootElement.EnumerateArray())
                 {
+                    if (element.ValueKind != System.Text.Json.JsonValueKind.Object)
+                        continue;
+
                     RobloxProcessIdentity? identity;
                     string? accountId = null;
                     if (element.TryGetProperty(nameof(MacManagedProcessRegistration.Identity), out var identityElement))
