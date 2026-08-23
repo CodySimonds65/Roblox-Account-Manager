@@ -12,6 +12,7 @@ public sealed record DesktopComposition(
     AvaloniaAccountBrowserSessionService BrowserSessions,
     SerializedLaunchCoordinator? Launches,
     RobloxAccountManager.Core.Contracts.IClientWindowManager? Clients,
+    MacClientOverlayManager? ClientOverlay,
     RobloxAccountManager.Core.Contracts.IPlatformUpdateInstaller? Updates,
     RobloxAccountManager.Core.Contracts.IPlatformUpdateSource? UpdateSource,
     AccountStore Accounts,
@@ -35,10 +36,12 @@ public sealed record DesktopComposition(
         var settings = new SettingsStore(paths);
         SerializedLaunchCoordinator? launches = null;
         RobloxAccountManager.Core.Contracts.IClientWindowManager? clients = null;
+        MacClientOverlayManager? clientOverlay = null;
         RobloxAccountManager.Core.Contracts.IPlatformUpdateInstaller? updates = null;
         RobloxAccountManager.Core.Contracts.IPlatformUpdateSource? updateSource = null;
         RobloxAccountManager.Core.Contracts.IRobloxSettingsAdapter? robloxSettings = null;
         RobloxAccountManager.Core.Contracts.IPluginHostFacade? plugins = null;
+        var accessibilityGranted = false;
         if (platform == RobloxPlatform.MacOS)
         {
             var registry = new MacManagedProcessRegistry();
@@ -55,6 +58,9 @@ public sealed record DesktopComposition(
                 new MacCoreMultiInstanceStrategy(slotManager: slotManager, bundleDiscovery: discovery),
                 new MacCorePlatformLauncher(discovery, managedRuntimeRoot: runtimeRoot));
             clients = new MacCoreClientWindowManager(new MacAccessibilityWindowManager(nativeLocator), coreLocator);
+            var accessibility = new MacAccessibilityApi();
+            accessibilityGranted = accessibility.GetCapability().IsSupported;
+            clientOverlay = new MacClientOverlayManager(nativeLocator, accessibility);
             robloxSettings = new MacRobloxSettingsAdapter();
             plugins = new MacPluginHostFacade();
             updateSource = new MacGitHubReleaseUpdateSource(rid: MacPkgUpdateInstaller.GetCurrentRid());
@@ -81,9 +87,10 @@ public sealed record DesktopComposition(
 
         var capabilities = new DefaultPlatformCapabilities(
             platform,
+            accessibilityGranted,
             pluginHostAvailable: plugins?.IsAvailable == true,
             nativeSettingsAvailable: robloxSettings is not null,
             browserProfileDeletionAvailable: dataStoreRemover.IsSupported);
-        return new DesktopComposition(capabilities, browserSessions, launches, clients, updates, updateSource, accounts, presets, settings, robloxSettings, plugins);
+        return new DesktopComposition(capabilities, browserSessions, launches, clients, clientOverlay, updates, updateSource, accounts, presets, settings, robloxSettings, plugins);
     }
 }

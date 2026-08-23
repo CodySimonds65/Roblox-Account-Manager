@@ -63,6 +63,7 @@ public sealed class MainWindow : Window
     private readonly AvaloniaAccountBrowserSessionService _browserSessions;
     private readonly SerializedLaunchCoordinator? _launches;
     private readonly CoreClientWindowManager? _clients;
+    private readonly MacClientOverlayManager? _clientOverlay;
     private readonly IPlatformUpdateSource? _updateSource;
     private readonly DesktopValidationMode _validationMode;
     private CancellationTokenSource? _launchCancellation;
@@ -73,12 +74,22 @@ public sealed class MainWindow : Window
     private bool _updateCheckStarted;
     private long _browserActivationVersion;
     private readonly HashSet<string> _queueSelectedAccounts = new(StringComparer.Ordinal);
+    private readonly ObservableCollection<ClientTabItem> _clientTabs = [];
+    private readonly Avalonia.Threading.DispatcherTimer? _clientOverlayTimer;
+    private ListBox? _clientTabsControl;
+    private Border? _clientViewport;
+    private TextBlock? _clientOverlayStatus;
+    private string? _selectedClientAccountId;
+    private bool _clientViewVisible;
+    private bool _clientRefreshInProgress;
+    private bool _suppressClientSelection;
 
     public MainWindow(
         DesktopShellViewModel viewModel,
         AvaloniaAccountBrowserSessionService browserSessions,
         SerializedLaunchCoordinator? launches = null,
         CoreClientWindowManager? clients = null,
+        MacClientOverlayManager? clientOverlay = null,
         IPlatformUpdateSource? updateSource = null,
         DesktopValidationMode validationMode = DesktopValidationMode.None)
     {
@@ -86,6 +97,7 @@ public sealed class MainWindow : Window
         _browserSessions = browserSessions ?? throw new ArgumentNullException(nameof(browserSessions));
         _launches = launches;
         _clients = clients;
+        _clientOverlay = clientOverlay;
         _updateSource = updateSource;
         _validationMode = validationMode;
         _browserSessions.NavigationDiagnostic += AppendNavigationDiagnostic;
@@ -97,6 +109,14 @@ public sealed class MainWindow : Window
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Background = AppBackgroundBrush;
         Foreground = TextBrush;
+
+        if (_clientOverlay is not null)
+        {
+            _clientOverlayTimer = new Avalonia.Threading.DispatcherTimer(
+                TimeSpan.FromMilliseconds(500),
+                Avalonia.Threading.DispatcherPriority.Background,
+                async (_, _) => await RefreshClientOverlayAsync());
+        }
 
         _pageTitle.FontSize = 28;
         _pageTitle.FontWeight = FontWeight.Bold;
@@ -175,8 +195,26 @@ public sealed class MainWindow : Window
         Opened += async (_, _) => await InitializeAsync();
         Closed += (_, _) =>
         {
+            _clientOverlayTimer?.Stop();
             foreach (var utilityWindow in _utilityWindows.Values.ToArray()) utilityWindow.Close();
             _utilityWindows.Clear();
+        };
+        Closing += (_, _) =>
+        {
+            if (_clientOverlay is null) return;
+            try { _clientOverlay.RestoreAllAsync().AsTask().GetAwaiter().GetResult(); }
+            catch { /* Window shutdown must continue after best-effort restoration. */ }
+        };
+        PropertyChanged += async (_, args) =>
+        {
+            if (args.Property != WindowStateProperty || _clientOverlay is null) return;
+            if (WindowState == WindowState.Minimized)
+            {
+                try { await _clientOverlay.HideAllAsync(); }
+                catch { /* Minimize must continue after best-effort overlay hiding. */ }
+            }
+            else if (_clientViewVisible)
+                await RefreshClientOverlayAsync();
         };
     }
 
@@ -774,6 +812,8 @@ public sealed class MainWindow : Window
     {
         var page = _viewModel.Pages.FirstOrDefault(candidate => string.Equals(candidate.Key, pageKey, StringComparison.Ordinal));
         if (page is null) return;
+        if (_clientViewVisible && !string.Equals(pageKey, "clients", StringComparison.Ordinal))
+            _ = DeactivateClientOverlayAsync();
         _viewModel.SelectedPage = page;
         UpdatePresetRevealButton();
         RenderPage();
@@ -1260,6 +1300,8 @@ public sealed class MainWindow : Window
 
     private Control BuildClientsPage()
     {
+        if (_clientOverlay is not null) return BuildClientOverlayPage();
+
         var panel = new StackPanel { Spacing = 8 };
         panel.Children.Add(BuildSessionNavigationBar());
         if (_clients is null)
@@ -1294,11 +1336,253 @@ public sealed class MainWindow : Window
             var focus = new Button { Content = "Focus" };
             focus.Click += async (_, _) => _viewModel.AppendActivity(await _clients.FocusAsync(window) ? "Focused client." : "Focus denied; check Accessibility permission.");
             var close = new Button { Content = "Close" };
-            close.Click += async (_, _) => { try { await _clients.CloseAsync(new CoreRobloxProcessInfo(window.Process, true)); _viewModel.AppendActivity("Requested a verified client close."); } catch (Exception exception) { _viewModel.AppendActivity($"Client close rejected: {exception.Message}"); } };
+            close.Click += async (_, _) =>
+            {
+                try
+                {
+                    await _clients.CloseAsync(new CoreRobloxProcessInfo(window.Process, true));
+                    _viewModel.AppendActivity("Requested a verified client close.");
+                }
+                catch (Exception exception) { _viewModel.AppendActivity($"Client close rejected: {exception.Message}"); }
+            };
             row.Children.Add(focus); row.Children.Add(close); panel.Children.Add(row);
         }
         if (windows.Count == 0) panel.Children.Add(new TextBlock { Text = "No RAM-managed Roblox clients are running.", Opacity = 0.65 });
     }
+
+    private Control BuildClientOverlayPage()
+    {
+        _clientViewVisible = true;
+        _clientOverlayTimer?.Start();
+
+        _clientTabsControl = new ListBox
+        {
+            ItemsSource = _clientTabs,
+            SelectionMode = SelectionMode.Single,
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            ItemsPanel = new FuncTemplate<Panel?>(() => new StackPanel { Orientation = Orientation.Horizontal }),
+            ItemTemplate = new FuncDataTemplate<ClientTabItem>((item, _) => item is null ? null : BuildClientTab(item))
+        };
+        _clientTabsControl.SelectionChanged += async (_, _) =>
+        {
+            if (_suppressClientSelection || _clientTabsControl.SelectedItem is not ClientTabItem selected) return;
+            _selectedClientAccountId = selected.AccountId;
+            await RefreshClientOverlayAsync(explicitUserSelection: true);
+        };
+
+        _clientViewport = new Border
+        {
+            Background = InputBrush,
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            MinHeight = 320,
+            Child = new TextBlock
+            {
+                Text = "Select a running client tab",
+                Foreground = MutedTextBrush,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        };
+        _clientViewport.SizeChanged += async (_, _) => await RefreshClientOverlayAsync();
+        _clientViewport.AttachedToVisualTree += async (_, _) => await RefreshClientOverlayAsync();
+
+        _clientOverlayStatus = new TextBlock
+        {
+            Text = "Looking for opted-in Roblox clients…",
+            Foreground = MutedTextBrush,
+            TextWrapping = TextWrapping.Wrap
+        };
+        var refresh = new Button { Content = "Refresh clients" };
+        StyleButton(refresh, secondary: true);
+        refresh.Click += async (_, _) => await RefreshClientOverlayAsync();
+        var controls = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Children = { refresh, _clientOverlayStatus }
+        };
+        var layout = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,*,Auto"),
+            RowSpacing = 8,
+            Children = { _clientTabsControl, _clientViewport, controls }
+        };
+        Grid.SetRow(_clientViewport, 1);
+        Grid.SetRow(controls, 2);
+        _ = RefreshClientOverlayAsync();
+        return Card(layout);
+    }
+
+    private Control BuildClientTab(ClientTabItem item)
+    {
+        var label = new TextBlock
+        {
+            Text = item.Label,
+            MaxWidth = 180,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var close = new Button
+        {
+            Content = "×",
+            Padding = new Thickness(5, 1),
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Foreground = MutedTextBrush
+        };
+        close.Click += async (_, args) =>
+        {
+            args.Handled = true;
+            await CloseClientTabAsync(item);
+        };
+        return new Border
+        {
+            Background = ElevatedBrush,
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(12, 6),
+            Margin = new Thickness(0, 0, 6, 0),
+            Child = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { label, close } }
+        };
+    }
+
+    private async Task RefreshClientOverlayAsync(bool explicitUserSelection = false)
+    {
+        if (!_clientViewVisible || _clientOverlay is null || _clients is null || _clientRefreshInProgress) return;
+        _clientRefreshInProgress = true;
+        try
+        {
+            var windows = await _clients.GetWindowsAsync();
+            var accountsById = _viewModel.Accounts.ToDictionary(account => account.Id, StringComparer.Ordinal);
+            var eligible = windows
+                .Where(window => !string.IsNullOrWhiteSpace(window.AccountId)
+                    && accountsById.TryGetValue(window.AccountId, out var account)
+                    && account.EmbedInClients)
+                .ToArray();
+
+            var nextIds = eligible.Select(window => window.AccountId!).ToHashSet(StringComparer.Ordinal);
+            foreach (var removed in _clientTabs.Select(tab => tab.AccountId).Where(id => !nextIds.Contains(id)).ToArray())
+                await _clientOverlay.RestoreAsync(removed);
+
+            _suppressClientSelection = true;
+            try
+            {
+                _clientTabs.Clear();
+                foreach (var window in eligible)
+                {
+                    var account = accountsById[window.AccountId!];
+                    _clientTabs.Add(new ClientTabItem(account.Id, account.Label, window));
+                }
+                if (_selectedClientAccountId is null || !nextIds.Contains(_selectedClientAccountId))
+                    _selectedClientAccountId = _clientTabs.FirstOrDefault()?.AccountId;
+                if (_clientTabsControl is not null)
+                    _clientTabsControl.SelectedItem = _clientTabs.FirstOrDefault(tab => tab.AccountId == _selectedClientAccountId);
+            }
+            finally { _suppressClientSelection = false; }
+
+            if (eligible.Length == 0 || _selectedClientAccountId is null)
+            {
+                await _clientOverlay.RestoreAllAsync();
+                SetClientOverlayStatus("No opted-in RAM-managed Roblox clients are running.", failure: false);
+                return;
+            }
+            if (eligible.Any(window => DateTimeOffset.UtcNow - window.Process.StartTimeUtc < TimeSpan.FromSeconds(4)))
+            {
+                SetClientOverlayStatus("Waiting for Roblox windows to finish starting…", failure: false);
+                return;
+            }
+            if (!TryGetClientViewport(out var viewport))
+            {
+                SetClientOverlayStatus("Waiting for the Clients viewport layout…", failure: false);
+                return;
+            }
+
+            var result = await _clientOverlay.ShowOnlyAsync(
+                eligible,
+                _selectedClientAccountId,
+                viewport,
+                explicitUserSelection);
+            SetClientOverlayStatus(
+                result.Succeeded
+                    ? "Roblox remains an external top-level window over this viewport. Input is routed directly by macOS."
+                    : DescribeOverlayFailure(result.DiagnosticCode),
+                failure: !result.Succeeded);
+        }
+        catch (Exception exception)
+        {
+            SetClientOverlayStatus($"Client overlay paused: {LaunchDiagnostics.SanitiseCode(exception.Message)}", failure: true);
+            try { await _clientOverlay.RestoreAllAsync(); } catch { }
+        }
+        finally { _clientRefreshInProgress = false; }
+    }
+
+    private bool TryGetClientViewport(out MacWindowFrame viewport)
+    {
+        viewport = default;
+        var clientViewport = _clientViewport;
+        if (clientViewport is null
+            || clientViewport.Bounds.Width < 400 || clientViewport.Bounds.Height < 300) return false;
+        var topLevel = TopLevel.GetTopLevel(clientViewport);
+        if (topLevel is null) return false;
+        var point = clientViewport.PointToScreen(new Point(0, 0));
+        viewport = MacViewportCoordinateConverter.FromAvaloniaPixels(
+            point.X,
+            point.Y,
+            clientViewport.Bounds.Width,
+            clientViewport.Bounds.Height,
+            topLevel.RenderScaling);
+        return viewport.IsValid;
+    }
+
+    private async Task CloseClientTabAsync(ClientTabItem item)
+    {
+        if (_clientOverlay is null || _clients is null) return;
+        await _clientOverlay.RestoreAsync(item.AccountId);
+        try
+        {
+            await _clients.CloseAsync(new CoreRobloxProcessInfo(
+                item.Window.Process,
+                true,
+                item.AccountId,
+                item.Window.Process.BundlePath));
+            _viewModel.AppendActivity($"{item.Label}: requested a verified client close.");
+        }
+        catch (Exception exception)
+        {
+            _viewModel.AppendActivity($"{item.Label}: client close rejected ({LaunchDiagnostics.SanitiseCode(exception.Message)})." );
+        }
+        await RefreshClientOverlayAsync();
+    }
+
+    private async Task DeactivateClientOverlayAsync()
+    {
+        _clientViewVisible = false;
+        _clientOverlayTimer?.Stop();
+        if (_clientOverlay is not null)
+        {
+            try { await _clientOverlay.HideAllAsync(); }
+            catch { }
+        }
+    }
+
+    private void SetClientOverlayStatus(string message, bool failure)
+    {
+        if (_clientOverlayStatus is null) return;
+        _clientOverlayStatus.Text = message;
+        _clientOverlayStatus.Foreground = failure ? DangerTextBrush : MutedTextBrush;
+    }
+
+    private static string DescribeOverlayFailure(string code) => code switch
+    {
+        "accessibility-permission-required" => "Grant Accessibility permission to place Roblox over the Clients viewport.",
+        "accessible-window-not-ready" or "accessible-window-changed" => "Waiting for a stable Roblox game window…",
+        "fullscreen-window-not-supported" => "Exit Roblox fullscreen mode before using the Clients panel.",
+        "stale-process-identity" => "A Roblox process identity changed; refresh or relaunch that account.",
+        _ => $"Client overlay paused: {LaunchDiagnostics.SanitiseCode(code)}"
+    };
 
     private Control BuildActivityPage()
     {
@@ -1723,6 +2007,7 @@ public sealed class MainWindow : Window
         _viewModel.Queue.Clear();
         foreach (var account in accounts) _viewModel.Queue.Add(new LaunchQueueItem(account));
         _launchCancellation?.Dispose(); _launchCancellation = new CancellationTokenSource();
+        string? launchedOverlayAccountId = null;
         UpdateActivityControls();
         try
         {
@@ -1786,6 +2071,7 @@ public sealed class MainWindow : Window
                 }
                 item.State = result.Succeeded ? LaunchQueueState.Running : LaunchQueueState.Failed;
                 item.Detail = result.Succeeded ? "Verified process started" : result.FailureKind.ToString();
+                if (result.Succeeded && item.Account.EmbedInClients) launchedOverlayAccountId = item.Account.Id;
                 RefreshQueueSummary();
                 _viewModel.AppendActivity($"{item.Label}: {item.Detail}.");
                 if (!result.Succeeded)
@@ -1798,7 +2084,21 @@ public sealed class MainWindow : Window
         }
         catch (OperationCanceledException) { foreach (var item in _viewModel.Queue.Where(x => x.State == LaunchQueueState.Waiting || x.State == LaunchQueueState.Launching)) { item.State = LaunchQueueState.Canceled; item.Detail = "Canceled"; } _viewModel.AppendActivity("Launch queue canceled."); }
         catch (Exception exception) { _viewModel.AppendActivity($"Launch queue failed safely: {exception.Message}"); }
-        finally { _launchCancellation?.Dispose(); _launchCancellation = null; await SaveAsync(); RenderPage(); }
+        finally
+        {
+            _launchCancellation?.Dispose();
+            _launchCancellation = null;
+            await SaveAsync();
+            if (launchedOverlayAccountId is not null && _clientOverlay is not null)
+            {
+                _selectedClientAccountId = launchedOverlayAccountId;
+                SelectPage("clients");
+            }
+            else
+            {
+                RenderPage();
+            }
+        }
     }
 
     private async Task RetryFailedLaunchesAsync()
@@ -2150,6 +2450,8 @@ public sealed class MainWindow : Window
         dialog.Show(this);
         return await result.Task;
     }
+
+    private sealed record ClientTabItem(string AccountId, string Label, RobloxWindowInfo Window);
 
     private async Task<bool> ConfirmAsync(string message)
     {
