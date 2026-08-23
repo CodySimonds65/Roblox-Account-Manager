@@ -323,6 +323,7 @@ public sealed class App : Application
                 composition.BrowserSessions,
                 composition.Launches,
                 composition.Clients,
+                composition.ClientOverlay,
                 composition.UpdateSource,
                 _validationMode);
         }
