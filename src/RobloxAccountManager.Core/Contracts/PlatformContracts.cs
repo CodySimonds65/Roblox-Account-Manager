@@ -114,6 +114,32 @@ public sealed record RobloxLaunchRequest(
     // cannot establish a new trust baseline.
     string? ValidatedRobloxBundleFingerprint = null);
 
+/// <summary>
+/// The platform may replace the source bundle with a prepared runtime before a
+/// one-use launch URI is requested. Resources held by the preparation remain
+/// leased until every attempt in the serialized launch operation has finished.
+/// </summary>
+public sealed record RobloxLaunchPreparation(
+    bool Succeeded,
+    RobloxLaunchRequest Request,
+    LaunchFailureKind FailureKind = LaunchFailureKind.None,
+    string? DiagnosticCode = null,
+    MacLaunchLevel? ActiveMacLevel = null,
+    IAsyncDisposable? Lease = null)
+{
+    public static RobloxLaunchPreparation Success(
+        RobloxLaunchRequest request,
+        MacLaunchLevel? activeMacLevel = null,
+        IAsyncDisposable? lease = null) =>
+        new(true, request, ActiveMacLevel: activeMacLevel, Lease: lease);
+
+    public static RobloxLaunchPreparation Failure(
+        RobloxLaunchRequest request,
+        LaunchFailureKind failureKind,
+        string diagnosticCode) =>
+        new(false, request, failureKind, diagnosticCode);
+}
+
 public sealed record SingletonReleaseResult(
     SingletonReleaseStatus Status,
     int? NativeError = null,

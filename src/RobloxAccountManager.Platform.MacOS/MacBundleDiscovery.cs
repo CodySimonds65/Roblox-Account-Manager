@@ -11,13 +11,25 @@ public sealed class MacBundleDiscovery
 
     private readonly IMacProcessCommandRunner _commandRunner;
     private readonly MacSignatureVerifier _signatureVerifier;
+    private readonly IReadOnlyList<string> _approvedLocations;
 
     public MacBundleDiscovery(
         IMacProcessCommandRunner? commandRunner = null,
         MacSignatureVerifier? signatureVerifier = null)
+        : this(commandRunner, signatureVerifier, approvedLocations: null)
+    {
+    }
+
+    internal MacBundleDiscovery(
+        IMacProcessCommandRunner? commandRunner,
+        MacSignatureVerifier? signatureVerifier,
+        IReadOnlyList<string>? approvedLocations)
     {
         _commandRunner = commandRunner ?? new MacProcessCommandRunner();
         _signatureVerifier = signatureVerifier ?? new MacSignatureVerifier(_commandRunner);
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        _approvedLocations = approvedLocations?.Select(Path.GetFullPath).ToArray()
+            ?? ["/Applications", Path.Combine(home, "Applications")];
     }
 
     public IReadOnlyList<string> GetDefaultBundleCandidates()
@@ -61,6 +73,27 @@ public sealed class MacBundleDiscovery
         CancellationToken cancellationToken = default)
     {
         return await ValidateCoreAsync(bundlePath, requireApprovedLocation: false, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<MacBundleInfo?> ValidateManagedMultiInstanceRuntimeAsync(
+        string bundlePath,
+        CancellationToken cancellationToken = default)
+    {
+        var validated = await ValidateCoreAsync(
+            bundlePath,
+            requireApprovedLocation: false,
+            cancellationToken).ConfigureAwait(false);
+        if (validated is null)
+            return null;
+
+        var plistPath = Path.Combine(validated.BundlePath, "Contents", "Info.plist");
+        var prohibited = await ReadPlistValueAsync(
+            plistPath,
+            "LSMultipleInstancesProhibited",
+            cancellationToken).ConfigureAwait(false);
+        return string.Equals(prohibited, "false", StringComparison.OrdinalIgnoreCase)
+            ? validated
+            : null;
     }
 
     private async Task<MacBundleInfo?> ValidateCoreAsync(
@@ -147,12 +180,8 @@ public sealed class MacBundleDiscovery
         }
     }
 
-    private static bool IsApprovedLocation(string fullPath)
-    {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        return PathSafety.IsContainedBy("/Applications", fullPath)
-            || PathSafety.IsContainedBy(Path.Combine(home, "Applications"), fullPath);
-    }
+    private bool IsApprovedLocation(string fullPath) =>
+        _approvedLocations.Any(root => PathSafety.IsContainedBy(root, fullPath));
 
     private async Task<string?> ReadPlistValueAsync(
         string plistPath,
@@ -187,7 +216,10 @@ public sealed class MacBundleDiscovery
                 if (elements[index].Name.LocalName == "key"
                     && string.Equals(elements[index].Value, key, StringComparison.Ordinal))
                 {
-                    return elements[index + 1].Value;
+                    var value = elements[index + 1];
+                    return value.Name.LocalName is "true" or "false"
+                        ? value.Name.LocalName
+                        : value.Value;
                 }
             }
         }

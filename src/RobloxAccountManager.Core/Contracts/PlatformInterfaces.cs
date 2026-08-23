@@ -29,7 +29,9 @@ public interface IRobloxProcessLocator
 public interface IRobloxMultiInstanceStrategy
 {
     RobloxPlatform Platform { get; }
-    ValueTask PrepareAsync(RobloxLaunchRequest request, CancellationToken cancellationToken = default);
+    ValueTask<RobloxLaunchPreparation> PrepareAsync(
+        RobloxLaunchRequest request,
+        CancellationToken cancellationToken = default);
     ValueTask<SingletonReleaseResult> ReleaseSingletonAsync(CancellationToken cancellationToken = default);
     ValueTask<MacLaunchLevel?> GetActiveMacLevelAsync(CancellationToken cancellationToken = default);
 }

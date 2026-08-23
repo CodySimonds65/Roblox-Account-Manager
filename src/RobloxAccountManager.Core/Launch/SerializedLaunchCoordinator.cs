@@ -39,25 +39,43 @@ public sealed class SerializedLaunchCoordinator
 
         await _launchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         var attempts = new List<LaunchAttemptDiagnostic>(request.MaxAttempts);
+        var preparationLeases = new List<IAsyncDisposable>(request.MaxAttempts);
         try
         {
             for (var attempt = 1; attempt <= request.MaxAttempts; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                // Advance the baseline for every attempt. A client that appears
-                // late after a failed verification is known state on the next
-                // attempt and cannot be misassigned to that retry.
-                var snapshot = await _processLocator.CaptureSnapshotAsync(cancellationToken).ConfigureAwait(false);
-
+                RobloxLaunchPreparation preparation;
                 try
                 {
-                    await _multiInstanceStrategy.PrepareAsync(request, cancellationToken).ConfigureAwait(false);
+                    preparation = await _multiInstanceStrategy.PrepareAsync(request, cancellationToken).ConfigureAwait(false);
                 }
                 catch (InvalidOperationException exception) when (exception.Message == "consent-required")
                 {
                     attempts.Add(new LaunchAttemptDiagnostic(attempt, LaunchFailureKind.LauncherRejected, "consent-required"));
                     return new LaunchResult(false, null, attempts, LaunchFailureKind.LauncherRejected);
                 }
+                if (!preparation.Succeeded)
+                {
+                    var failureKind = preparation.FailureKind == LaunchFailureKind.None
+                        ? LaunchFailureKind.LauncherRejected
+                        : preparation.FailureKind;
+                    attempts.Add(new LaunchAttemptDiagnostic(
+                        attempt,
+                        failureKind,
+                        preparation.DiagnosticCode ?? "launch-preparation-failed",
+                        BundlePath: request.RobloxBundlePath));
+                    return new LaunchResult(false, null, attempts, failureKind);
+                }
+
+                if (preparation.Lease is not null)
+                    preparationLeases.Add(preparation.Lease);
+                var preparedRequest = preparation.Request;
+
+                // Preparation can clone and sign a macOS runtime. Capture the
+                // baseline only after that potentially slow work and against
+                // the effective bundle that will actually be launched.
+                var snapshot = await _processLocator.CaptureSnapshotAsync(cancellationToken).ConfigureAwait(false);
                 var release = await _multiInstanceStrategy.ReleaseSingletonAsync(cancellationToken).ConfigureAwait(false);
                 if (!release.Succeeded)
                 {
@@ -65,7 +83,7 @@ public sealed class SerializedLaunchCoordinator
                         attempt,
                         LaunchFailureKind.LauncherRejected,
                         release.DiagnosticCode ?? "singleton-release-failed",
-                        BundlePath: request.RobloxBundlePath,
+                        BundlePath: preparedRequest.RobloxBundlePath,
                         SingletonStatus: release.Status,
                         NativeError: release.NativeError));
                     continue;
@@ -73,29 +91,29 @@ public sealed class SerializedLaunchCoordinator
 
                 // Acquire a one-use ticket only after every potentially slow
                 // preparation step. This call remains inside the retry loop.
-                var freshUri = await request.FreshUriFactory(cancellationToken).ConfigureAwait(false);
+                var freshUri = await preparedRequest.FreshUriFactory(cancellationToken).ConfigureAwait(false);
                 if (!IsRobloxLaunchUri(freshUri))
                 {
                     attempts.Add(new LaunchAttemptDiagnostic(attempt, LaunchFailureKind.LauncherRejected, "invalid-launch-uri"));
                     continue;
                 }
 
-                var launch = await _platformLauncher.LaunchAsync(request, freshUri, cancellationToken).ConfigureAwait(false);
+                var launch = await _platformLauncher.LaunchAsync(preparedRequest, freshUri, cancellationToken).ConfigureAwait(false);
                 if (!launch.Accepted)
                 {
                     attempts.Add(new LaunchAttemptDiagnostic(
                         attempt,
                         launch.FailureKind == LaunchFailureKind.None ? LaunchFailureKind.LauncherRejected : launch.FailureKind,
                         launch.DiagnosticCode ?? "launcher-rejected",
-                        BundlePath: request.RobloxBundlePath,
+                        BundlePath: preparedRequest.RobloxBundlePath,
                         SingletonStatus: release.Status,
                         NativeError: release.NativeError));
                     continue;
                 }
 
                 var verificationRequest = string.IsNullOrWhiteSpace(launch.ValidatedRobloxBundleFingerprint)
-                    ? request
-                    : request with { ValidatedRobloxBundleFingerprint = launch.ValidatedRobloxBundleFingerprint };
+                    ? preparedRequest
+                    : preparedRequest with { ValidatedRobloxBundleFingerprint = launch.ValidatedRobloxBundleFingerprint };
                 var verification = await _processLocator.VerifyLaunchedProcessAsync(snapshot, verificationRequest, cancellationToken).ConfigureAwait(false);
                 if (verification.Succeeded && verification.Process is not null && verification.Process.Identity.IsValid)
                 {
@@ -106,7 +124,7 @@ public sealed class SerializedLaunchCoordinator
                         "verified",
                         identity.Pid,
                         identity.StartTimeUtc,
-                        identity.BundlePath ?? request.RobloxBundlePath,
+                        identity.BundlePath ?? preparedRequest.RobloxBundlePath,
                         release.Status,
                         release.NativeError));
                     return new LaunchResult(true, verification.Process, attempts);
@@ -116,7 +134,7 @@ public sealed class SerializedLaunchCoordinator
                     attempt,
                     verification.FailureKind == LaunchFailureKind.None ? LaunchFailureKind.VerificationFailed : verification.FailureKind,
                     verification.DiagnosticCode ?? "process-verification-failed",
-                    BundlePath: request.RobloxBundlePath,
+                    BundlePath: preparedRequest.RobloxBundlePath,
                     SingletonStatus: release.Status,
                     NativeError: release.NativeError));
             }
@@ -129,6 +147,17 @@ public sealed class SerializedLaunchCoordinator
         }
         finally
         {
+            for (var index = preparationLeases.Count - 1; index >= 0; index--)
+            {
+                try
+                {
+                    await preparationLeases[index].DisposeAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    // A reservation cleanup failure must not replace the launch result.
+                }
+            }
             _launchGate.Release();
         }
     }

@@ -193,6 +193,118 @@ _ = new MacCorePlatformLauncher(unconfiguredDiscovery);
 passed++;
 Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblox Team ID pin.");
 
+{
+    var runtimeTestRoot = Path.Combine(Path.GetTempPath(), "ram-managed-runtime-" + Guid.NewGuid().ToString("N"));
+    var approvedRoot = Path.Combine(runtimeTestRoot, "Applications");
+    var sourceBundle = Path.Combine(approvedRoot, "Roblox.app");
+    var sourceContents = Path.Combine(sourceBundle, "Contents");
+    var sourceMacOs = Path.Combine(sourceContents, "MacOS");
+    var runtimeRoot = Path.Combine(runtimeTestRoot, "runtime");
+    Directory.CreateDirectory(sourceMacOs);
+    try
+    {
+        await File.WriteAllTextAsync(
+            Path.Combine(sourceContents, "Info.plist"),
+            "<?xml version=\"1.0\"?><plist><dict>" +
+            "<key>CFBundleIdentifier</key><string>com.roblox.RobloxPlayer</string>" +
+            "<key>CFBundleExecutable</key><string>RobloxPlayer</string>" +
+            "<key>CFBundleShortVersionString</key><string>1.0</string>" +
+            "<key>CFBundleVersion</key><string>1</string>" +
+            "<key>LSMultipleInstancesProhibited</key><true/>" +
+            "</dict></plist>");
+        await File.WriteAllBytesAsync(Path.Combine(sourceMacOs, "RobloxPlayer"), [1, 2, 3, 4]);
+
+        var runtimeRunner = new ManagedRuntimeTestCommandRunner();
+        var testDiscovery = new MacBundleDiscovery(
+            runtimeRunner,
+            new MacSignatureVerifier(runtimeRunner),
+            [approvedRoot]);
+        var builder = new MacManagedRuntimeBuilder(
+            runtimeRoot,
+            testDiscovery,
+            runtimeRunner,
+            processLocator: new EmptyRobloxProcessLocator());
+        var buildRequest = new MacManagedRuntimeRequest(
+            sourceBundle,
+            "single-runtime",
+            UserConsented: true,
+            Level: MacLaunchLevel.ManagedRuntime);
+        var built = await builder.BuildAsync(buildRequest);
+        Check(built.Status == MacRuntimeBuildStatus.Built && built.RuntimePath is not null,
+            "The managed Roblox runtime was not built from a validated source.");
+        var managedPlist = Path.Combine(built.RuntimePath!, "Roblox.app", "Contents", "Info.plist");
+        var managedPlistText = await File.ReadAllTextAsync(managedPlist);
+        var sourcePlistText = await File.ReadAllTextAsync(Path.Combine(sourceContents, "Info.plist"));
+        Check(managedPlistText.Contains("LSMultipleInstancesProhibited", StringComparison.Ordinal)
+              && managedPlistText.Contains("<false", StringComparison.Ordinal)
+              && sourcePlistText.Contains("<true", StringComparison.Ordinal),
+            "Managed runtime preparation did not disable the Launch Services guard while preserving the source bundle.");
+        var reused = await builder.BuildAsync(buildRequest);
+        Check(reused.Status == MacRuntimeBuildStatus.Reused,
+            "An unchanged managed Roblox runtime was rebuilt instead of reused.");
+        await File.WriteAllTextAsync(
+            managedPlist,
+            managedPlistText.Replace("<false", "<true", StringComparison.Ordinal)
+                .Replace("</false>", "</true>", StringComparison.Ordinal));
+        var repaired = await builder.BuildAsync(buildRequest);
+        Check(repaired.Status == MacRuntimeBuildStatus.Built,
+            "A managed runtime with the Launch Services guard restored was incorrectly reused.");
+
+        var slotManager = new MacManagedRuntimeSlotManager(
+            runtimeRoot,
+            testDiscovery,
+            runtimeRunner,
+            processLocator: new EmptyRobloxProcessLocator());
+        var coreStrategy = new MacCoreMultiInstanceStrategy(
+            slotManager: slotManager,
+            bundleDiscovery: testDiscovery);
+        var deniedPreparation = await coreStrategy.PrepareAsync(new Contracts.RobloxLaunchRequest(
+            "test-account",
+            _ => ValueTask.FromResult(new Uri("roblox-player:1+gameinfo:test")),
+            PreferredMacLevel: Contracts.MacLaunchLevel.ManagedSlots,
+            RobloxBundlePath: sourceBundle,
+            UserConsentedToMultiInstanceChanges: false));
+        Check(!deniedPreparation.Succeeded && deniedPreparation.DiagnosticCode == "consent-required",
+            "macOS managed-runtime preparation did not enforce explicit consent.");
+        if (OperatingSystem.IsMacOS())
+        {
+            var prepared = await coreStrategy.PrepareAsync(deniedPreparation.Request with
+            {
+                UserConsentedToMultiInstanceChanges = true
+            });
+            Check(prepared.Succeeded
+                  && prepared.ActiveMacLevel == Contracts.MacLaunchLevel.ManagedSlots
+                  && prepared.Request.RobloxBundlePath?.Contains("slot-1", StringComparison.Ordinal) == true
+                  && !string.IsNullOrWhiteSpace(prepared.Request.ValidatedRobloxBundleFingerprint),
+                "The production macOS strategy did not prepare a validated managed slot.");
+            await prepared.Lease!.DisposeAsync();
+        }
+        var firstSlot = await slotManager.AcquireAsync(buildRequest);
+        var secondSlot = await slotManager.AcquireAsync(buildRequest);
+        Check(firstSlot.Succeeded && secondSlot.Succeeded
+              && firstSlot.Slot?.SlotNumber == 1
+              && secondSlot.Slot?.SlotNumber == 2,
+            "A reserved managed slot was reused before its launch attempt completed.");
+        await firstSlot.Lease!.DisposeAsync();
+        await secondSlot.Lease!.DisposeAsync();
+        var reusedSlot = await slotManager.AcquireAsync(buildRequest);
+        Check(reusedSlot.Succeeded && reusedSlot.Slot?.SlotNumber == 1,
+            "An idle managed slot was not reusable after its reservation was released.");
+        await reusedSlot.Lease!.DisposeAsync();
+        if (OperatingSystem.IsMacOS())
+        {
+            Check(runtimeRunner.Calls.Any(call =>
+                    call.Executable == "/usr/bin/codesign"
+                    && call.Arguments.Contains("--options", StringComparer.Ordinal)
+                    && call.Arguments.Contains("runtime", StringComparer.Ordinal)),
+                "The managed Roblox clone was not signed with hardened-runtime options.");
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(runtimeTestRoot)) Directory.Delete(runtimeTestRoot, recursive: true);
+    }
+}
 var plistMetadataFallbackRoot = Path.Combine(
     Path.GetTempPath(),
     "ram-mac-roblox-plist-fallback-" + Guid.NewGuid().ToString("N") + ".app");
@@ -951,4 +1063,61 @@ sealed class EmptyRobloxProcessLocator : IRobloxProcessLocator
     public RobloxProcessInfo? FindProcess(int processId) => null;
 
     public bool IsSameProcess(RobloxProcessIdentity expected, RobloxProcessInfo actual) => false;
+}
+
+sealed class ManagedRuntimeTestCommandRunner : IMacProcessCommandRunner
+{
+    private readonly MacProcessCommandRunner _native = new();
+    public List<(string Executable, string[] Arguments)> Calls { get; } = [];
+
+    public Task<MacProcessCommandResult> RunAsync(
+        string executable,
+        IEnumerable<string> arguments,
+        CancellationToken cancellationToken = default)
+    {
+        var values = arguments.ToArray();
+        Calls.Add((executable, values));
+        if (!OperatingSystem.IsMacOS())
+            return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
+
+        if (string.Equals(executable, "/bin/cp", StringComparison.Ordinal)
+            || string.Equals(executable, "/usr/bin/plutil", StringComparison.Ordinal))
+        {
+            return _native.RunAsync(executable, values, cancellationToken);
+        }
+
+        if (string.Equals(executable, "/usr/sbin/spctl", StringComparison.Ordinal))
+            return Task.FromResult(new MacProcessCommandResult(0, "accepted", string.Empty));
+
+        if (!string.Equals(executable, "/usr/bin/codesign", StringComparison.Ordinal))
+            return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
+
+        if (values.Contains("--requirements", StringComparer.Ordinal))
+        {
+            return Task.FromResult(new MacProcessCommandResult(
+                0,
+                string.Empty,
+                "designated => anchor apple generic and identifier \"com.roblox.RobloxPlayer\""));
+        }
+
+        if (values.Contains("--verbose=4", StringComparer.Ordinal))
+        {
+            return Task.FromResult(new MacProcessCommandResult(
+                0,
+                string.Empty,
+                "Authority=Developer ID Application: Roblox Corporation (TESTTEAM)\n" +
+                "Identifier=com.roblox.RobloxPlayer\nTeamIdentifier=TESTTEAM"));
+        }
+
+        if (values.Contains("--entitlements", StringComparer.Ordinal)
+            && values.Contains(":-", StringComparer.Ordinal))
+        {
+            return Task.FromResult(new MacProcessCommandResult(
+                0,
+                string.Empty,
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>"));
+        }
+
+        return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
+    }
 }
