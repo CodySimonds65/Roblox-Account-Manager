@@ -8,6 +8,7 @@ namespace RobloxAccountManager.Platform.MacOS;
 /// </summary>
 public sealed class MacManagedRuntimeSlotManager
 {
+    private const int MinimumCandidateScan = 8;
     private static readonly Regex SlotName = new("^slot-(?<number>[1-9][0-9]{0,5})$", RegexOptions.CultureInvariant);
     private readonly string _slotsRoot;
     private readonly MacBundleDiscovery _bundleDiscovery;
@@ -36,23 +37,61 @@ public sealed class MacManagedRuntimeSlotManager
         ArgumentNullException.ThrowIfNull(request);
         PathSafety.EnsureOwnerOnlyDirectory(_slotsRoot);
         var slots = EnumerateSlots();
-        var available = slots.FirstOrDefault(slot => !IsBusy(slot.RuntimePath));
-        var slotNumber = available?.SlotNumber ?? (slots.Count == 0 ? 1 : slots.Max(slot => slot.SlotNumber) + 1);
-        var runtimeName = $"slot-{slotNumber}";
-        var builder = new MacManagedRuntimeBuilder(_slotsRoot, _bundleDiscovery, _commandRunner, _processLocator);
-        var build = await builder.BuildAsync(request with { RuntimeName = runtimeName }, cancellationToken).ConfigureAwait(false);
-        if (!build.Succeeded || build.RuntimePath is null)
+        var highestKnownSlot = slots.Count == 0 ? 0 : slots.Max(slot => slot.SlotNumber);
+        var candidateLimit = Math.Max(MinimumCandidateScan, highestKnownSlot + 1);
+        for (var slotNumber = 1; slotNumber <= candidateLimit; slotNumber++)
         {
-            return new MacSlotAcquireResult(false, null, build, build.FailureReason ?? "Unable to build a managed runtime slot.");
+            cancellationToken.ThrowIfCancellationRequested();
+            var lease = TryReserve(slotNumber);
+            if (lease is null)
+                continue;
+
+            var runtimeName = $"slot-{slotNumber}";
+            var runtimePath = PathSafety.RequireContainedPath(
+                _slotsRoot,
+                Path.Combine(_slotsRoot, runtimeName));
+            if (IsBusy(runtimePath))
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+                continue;
+            }
+
+            var builder = new MacManagedRuntimeBuilder(_slotsRoot, _bundleDiscovery, _commandRunner, _processLocator);
+            var build = await builder.BuildAsync(
+                request with { RuntimeName = runtimeName, Level = MacLaunchLevel.ManagedSlots },
+                cancellationToken).ConfigureAwait(false);
+            if (!build.Succeeded || build.RuntimePath is null)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+                if (build.Status == MacRuntimeBuildStatus.Busy)
+                    continue;
+                return new MacSlotAcquireResult(
+                    false,
+                    null,
+                    build,
+                    build.FailureReason ?? "Unable to build a managed runtime slot.");
+            }
+
+            var slot = new MacManagedRuntimeSlot(slotNumber, build.RuntimePath, IsBusy(build.RuntimePath), null);
+            if (slot.IsBusy)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+                return new MacSlotAcquireResult(false, slot, build, "A process appeared in the slot during acquisition.");
+            }
+
+            return new MacSlotAcquireResult(true, slot, build, null, lease);
         }
 
-        var slot = new MacManagedRuntimeSlot(slotNumber, build.RuntimePath, IsBusy(build.RuntimePath), null);
-        if (slot.IsBusy)
-        {
-            return new MacSlotAcquireResult(false, slot, build, "A process appeared in the slot during acquisition.");
-        }
-
-        return new MacSlotAcquireResult(true, slot, build, null);
+        return new MacSlotAcquireResult(
+            false,
+            null,
+            new MacManagedRuntimeBuildResult(
+                MacRuntimeBuildStatus.Busy,
+                null,
+                null,
+                null,
+                "No managed runtime slot could be reserved."),
+            "No managed runtime slot could be reserved.");
     }
 
     public IReadOnlyList<MacManagedRuntimeSlot> EnumerateSlots()
@@ -151,6 +190,40 @@ public sealed class MacManagedRuntimeSlotManager
         catch (Exception ex) when (ex is IOException or InvalidOperationException)
         {
             return true;
+        }
+    }
+
+    private MacSlotReservation? TryReserve(int slotNumber)
+    {
+        var reservationPath = PathSafety.RequireContainedPath(
+            _slotsRoot,
+            Path.Combine(_slotsRoot, $".slot-{slotNumber}.reserve"));
+        try
+        {
+            PathSafety.RejectSymlinkComponents(reservationPath);
+            var stream = new FileStream(
+                reservationPath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.None);
+            return new MacSlotReservation(stream);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private sealed class MacSlotReservation(FileStream stream) : IAsyncDisposable
+    {
+        private FileStream? _stream = stream;
+
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Exchange(ref _stream, null)?.Dispose();
+            return ValueTask.CompletedTask;
         }
     }
 }

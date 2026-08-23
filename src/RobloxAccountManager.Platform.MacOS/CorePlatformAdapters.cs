@@ -48,9 +48,13 @@ public sealed class MacCoreProcessLocator : Contracts.IRobloxProcessLocator
                 "pre-launch-bundle-fingerprint-required");
         }
 
+        var managedRuntime = request.PreferredMacLevel is Contracts.MacLaunchLevel.ManagedRuntime
+            or Contracts.MacLaunchLevel.ManagedSlots;
         Func<string, CancellationToken, Task<MacBundleInfo?>>? bundleValidator = _bundleDiscovery is null
             ? null
-            : (path, token) => _bundleDiscovery.ValidateAsync(path, token);
+            : managedRuntime
+                ? (path, token) => _bundleDiscovery.ValidateManagedMultiInstanceRuntimeAsync(path, token)
+                : (path, token) => _bundleDiscovery.ValidateAsync(path, token);
         var result = await new MacLaunchVerificationService(_inner, bundleValidator).WaitForNewProcessAsync(
             beforeSnapshot,
             expectedBundle,
@@ -98,20 +102,119 @@ public sealed class MacCoreProcessLocator : Contracts.IRobloxProcessLocator
 public sealed class MacCoreMultiInstanceStrategy : Contracts.IRobloxMultiInstanceStrategy
 {
     private readonly MacSemaphore _semaphore;
+    private readonly MacManagedRuntimeSlotManager _slotManager;
+    private readonly MacBundleDiscovery _bundleDiscovery;
 
-    public MacCoreMultiInstanceStrategy(MacSemaphore? semaphore = null)
+    public MacCoreMultiInstanceStrategy(
+        MacSemaphore? semaphore = null,
+        MacManagedRuntimeSlotManager? slotManager = null,
+        MacBundleDiscovery? bundleDiscovery = null)
     {
         _semaphore = semaphore ?? new MacSemaphore();
+        _bundleDiscovery = bundleDiscovery ?? new MacBundleDiscovery();
+        _slotManager = slotManager ?? new MacManagedRuntimeSlotManager(bundleDiscovery: _bundleDiscovery);
     }
 
     public Contracts.RobloxPlatform Platform => Contracts.RobloxPlatform.MacOS;
 
-    public ValueTask PrepareAsync(Contracts.RobloxLaunchRequest request, CancellationToken cancellationToken = default)
+    public async ValueTask<Contracts.RobloxLaunchPreparation> PrepareAsync(
+        Contracts.RobloxLaunchRequest request,
+        CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!request.UserConsentedToMultiInstanceChanges)
-            throw new InvalidOperationException("consent-required");
-        return ValueTask.CompletedTask;
+        {
+            return Contracts.RobloxLaunchPreparation.Failure(
+                request,
+                Contracts.LaunchFailureKind.LauncherRejected,
+                "consent-required");
+        }
+        if (!OperatingSystem.IsMacOS())
+        {
+            return Contracts.RobloxLaunchPreparation.Failure(
+                request,
+                Contracts.LaunchFailureKind.PlatformNotSupported,
+                "platform-not-supported");
+        }
+        if (string.IsNullOrWhiteSpace(request.RobloxBundlePath))
+        {
+            return Contracts.RobloxLaunchPreparation.Failure(
+                request,
+                Contracts.LaunchFailureKind.LauncherRejected,
+                "bundle-path-required");
+        }
+
+        var requestedLevel = request.PreferredMacLevel ?? Contracts.MacLaunchLevel.ManagedSlots;
+        if (requestedLevel == Contracts.MacLaunchLevel.OriginalBundle)
+        {
+            return Contracts.RobloxLaunchPreparation.Success(
+                request with { PreferredMacLevel = Contracts.MacLaunchLevel.OriginalBundle },
+                Contracts.MacLaunchLevel.OriginalBundle);
+        }
+
+        MacSlotAcquireResult acquired;
+        try
+        {
+            acquired = await _slotManager.AcquireAsync(
+                new MacManagedRuntimeRequest(
+                    request.RobloxBundlePath,
+                    "reserved-by-slot-manager",
+                    request.UserConsentedToMultiInstanceChanges,
+                    Level: MacLaunchLevel.ManagedSlots),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return Contracts.RobloxLaunchPreparation.Failure(
+                request,
+                Contracts.LaunchFailureKind.LauncherRejected,
+                "managed-runtime-build-failed");
+        }
+
+        if (!acquired.Succeeded || acquired.Slot is null || acquired.Lease is null)
+        {
+            return Contracts.RobloxLaunchPreparation.Failure(
+                request,
+                Contracts.LaunchFailureKind.LauncherRejected,
+                acquired.Build.Status == MacRuntimeBuildStatus.Busy
+                    ? "managed-slot-busy"
+                    : "managed-runtime-build-failed");
+        }
+
+        var managedBundlePath = Path.Combine(
+            acquired.Slot.RuntimePath,
+            Path.GetFileName(request.RobloxBundlePath));
+        MacBundleInfo? managedBundle;
+        try
+        {
+            managedBundle = await _bundleDiscovery.ValidateManagedMultiInstanceRuntimeAsync(
+                managedBundlePath,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await acquired.Lease.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+        if (managedBundle is null)
+        {
+            await acquired.Lease.DisposeAsync().ConfigureAwait(false);
+            return Contracts.RobloxLaunchPreparation.Failure(
+                request,
+                Contracts.LaunchFailureKind.LauncherRejected,
+                "managed-runtime-signature-invalid");
+        }
+
+        var preparedRequest = request with
+        {
+            PreferredMacLevel = Contracts.MacLaunchLevel.ManagedSlots,
+            RobloxBundlePath = managedBundle.BundlePath,
+            ValidatedRobloxBundleFingerprint = managedBundle.SourceFingerprint
+        };
+        return Contracts.RobloxLaunchPreparation.Success(
+            preparedRequest,
+            Contracts.MacLaunchLevel.ManagedSlots,
+            acquired.Lease);
     }
 
     public ValueTask<Contracts.SingletonReleaseResult> ReleaseSingletonAsync(CancellationToken cancellationToken = default)
@@ -129,7 +232,7 @@ public sealed class MacCoreMultiInstanceStrategy : Contracts.IRobloxMultiInstanc
     }
 
     public ValueTask<Contracts.MacLaunchLevel?> GetActiveMacLevelAsync(CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult<Contracts.MacLaunchLevel?>(Contracts.MacLaunchLevel.OriginalBundle);
+        ValueTask.FromResult<Contracts.MacLaunchLevel?>(Contracts.MacLaunchLevel.ManagedSlots);
 }
 
 public sealed class MacCorePlatformLauncher : Contracts.IRobloxPlatformLauncher
@@ -137,15 +240,18 @@ public sealed class MacCorePlatformLauncher : Contracts.IRobloxPlatformLauncher
     private readonly IMacProcessCommandRunner _commandRunner;
     private readonly MacSemaphore _semaphore;
     private readonly MacBundleDiscovery _bundleDiscovery;
+    private readonly string _managedRuntimeRoot;
 
     public MacCorePlatformLauncher(
         MacBundleDiscovery bundleDiscovery,
         IMacProcessCommandRunner? commandRunner = null,
-        MacSemaphore? semaphore = null)
+        MacSemaphore? semaphore = null,
+        string? managedRuntimeRoot = null)
     {
         _bundleDiscovery = bundleDiscovery ?? throw new ArgumentNullException(nameof(bundleDiscovery));
         _commandRunner = commandRunner ?? new MacProcessCommandRunner();
         _semaphore = semaphore ?? new MacSemaphore();
+        _managedRuntimeRoot = Path.GetFullPath(managedRuntimeRoot ?? MacManagedRuntimeBuilder.GetDefaultRuntimeRoot());
     }
 
     public Contracts.RobloxPlatform Platform => Contracts.RobloxPlatform.MacOS;
@@ -165,14 +271,49 @@ public sealed class MacCorePlatformLauncher : Contracts.IRobloxPlatformLauncher
         // Validate before the ticket-bearing URI is passed to any external process. Bundle id,
         // approved location, Developer ID chain, Gatekeeper assessment, and designated
         // requirement must all match. Team ID pinning is intentionally not required.
-        var validatedBundle = await _bundleDiscovery.ValidateAsync(
-            request.RobloxBundlePath,
-            cancellationToken).ConfigureAwait(false);
+        var managedRuntime = request.PreferredMacLevel is Contracts.MacLaunchLevel.ManagedRuntime
+            or Contracts.MacLaunchLevel.ManagedSlots;
+        if (managedRuntime && !PathSafety.IsContainedBy(_managedRuntimeRoot, request.RobloxBundlePath))
+        {
+            return new Contracts.PlatformLaunchResult(
+                false,
+                Contracts.LaunchFailureKind.LauncherRejected,
+                "managed-runtime-path-invalid");
+        }
+
+        var validatedBundle = managedRuntime
+            ? await _bundleDiscovery.ValidateManagedMultiInstanceRuntimeAsync(
+                request.RobloxBundlePath,
+                cancellationToken).ConfigureAwait(false)
+            : await _bundleDiscovery.ValidateAsync(
+                request.RobloxBundlePath,
+                cancellationToken).ConfigureAwait(false);
         if (validatedBundle is null)
-            return new Contracts.PlatformLaunchResult(false, Contracts.LaunchFailureKind.LauncherRejected, "untrusted-roblox-bundle");
-        var revalidatedBundle = await _bundleDiscovery.ValidateAsync(
-            request.RobloxBundlePath,
-            cancellationToken).ConfigureAwait(false);
+        {
+            return new Contracts.PlatformLaunchResult(
+                false,
+                Contracts.LaunchFailureKind.LauncherRejected,
+                managedRuntime ? "managed-runtime-signature-invalid" : "untrusted-roblox-bundle");
+        }
+        if (!string.IsNullOrWhiteSpace(request.ValidatedRobloxBundleFingerprint)
+            && !string.Equals(
+                validatedBundle.SourceFingerprint,
+                request.ValidatedRobloxBundleFingerprint,
+                StringComparison.Ordinal))
+        {
+            return new Contracts.PlatformLaunchResult(
+                false,
+                Contracts.LaunchFailureKind.LauncherRejected,
+                "roblox-bundle-changed-before-launch");
+        }
+
+        var revalidatedBundle = managedRuntime
+            ? await _bundleDiscovery.ValidateManagedMultiInstanceRuntimeAsync(
+                request.RobloxBundlePath,
+                cancellationToken).ConfigureAwait(false)
+            : await _bundleDiscovery.ValidateAsync(
+                request.RobloxBundlePath,
+                cancellationToken).ConfigureAwait(false);
         if (revalidatedBundle is null
             || !string.Equals(validatedBundle.SourceFingerprint, revalidatedBundle.SourceFingerprint, StringComparison.Ordinal))
         {

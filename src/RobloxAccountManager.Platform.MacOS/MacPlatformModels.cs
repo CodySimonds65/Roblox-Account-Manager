@@ -155,7 +155,8 @@ public sealed record MacManagedRuntimeRequest(
     string SourceBundlePath,
     string RuntimeName,
     bool UserConsented,
-    bool ForceRebuild = false);
+    bool ForceRebuild = false,
+    MacLaunchLevel Level = MacLaunchLevel.ManagedRuntime);
 
 public enum MacRuntimeBuildStatus
 {
@@ -197,7 +198,8 @@ public sealed record MacSlotAcquireResult(
     bool Succeeded,
     MacManagedRuntimeSlot? Slot,
     MacManagedRuntimeBuildResult Build,
-    string? FailureReason);
+    string? FailureReason,
+    IAsyncDisposable? Lease = null);
 
 public sealed record MacTileLayout(int Left, int Top, int Width, int Height)
 {

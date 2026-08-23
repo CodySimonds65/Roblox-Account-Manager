@@ -72,7 +72,8 @@ public sealed class MacManagedRuntimeBuilder
             && !request.ForceRebuild
             && await ReadStampAsync(stampPath, cancellationToken).ConfigureAwait(false) is { } current
             && string.Equals(current.SourceFingerprint, source.SourceFingerprint, StringComparison.Ordinal)
-            && await _bundleDiscovery.ValidateManagedRuntimeAsync(managedBundlePath, cancellationToken).ConfigureAwait(false) is { } verifiedRuntime
+            && current.Level == request.Level
+            && await _bundleDiscovery.ValidateManagedMultiInstanceRuntimeAsync(managedBundlePath, cancellationToken).ConfigureAwait(false) is { } verifiedRuntime
             && verifiedRuntime.SignatureVerified)
         {
             return new MacManagedRuntimeBuildResult(MacRuntimeBuildStatus.Reused, runtimePath, source, source.SourceFingerprint, null);
@@ -110,9 +111,11 @@ public sealed class MacManagedRuntimeBuilder
             if (OperatingSystem.IsMacOS())
             {
                 await SignBundleAsync(stagedBundle, source.BundlePath, source.ExecutablePath, entitlementPath, cancellationToken).ConfigureAwait(false);
-                if (!await _signatureVerifier.VerifyManagedAsync(stagedBundle, cancellationToken).ConfigureAwait(false))
+                if (await _bundleDiscovery.ValidateManagedMultiInstanceRuntimeAsync(
+                        stagedBundle,
+                        cancellationToken).ConfigureAwait(false) is null)
                 {
-                    throw new InvalidOperationException("codesign verification failed for the managed Roblox runtime.");
+                    throw new InvalidOperationException("The managed Roblox runtime failed signature or multi-instance validation.");
                 }
             }
 
@@ -124,7 +127,7 @@ public sealed class MacManagedRuntimeBuilder
                 source.ExecutableFingerprint,
                 source.PlistFingerprint,
                 DateTimeOffset.UtcNow,
-                MacLaunchLevel.ManagedRuntime);
+                request.Level);
             await WriteJsonAtomicAsync(sidecarStage, stamp, cancellationToken).ConfigureAwait(false);
             CommitAtomically(stage, runtimePath, sidecarStage, stampPath);
             return new MacManagedRuntimeBuildResult(
@@ -246,7 +249,12 @@ public sealed class MacManagedRuntimeBuilder
                 cancellationToken).ConfigureAwait(false);
             if (!result.Succeeded)
             {
-                throw new IOException("Unable to patch the managed runtime Info.plist.");
+                result = await _commandRunner.RunAsync(
+                    "/usr/bin/plutil",
+                    ["-insert", "LSMultipleInstancesProhibited", "-bool", "false", "--", plistPath],
+                    cancellationToken).ConfigureAwait(false);
+                if (!result.Succeeded)
+                    throw new IOException("Unable to patch the managed runtime Info.plist.");
             }
 
             return;
@@ -298,11 +306,16 @@ public sealed class MacManagedRuntimeBuilder
         await File.WriteAllTextAsync(entitlementPath, entitlementXml, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
         var patch = await _commandRunner.RunAsync(
             "/usr/bin/plutil",
-            ["-replace", "com.apple.security.cs.disable-library-validation", "-bool", "true", "--", entitlementPath],
+            ["-replace", "com\\.apple\\.security\\.cs\\.disable-library-validation", "-bool", "true", "--", entitlementPath],
             cancellationToken).ConfigureAwait(false);
         if (!patch.Succeeded)
         {
-            throw new InvalidOperationException("Unable to prepare managed-runtime entitlements.");
+            patch = await _commandRunner.RunAsync(
+                "/usr/bin/plutil",
+                ["-insert", "com\\.apple\\.security\\.cs\\.disable-library-validation", "-bool", "true", "--", entitlementPath],
+                cancellationToken).ConfigureAwait(false);
+            if (!patch.Succeeded)
+                throw new InvalidOperationException("Unable to prepare managed-runtime entitlements.");
         }
 
         return entitlementPath;
@@ -363,7 +376,10 @@ public sealed class MacManagedRuntimeBuilder
             }
         }
 
-        var outerArgs = new List<string> { "--force", "--sign", "-" };
+        // Preserve hardened-runtime behavior on the locally signed clone. The
+        // disable-library-validation entitlement is only meaningful when the
+        // hardened runtime remains enabled on the main bundle signature.
+        var outerArgs = new List<string> { "--force", "--sign", "-", "--options", "runtime" };
         if (entitlementPath is not null)
         {
             outerArgs.Add("--entitlements");

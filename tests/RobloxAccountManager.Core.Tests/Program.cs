@@ -46,21 +46,53 @@ var windowsUpper = macUpper with { Platform = RobloxPlatform.Windows, Executable
 var windowsLower = windowsUpper with { ExecutablePath = "c:\\roblox\\player.exe" };
 Require(windowsUpper.Matches(windowsLower), "Windows identity paths were not compared case-insensitively.");
 
-var locator = new RetryLocator();
-var strategy = new SuccessfulStrategy();
-var launcher = new RecordingLauncher();
+var launchEvents = new List<string>();
+var locator = new RetryLocator(launchEvents);
+var strategy = new SuccessfulStrategy(launchEvents);
+var launcher = new RecordingLauncher(launchEvents);
 var coordinator = new SerializedLaunchCoordinator(locator, strategy, launcher);
 var uriCalls = 0;
 var result = await coordinator.LaunchAsync(new RobloxLaunchRequest(
     "account",
-    _ => ValueTask.FromResult(new Uri($"roblox-player:1+gameinfo:ticket-{++uriCalls}")),
+    _ =>
+    {
+        launchEvents.Add("ticket");
+        return ValueTask.FromResult(new Uri($"roblox-player:1+gameinfo:ticket-{++uriCalls}"));
+    },
     MaxAttempts: 2));
 Require(result.Succeeded, "The retry coordinator did not return the verified second process.");
 Require(uriCalls == 2 && launcher.LaunchCount == 2, "A retry reused a launch URI or skipped an attempt.");
 Require(locator.SnapshotCount == 2, "The process baseline was not refreshed before every launch attempt.");
+Require(strategy.DisposedLeaseCount == 2, "Prepared launch slot leases were not released after coordination completed.");
+Require(launcher.BundlePaths.All(path => path.Contains("prepared-slot-", StringComparison.Ordinal)),
+    "The platform launcher did not receive the effective prepared bundle path.");
+Require(string.Join(",", launchEvents.Take(6)) == "prepare,snapshot,release,ticket,launch,verify",
+    "Launch preparation did not complete before snapshot, singleton release, and ticket acquisition.");
 Require(locator.ValidatedFingerprints.Count == 2
         && locator.ValidatedFingerprints.All(fingerprint => fingerprint == "pre-launch-fingerprint"),
     "The pre-launch bundle fingerprint was not carried into every process verification attempt.");
+
+var rejectedTicketCalls = 0;
+var rejectedLocator = new RetryLocator();
+var rejected = await new SerializedLaunchCoordinator(
+        rejectedLocator,
+        new RejectingStrategy(),
+        new RecordingLauncher())
+    .LaunchAsync(new RobloxLaunchRequest(
+        "account",
+        _ =>
+        {
+            rejectedTicketCalls++;
+            return ValueTask.FromResult(ticketUri);
+        },
+        MaxAttempts: 3));
+Require(!rejected.Succeeded
+        && rejected.FailureKind == LaunchFailureKind.LauncherRejected
+        && rejected.Attempts.Count == 1
+        && rejected.Attempts[0].DiagnosticCode == "consent-required"
+        && rejectedTicketCalls == 0
+        && rejectedLocator.SnapshotCount == 0,
+    "A non-retryable preparation failure reached snapshot or ticket acquisition.");
 
 Require(GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/games/123/example", out var normalized)
         && normalized.Contains("/games/123/", StringComparison.Ordinal),
@@ -148,7 +180,7 @@ finally
 
 Console.WriteLine("Core security and launch-coordination tests passed.");
 
-sealed class RetryLocator : IRobloxProcessLocator
+sealed class RetryLocator(List<string>? events = null) : IRobloxProcessLocator
 {
     private int _verificationCount;
     public int SnapshotCount { get; private set; }
@@ -156,6 +188,7 @@ sealed class RetryLocator : IRobloxProcessLocator
 
     public ValueTask<RobloxLaunchSnapshot> CaptureSnapshotAsync(CancellationToken cancellationToken = default)
     {
+        events?.Add("snapshot");
         SnapshotCount++;
         return ValueTask.FromResult(new RobloxLaunchSnapshot(DateTimeOffset.UtcNow, []));
     }
@@ -163,6 +196,7 @@ sealed class RetryLocator : IRobloxProcessLocator
     public ValueTask<LaunchVerificationResult> VerifyLaunchedProcessAsync(
         RobloxLaunchSnapshot before, RobloxLaunchRequest request, CancellationToken cancellationToken = default)
     {
+        events?.Add("verify");
         ValidatedFingerprints.Add(request.ValidatedRobloxBundleFingerprint);
         _verificationCount++;
         if (_verificationCount == 1)
@@ -175,23 +209,75 @@ sealed class RetryLocator : IRobloxProcessLocator
         ValueTask.FromResult<IReadOnlyList<RobloxProcessInfo>>([]);
 }
 
-sealed class SuccessfulStrategy : IRobloxMultiInstanceStrategy
+sealed class SuccessfulStrategy(List<string>? events = null) : IRobloxMultiInstanceStrategy
 {
+    private int _preparationCount;
+    public int DisposedLeaseCount { get; private set; }
     public RobloxPlatform Platform => RobloxPlatform.MacOS;
-    public ValueTask PrepareAsync(RobloxLaunchRequest request, CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
+    public ValueTask<RobloxLaunchPreparation> PrepareAsync(
+        RobloxLaunchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        events?.Add("prepare");
+        var slot = ++_preparationCount;
+        var prepared = request with
+        {
+            RobloxBundlePath = $"/prepared-slot-{slot}/Roblox.app",
+            PreferredMacLevel = MacLaunchLevel.ManagedSlots
+        };
+        return ValueTask.FromResult(RobloxLaunchPreparation.Success(
+            prepared,
+            MacLaunchLevel.ManagedSlots,
+            new CallbackLease(() => DisposedLeaseCount++)));
+    }
     public ValueTask<SingletonReleaseResult> ReleaseSingletonAsync(CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(new SingletonReleaseResult(SingletonReleaseStatus.Released));
+        RecordRelease();
     public ValueTask<MacLaunchLevel?> GetActiveMacLevelAsync(CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult<MacLaunchLevel?>(MacLaunchLevel.OriginalBundle);
+        ValueTask.FromResult<MacLaunchLevel?>(MacLaunchLevel.ManagedSlots);
+
+    private ValueTask<SingletonReleaseResult> RecordRelease()
+    {
+        events?.Add("release");
+        return ValueTask.FromResult(new SingletonReleaseResult(SingletonReleaseStatus.Released));
+    }
+
+    private sealed class CallbackLease(Action dispose) : IAsyncDisposable
+    {
+        private Action? _dispose = dispose;
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Exchange(ref _dispose, null)?.Invoke();
+            return ValueTask.CompletedTask;
+        }
+    }
 }
 
-sealed class RecordingLauncher : IRobloxPlatformLauncher
+sealed class RecordingLauncher(List<string>? events = null) : IRobloxPlatformLauncher
 {
     public RobloxPlatform Platform => RobloxPlatform.MacOS;
     public int LaunchCount { get; private set; }
+    public List<string> BundlePaths { get; } = [];
     public ValueTask<PlatformLaunchResult> LaunchAsync(RobloxLaunchRequest request, Uri freshLaunchUri, CancellationToken cancellationToken = default)
     {
+        events?.Add("launch");
         LaunchCount++;
+        BundlePaths.Add(request.RobloxBundlePath ?? string.Empty);
         return ValueTask.FromResult(PlatformLaunchResult.Success("pre-launch-fingerprint"));
     }
+}
+
+sealed class RejectingStrategy : IRobloxMultiInstanceStrategy
+{
+    public RobloxPlatform Platform => RobloxPlatform.MacOS;
+    public ValueTask<RobloxLaunchPreparation> PrepareAsync(
+        RobloxLaunchRequest request,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(RobloxLaunchPreparation.Failure(
+            request,
+            LaunchFailureKind.LauncherRejected,
+            "consent-required"));
+    public ValueTask<SingletonReleaseResult> ReleaseSingletonAsync(CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Singleton release must not run after preparation rejection.");
+    public ValueTask<MacLaunchLevel?> GetActiveMacLevelAsync(CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult<MacLaunchLevel?>(MacLaunchLevel.ManagedSlots);
 }

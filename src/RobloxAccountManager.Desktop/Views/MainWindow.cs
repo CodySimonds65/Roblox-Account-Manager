@@ -17,6 +17,7 @@ using RobloxAccountManager.Desktop.Services;
 using RobloxAccountManager.Desktop.ViewModels;
 using RobloxAccountManager.Platform.MacOS;
 using CoreClientWindowManager = RobloxAccountManager.Core.Contracts.IClientWindowManager;
+using CoreMacLaunchLevel = RobloxAccountManager.Core.Contracts.MacLaunchLevel;
 using CoreRobloxLaunchRequest = RobloxAccountManager.Core.Contracts.RobloxLaunchRequest;
 using CoreRobloxProcessInfo = RobloxAccountManager.Core.Contracts.RobloxProcessInfo;
 using Ellipse = Avalonia.Controls.Shapes.Ellipse;
@@ -1349,6 +1350,11 @@ public sealed class MainWindow : Window
         var preferred = new ComboBox { ItemsSource = new[] { "Auto", "Bloxstrap", "Standard" }, SelectedItem = _viewModel.Settings.PreferredLauncher };
         var continueOnFailure = new CheckBox { Content = "Continue after a failed account", IsChecked = _viewModel.Settings.ContinueOnFailure };
         var remember = new CheckBox { Content = "Remember account and preset selections", IsChecked = _viewModel.Settings.RememberSelections };
+        var multiInstanceConsent = new CheckBox
+        {
+            Content = "Enable macOS multi-client managed runtime slots",
+            IsChecked = _viewModel.Settings.MultiInstanceConsentGranted
+        };
         var clearSessions = new CheckBox { Content = "Clear all Roblox browser sessions on next restart", IsChecked = _viewModel.Settings.ClearBrowserDataOnNextStart };
         var updates = new CheckBox { Content = "Enable automatic updates", IsChecked = _viewModel.Settings.UpdateChecksEnabled };
         var showGamePresetPanel = new CheckBox { Content = "Show game preset panel on the launch workspace", IsChecked = _viewModel.Settings.ShowGamePresetPanel };
@@ -1369,6 +1375,7 @@ public sealed class MainWindow : Window
             _viewModel.Settings.PreferredLauncher = preferred.SelectedItem?.ToString() ?? "Auto";
             _viewModel.Settings.ContinueOnFailure = continueOnFailure.IsChecked == true;
             _viewModel.Settings.RememberSelections = remember.IsChecked == true;
+            _viewModel.Settings.MultiInstanceConsentGranted = multiInstanceConsent.IsChecked == true;
             _viewModel.Settings.ClearBrowserDataOnNextStart = clearSessions.IsChecked == true;
             _viewModel.Settings.UpdateChecksEnabled = updates.IsChecked == true;
             _viewModel.Settings.UpdateChannel = selectedChannel;
@@ -1393,7 +1400,18 @@ public sealed class MainWindow : Window
         panel.Children.Add(new TextBlock { Text = "Launch timeout (seconds)" }); panel.Children.Add(timeout);
         panel.Children.Add(new TextBlock { Text = "Delay between accounts (seconds)" }); panel.Children.Add(delay);
         panel.Children.Add(new TextBlock { Text = "Preferred launcher" }); panel.Children.Add(preferred);
-        panel.Children.Add(continueOnFailure); panel.Children.Add(remember); panel.Children.Add(clearSessions); panel.Children.Add(showGamePresetPanel); panel.Children.Add(updateRow);
+        panel.Children.Add(continueOnFailure); panel.Children.Add(remember); panel.Children.Add(clearSessions); panel.Children.Add(showGamePresetPanel);
+        if (OperatingSystem.IsMacOS())
+        {
+            panel.Children.Add(multiInstanceConsent);
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Multi-client mode keeps the official Roblox app unchanged. It creates reusable local copies, disables Roblox's Launch Services single-instance flag, and ad-hoc signs those copies with the source entitlements.",
+                Foreground = MutedTextBrush,
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+        panel.Children.Add(updateRow);
         panel.Children.Add(new TextBlock { Text = "Signed packages install automatically after validation. Unsigned packages always ask once before Apple Installer opens.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(validation); panel.Children.Add(save);
         return panel;
@@ -1690,6 +1708,11 @@ public sealed class MainWindow : Window
     {
         if (_launches is null || preset is null || !DesktopPresetPolicy.TryResolveLaunchUrl(preset, customUrl, out var gameUrl)) { _viewModel.AppendActivity("Launch blocked: configure a validated Roblox bundle and a valid game preset."); return; }
         if (accounts.Count == 0) { _viewModel.AppendActivity("Launch blocked: favorite or open at least one account."); return; }
+        if (OperatingSystem.IsMacOS() && !_viewModel.Settings.MultiInstanceConsentGranted)
+        {
+            _viewModel.AppendActivity("Launch blocked: enable macOS multi-client managed runtime slots in General settings first.");
+            return;
+        }
         _lastGameUrl = gameUrl;
         _lastLaunchPreset = preset;
         _lastCustomUrl = DesktopPresetPolicy.IsCustomUrlPreset(preset) ? customUrl : null;
@@ -1719,7 +1742,10 @@ public sealed class MainWindow : Window
                 var request = new CoreRobloxLaunchRequest(
                     item.Account.Id,
                     cancellationToken => new ValueTask<Uri>(CaptureLaunchUriAsync(item.Account, scopedSettings, gameUrl, cancellationToken)),
-                    MaxAttempts: 3, RobloxBundlePath: await DiscoverRobloxBundleAsync(), UserConsentedToMultiInstanceChanges: true,
+                    MaxAttempts: 3,
+                    PreferredMacLevel: CoreMacLaunchLevel.ManagedSlots,
+                    RobloxBundlePath: await DiscoverRobloxBundleAsync(),
+                    UserConsentedToMultiInstanceChanges: _viewModel.Settings.MultiInstanceConsentGranted,
                     VerificationTimeout: TimeSpan.FromSeconds(Math.Clamp(_viewModel.Settings.LaunchTimeoutSeconds, 15, 180)));
                 LaunchResult result;
                 var launchStartedUtc = DateTimeOffset.UtcNow;

@@ -16,7 +16,9 @@ public sealed partial class WindowsHandle64MultiInstanceStrategy(
     private string? _handlePath;
     public RobloxPlatform Platform => RobloxPlatform.Windows;
 
-    public async ValueTask PrepareAsync(RobloxLaunchRequest request, CancellationToken cancellationToken = default)
+    public async ValueTask<RobloxLaunchPreparation> PrepareAsync(
+        RobloxLaunchRequest request,
+        CancellationToken cancellationToken = default)
     {
         if (!IsAdministrator())
             throw new InvalidOperationException("administrator-required");
@@ -24,6 +26,7 @@ public sealed partial class WindowsHandle64MultiInstanceStrategy(
         if (!Path.IsPathFullyQualified(path) || !File.Exists(path))
             throw new FileNotFoundException("handle64-not-found");
         _handlePath = Path.GetFullPath(path);
+        return RobloxLaunchPreparation.Success(request);
     }
 
     public async ValueTask<SingletonReleaseResult> ReleaseSingletonAsync(CancellationToken cancellationToken = default)

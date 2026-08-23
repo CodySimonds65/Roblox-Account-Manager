@@ -44,11 +44,16 @@ public sealed record DesktopComposition(
             var registry = new MacManagedProcessRegistry();
             var nativeLocator = new MacRobloxProcessLocator(registry);
             var discovery = new MacBundleDiscovery();
+            var runtimeRoot = MacManagedRuntimeBuilder.GetDefaultRuntimeRoot();
+            var slotManager = new MacManagedRuntimeSlotManager(
+                runtimeRoot,
+                discovery,
+                processLocator: nativeLocator);
             var coreLocator = new MacCoreProcessLocator(nativeLocator, discovery);
             launches = new SerializedLaunchCoordinator(
                 coreLocator,
-                new MacCoreMultiInstanceStrategy(),
-                new MacCorePlatformLauncher(discovery));
+                new MacCoreMultiInstanceStrategy(slotManager: slotManager, bundleDiscovery: discovery),
+                new MacCorePlatformLauncher(discovery, managedRuntimeRoot: runtimeRoot));
             clients = new MacCoreClientWindowManager(new MacAccessibilityWindowManager(nativeLocator), coreLocator);
             robloxSettings = new MacRobloxSettingsAdapter();
             plugins = new MacPluginHostFacade();
