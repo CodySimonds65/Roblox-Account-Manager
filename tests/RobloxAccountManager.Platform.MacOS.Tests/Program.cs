@@ -231,7 +231,8 @@ Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblo
             Level: MacLaunchLevel.ManagedRuntime);
         var built = await builder.BuildAsync(buildRequest);
         Check(built.Status == MacRuntimeBuildStatus.Built && built.RuntimePath is not null,
-            "The managed Roblox runtime was not built from a validated source.");
+            $"The managed Roblox runtime was not built from a validated source " +
+            $"(status={built.Status}; reason={built.FailureReason ?? "none"}).");
         var managedPlist = Path.Combine(built.RuntimePath!, "Roblox.app", "Contents", "Info.plist");
         var managedPlistText = await File.ReadAllTextAsync(managedPlist);
         var sourcePlistText = await File.ReadAllTextAsync(Path.Combine(sourceContents, "Info.plist"));
