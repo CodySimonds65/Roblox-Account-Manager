@@ -880,12 +880,26 @@ var selectionResult = await selectionManager.ShowOnlyAsync(
     selectionFixture.Windows,
     "account-b",
     new MacWindowFrame(40, 50, 900, 700),
-    explicitUserSelection: true);
+    explicitUserSelection: true,
+    canRaise: () => true);
 Check(selectionResult.Succeeded && selectionFixture.Accessibility.RaiseCalls == 1,
     "Explicit client selection did not raise exactly the selected Roblox window.");
 Check(selectionFixture.Accessibility.Raised.Single() ==
       (selectionFixture.Windows[1].Process.Pid, selectionFixture.Windows[1].WindowIdentifier!),
     "The overlay raise targeted the wrong Roblox window.");
+
+var takeoverFixture = CreateOverlayFixture();
+var takeoverManager = new MacClientOverlayManager(takeoverFixture.Locator, takeoverFixture.Accessibility);
+var takeoverResult = await takeoverManager.ShowOnlyAsync(
+    takeoverFixture.Windows,
+    "account-b",
+    new MacWindowFrame(40, 50, 900, 700),
+    explicitUserSelection: true,
+    canRaise: () => false);
+Check(!takeoverResult.Succeeded
+      && takeoverResult.DiagnosticCode == "raise-cancelled"
+      && takeoverFixture.Accessibility.RaiseCalls == 0,
+    "A stale tab-selection intent raised Roblox after launcher foreground was lost.");
 
 var restorationFixture = CreateOverlayFixture(
     firstFrame: new MacWindowFrame(120, 140, 1024, 768),
@@ -910,6 +924,24 @@ Check(restorationFixture.Accessibility.Windows[restorationFixture.Windows[0].Pro
           new MacWindowFrame(80, 90, 900, 700)
       && restorationFixture.Accessibility.Windows[restorationFixture.Windows[1].Process.Pid].IsMinimized,
     "The macOS overlay did not restore original frames and minimized states.");
+
+var retryFixture = CreateOverlayFixture();
+var retryManager = new MacClientOverlayManager(retryFixture.Locator, retryFixture.Accessibility);
+var retryLayout = await retryManager.ShowOnlyAsync(
+    retryFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+retryFixture.Accessibility.FailFrameWrites = true;
+var failedRestore = await retryManager.RestoreAllAsync();
+retryFixture.Accessibility.FailFrameWrites = false;
+var retriedRestore = await retryManager.RestoreAllAsync();
+Check(retryLayout.Succeeded
+      && !failedRestore.Succeeded
+      && retriedRestore.Succeeded
+      && retryFixture.Accessibility.Windows[retryFixture.Windows[0].Process.Pid].Frame ==
+          new MacWindowFrame(100, 110, 1024, 768),
+    "A transient restore failure discarded the original macOS window snapshot.");
 
 var permissionFixture = CreateOverlayFixture();
 permissionFixture.Accessibility.Capability = MacCapabilityResult.PermissionRequired(
@@ -1355,38 +1387,48 @@ sealed class OverlayAccessibilityFake : IMacAccessibilityApi
     public int FrameCalls { get; private set; }
     public int MinimizeCalls { get; private set; }
     public int RaiseCalls { get; private set; }
+    public bool FailFrameWrites { get; set; }
     public List<(int ProcessId, string WindowIdentifier)> Raised { get; } = [];
 
     public MacCapabilityResult GetCapability() => Capability;
 
-    public MacAccessibleWindow? FindMainWindow(int processId)
+    public MacAccessibleWindow? FindMainWindow(Contracts.RobloxProcessIdentity process)
     {
         FindCalls++;
-        return Windows.TryGetValue(processId, out var window) ? window : null;
+        return Windows.TryGetValue(process.Pid, out var window) ? window : null;
     }
 
-    public bool TrySetFrame(int processId, string windowIdentifier, MacWindowFrame frame)
+    public bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame)
     {
         FrameCalls++;
-        if (!TryGetWindow(processId, windowIdentifier, out var window)) return false;
-        Windows[processId] = window with { Frame = frame };
+        if (FailFrameWrites) return false;
+        if (!TryGetWindow(process.Pid, windowIdentifier, out var window)) return false;
+        Windows[process.Pid] = window with { Frame = frame };
         return true;
     }
 
-    public bool TrySetMinimized(int processId, string windowIdentifier, bool minimized)
+    public bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized)
     {
         MinimizeCalls++;
-        if (!TryGetWindow(processId, windowIdentifier, out var window)) return false;
-        Windows[processId] = window with { IsMinimized = minimized };
+        if (!TryGetWindow(process.Pid, windowIdentifier, out var window)) return false;
+        Windows[process.Pid] = window with { IsMinimized = minimized };
         return true;
     }
 
-    public bool TryRaise(int processId, string windowIdentifier)
+    public bool TryRaise(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        Func<bool> canRaise)
     {
+        if (!canRaise()) return false;
         RaiseCalls++;
-        if (!TryGetWindow(processId, windowIdentifier, out _)) return false;
-        Raised.Add((processId, windowIdentifier));
+        if (!TryGetWindow(process.Pid, windowIdentifier, out _)) return false;
+        Raised.Add((process.Pid, windowIdentifier));
         return true;
+    }
+
+    public void ForgetWindow(Contracts.RobloxProcessIdentity process, string windowIdentifier)
+    {
     }
 
     private bool TryGetWindow(int processId, string windowIdentifier, out MacAccessibleWindow window)

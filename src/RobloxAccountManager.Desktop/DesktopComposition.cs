@@ -58,7 +58,7 @@ public sealed record DesktopComposition(
                 new MacCoreMultiInstanceStrategy(slotManager: slotManager, bundleDiscovery: discovery),
                 new MacCorePlatformLauncher(discovery, managedRuntimeRoot: runtimeRoot));
             clients = new MacCoreClientWindowManager(new MacAccessibilityWindowManager(nativeLocator), coreLocator);
-            var accessibility = new MacAccessibilityApi();
+            var accessibility = new MacAccessibilityApi(nativeLocator);
             accessibilityGranted = accessibility.GetCapability().IsSupported;
             clientOverlay = new MacClientOverlayManager(nativeLocator, accessibility);
             robloxSettings = new MacRobloxSettingsAdapter();

@@ -25,7 +25,7 @@ public sealed class MacClientOverlayManager
         IMacAccessibilityApi? accessibility = null)
     {
         _processLocator = processLocator ?? new MacRobloxProcessLocator();
-        _accessibility = accessibility ?? new MacAccessibilityApi();
+        _accessibility = accessibility ?? new MacAccessibilityApi(_processLocator);
     }
 
     public MacCapabilityResult GetCapability() => _accessibility.GetCapability();
@@ -35,6 +35,7 @@ public sealed class MacClientOverlayManager
         string selectedAccountId,
         MacWindowFrame viewport,
         bool explicitUserSelection,
+        Func<bool>? canRaise = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(eligibleWindows);
@@ -53,16 +54,21 @@ public sealed class MacClientOverlayManager
                 cancellationToken.ThrowIfCancellationRequested();
                 if (string.IsNullOrWhiteSpace(window.AccountId) || !IsCurrentManagedIdentity(window.Process))
                     return await FailAndRestoreAsync("stale-process-identity", cancellationToken).ConfigureAwait(false);
-                var accessible = _accessibility.FindMainWindow(window.Process.Pid);
+                var accessible = _accessibility.FindMainWindow(window.Process);
                 if (accessible is null)
-                    return await FailAndRestoreAsync("accessible-window-not-ready", cancellationToken).ConfigureAwait(false);
+                    return FailAndHide("accessible-window-not-ready", cancellationToken);
                 if (accessible.IsFullScreen)
-                    return await FailAndRestoreAsync("fullscreen-window-not-supported", cancellationToken).ConfigureAwait(false);
+                {
+                    if (!IsTracked(window.Process, accessible.Identifier))
+                        _accessibility.ForgetWindow(window.Process, accessible.Identifier);
+                    return FailAndHide("fullscreen-window-not-supported", cancellationToken);
+                }
 
                 if (_tracked.TryGetValue(window.AccountId, out var tracked)
                     && (!tracked.Process.Matches(window.Process)
                         || !string.Equals(tracked.WindowIdentifier, accessible.Identifier, StringComparison.Ordinal)))
                 {
+                    _accessibility.ForgetWindow(window.Process, accessible.Identifier);
                     return await FailAndRestoreAsync("accessible-window-changed", cancellationToken).ConfigureAwait(false);
                 }
                 if (!_tracked.ContainsKey(window.AccountId))
@@ -81,27 +87,34 @@ public sealed class MacClientOverlayManager
             if (selected.Window is null)
                 return await FailAndRestoreAsync("selected-account-not-running", cancellationToken).ConfigureAwait(false);
 
+            var hiddenAllUnselected = true;
             foreach (var candidate in candidates.Where(candidate =>
                          !string.Equals(candidate.Window.AccountId, selectedAccountId, StringComparison.Ordinal)))
             {
-                if (!_accessibility.TrySetMinimized(
-                        candidate.Window.Process.Pid,
-                        candidate.Accessible.Identifier,
-                        true))
-                {
-                    return await FailAndRestoreAsync("hide-unselected-failed", cancellationToken).ConfigureAwait(false);
-                }
+                cancellationToken.ThrowIfCancellationRequested();
+                hiddenAllUnselected &= TrySetMinimizedVerified(
+                    candidate.Window.Process,
+                    candidate.Accessible.Identifier,
+                    true);
             }
+            if (!hiddenAllUnselected)
+                return await FailAndRestoreAsync("hide-unselected-failed", cancellationToken).ConfigureAwait(false);
 
-            if (!_accessibility.TrySetFrame(selected.Window.Process.Pid, selected.Accessible.Identifier, viewport)
-                || !_accessibility.TrySetMinimized(selected.Window.Process.Pid, selected.Accessible.Identifier, false))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!TrySetFrameVerified(selected.Window.Process, selected.Accessible.Identifier, viewport)
+                || !TrySetMinimizedVerified(selected.Window.Process, selected.Accessible.Identifier, false))
             {
                 return await FailAndRestoreAsync("show-selected-failed", cancellationToken).ConfigureAwait(false);
             }
 
+            if (explicitUserSelection && canRaise is null)
+                return MacOverlayOperationResult.Failure("raise-cancelled");
+            cancellationToken.ThrowIfCancellationRequested();
             if (explicitUserSelection
-                && !_accessibility.TryRaise(selected.Window.Process.Pid, selected.Accessible.Identifier))
+                && (!_accessibility.TryRaise(selected.Window.Process, selected.Accessible.Identifier, canRaise!)
+                    || !IsCurrentManagedIdentity(selected.Window.Process)))
             {
+                if (!canRaise!()) return MacOverlayOperationResult.Failure("raise-cancelled");
                 return await FailAndRestoreAsync("raise-selected-failed", cancellationToken).ConfigureAwait(false);
             }
 
@@ -121,6 +134,7 @@ public sealed class MacClientOverlayManager
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            var succeeded = true;
             foreach (var tracked in _tracked.Values.ToArray())
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -129,10 +143,11 @@ public sealed class MacClientOverlayManager
                     RemoveTrackedIdentity(tracked.Process);
                     continue;
                 }
-                if (!_accessibility.TrySetMinimized(tracked.Process.Pid, tracked.WindowIdentifier, true))
-                    return MacOverlayOperationResult.Failure("hide-overlay-failed");
+                succeeded &= TrySetMinimizedVerified(tracked.Process, tracked.WindowIdentifier, true);
             }
-            return MacOverlayOperationResult.Success();
+            return succeeded
+                ? MacOverlayOperationResult.Success()
+                : MacOverlayOperationResult.Failure("hide-overlay-failed");
         }
         catch
         {
@@ -150,10 +165,11 @@ public sealed class MacClientOverlayManager
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!_tracked.Remove(accountId, out var tracked)) return MacOverlayOperationResult.Success();
-            return Restore(tracked)
-                ? MacOverlayOperationResult.Success()
-                : MacOverlayOperationResult.Failure("restore-overlay-failed");
+            if (!_tracked.TryGetValue(accountId, out var tracked)) return MacOverlayOperationResult.Success();
+            if (!Restore(tracked)) return MacOverlayOperationResult.Failure("restore-overlay-failed");
+            _tracked.Remove(accountId);
+            _accessibility.ForgetWindow(tracked.Process, tracked.WindowIdentifier);
+            return MacOverlayOperationResult.Success();
         }
         finally { _gate.Release(); }
     }
@@ -170,15 +186,39 @@ public sealed class MacClientOverlayManager
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        _ = RestoreAll();
-        return ValueTask.FromResult(MacOverlayOperationResult.Failure(code));
+        var restore = RestoreAll();
+        return ValueTask.FromResult(MacOverlayOperationResult.Failure(
+            restore.Succeeded ? code : $"{code}:restore-overlay-failed"));
+    }
+
+    private MacOverlayOperationResult FailAndHide(string code, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        foreach (var tracked in _tracked.Values.ToArray())
+        {
+            if (!IsCurrentManagedIdentity(tracked.Process))
+            {
+                RemoveTrackedIdentity(tracked.Process);
+                continue;
+            }
+            _ = TrySetMinimizedVerified(tracked.Process, tracked.WindowIdentifier, true);
+        }
+        return MacOverlayOperationResult.Failure(code);
     }
 
     private MacOverlayOperationResult RestoreAll()
     {
         var succeeded = true;
-        foreach (var tracked in _tracked.Values.ToArray()) succeeded &= Restore(tracked);
-        _tracked.Clear();
+        foreach (var pair in _tracked.ToArray())
+        {
+            if (Restore(pair.Value))
+            {
+                _tracked.Remove(pair.Key);
+                _accessibility.ForgetWindow(pair.Value.Process, pair.Value.WindowIdentifier);
+            }
+            else
+                succeeded = false;
+        }
         return succeeded
             ? MacOverlayOperationResult.Success()
             : MacOverlayOperationResult.Failure("restore-overlay-failed");
@@ -187,19 +227,53 @@ public sealed class MacClientOverlayManager
     private bool Restore(TrackedWindow tracked)
     {
         if (!IsCurrentManagedIdentity(tracked.Process)) return true;
-        var current = _accessibility.FindMainWindow(tracked.Process.Pid);
+        var current = _accessibility.FindMainWindow(tracked.Process);
         if (current is null || !string.Equals(current.Identifier, tracked.WindowIdentifier, StringComparison.Ordinal))
             return false;
-        var frameRestored = _accessibility.TrySetFrame(
-            tracked.Process.Pid,
+        var frameRestored = TrySetFrameVerified(
+            tracked.Process,
             tracked.WindowIdentifier,
             tracked.OriginalFrame);
-        var minimizedRestored = _accessibility.TrySetMinimized(
-            tracked.Process.Pid,
+        var minimizedRestored = TrySetMinimizedVerified(
+            tracked.Process,
             tracked.WindowIdentifier,
             tracked.OriginallyMinimized);
         return frameRestored && minimizedRestored;
     }
+
+    private bool TrySetFrameVerified(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        MacWindowFrame frame)
+    {
+        if (!IsCurrentManagedIdentity(process)
+            || !_accessibility.TrySetFrame(process, windowIdentifier, frame)
+            || !IsCurrentManagedIdentity(process)) return false;
+        var current = _accessibility.FindMainWindow(process);
+        return current is not null
+            && string.Equals(current.Identifier, windowIdentifier, StringComparison.Ordinal)
+            && FramesMatch(current.Frame, frame);
+    }
+
+    private bool TrySetMinimizedVerified(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        bool minimized)
+    {
+        if (!IsCurrentManagedIdentity(process)
+            || !_accessibility.TrySetMinimized(process, windowIdentifier, minimized)
+            || !IsCurrentManagedIdentity(process)) return false;
+        var current = _accessibility.FindMainWindow(process);
+        return current is not null
+            && string.Equals(current.Identifier, windowIdentifier, StringComparison.Ordinal)
+            && current.IsMinimized == minimized;
+    }
+
+    private static bool FramesMatch(MacWindowFrame left, MacWindowFrame right) =>
+        Math.Abs(left.Left - right.Left) <= 1
+        && Math.Abs(left.Top - right.Top) <= 1
+        && Math.Abs(left.Width - right.Width) <= 1
+        && Math.Abs(left.Height - right.Height) <= 1;
 
     private bool IsCurrentManagedIdentity(Contracts.RobloxProcessIdentity expected)
     {
@@ -216,9 +290,15 @@ public sealed class MacClientOverlayManager
                      .Select(pair => pair.Key)
                      .ToArray())
         {
+            var tracked = _tracked[accountId];
             _tracked.Remove(accountId);
+            _accessibility.ForgetWindow(tracked.Process, tracked.WindowIdentifier);
         }
     }
+
+    private bool IsTracked(Contracts.RobloxProcessIdentity process, string windowIdentifier) =>
+        _tracked.Values.Any(tracked => tracked.Process.Matches(process)
+            && string.Equals(tracked.WindowIdentifier, windowIdentifier, StringComparison.Ordinal));
 
     private sealed record TrackedWindow(
         Contracts.RobloxProcessIdentity Process,

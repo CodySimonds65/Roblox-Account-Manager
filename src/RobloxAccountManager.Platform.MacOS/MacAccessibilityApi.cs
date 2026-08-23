@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using Contracts = RobloxAccountManager.Core.Contracts;
 
 namespace RobloxAccountManager.Platform.MacOS;
 
@@ -20,10 +21,14 @@ public sealed record MacAccessibleWindow(
 public interface IMacAccessibilityApi
 {
     MacCapabilityResult GetCapability();
-    MacAccessibleWindow? FindMainWindow(int processId);
-    bool TrySetFrame(int processId, string windowIdentifier, MacWindowFrame frame);
-    bool TrySetMinimized(int processId, string windowIdentifier, bool minimized);
-    bool TryRaise(int processId, string windowIdentifier);
+    MacAccessibleWindow? FindMainWindow(Contracts.RobloxProcessIdentity process);
+    bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame);
+    bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized);
+    bool TryRaise(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        Func<bool> canRaise);
+    void ForgetWindow(Contracts.RobloxProcessIdentity process, string windowIdentifier);
 }
 
 /// <summary>
@@ -39,6 +44,14 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     private const int AxValueCgSize = 2;
     private static readonly object NativeLibraryGate = new();
     private static nint _coreFoundationHandle;
+    private readonly IRobloxProcessLocator _processLocator;
+    private readonly object _windowsGate = new();
+    private readonly Dictionary<string, RetainedWindow> _retainedWindows = new(StringComparer.Ordinal);
+
+    public MacAccessibilityApi(IRobloxProcessLocator? processLocator = null)
+    {
+        _processLocator = processLocator ?? new MacRobloxProcessLocator();
+    }
 
     public MacCapabilityResult GetCapability()
     {
@@ -50,21 +63,27 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
                 "Grant Accessibility permission in System Settings > Privacy & Security > Accessibility.");
     }
 
-    public MacAccessibleWindow? FindMainWindow(int processId)
+    public MacAccessibleWindow? FindMainWindow(Contracts.RobloxProcessIdentity process)
     {
-        if (!GetCapability().IsSupported || processId <= 0) return null;
-        return WithApplication(processId, application =>
+        if (!GetCapability().IsSupported || !IsCurrentManagedIdentity(process)) return null;
+        return WithApplication(process.Pid, application =>
         {
             var candidates = EnumerateWindows(application);
-            try { return SelectWindow(candidates)?.Snapshot; }
+            try
+            {
+                var selected = SelectWindow(candidates);
+                return selected is not null && IsCurrentManagedIdentity(process)
+                    ? selected.Snapshot with { Identifier = GetOrCreateWindowIdentifier(process, selected.Element) }
+                    : null;
+            }
             finally { ReleaseCandidates(candidates); }
         });
     }
 
-    public bool TrySetFrame(int processId, string windowIdentifier, MacWindowFrame frame)
+    public bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame)
     {
         if (!frame.IsValid || string.IsNullOrWhiteSpace(windowIdentifier)) return false;
-        return WithSelectedWindow(processId, windowIdentifier, window =>
+        return WithSelectedWindow(process, windowIdentifier, window =>
         {
             var position = new CGPoint(frame.Left, frame.Top);
             var size = new CGSize(frame.Width, frame.Height);
@@ -90,18 +109,22 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         });
     }
 
-    public bool TrySetMinimized(int processId, string windowIdentifier, bool minimized)
+    public bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized)
     {
         if (string.IsNullOrWhiteSpace(windowIdentifier)) return false;
-        return WithSelectedWindow(processId, windowIdentifier,
+        return WithSelectedWindow(process, windowIdentifier,
             window => SetAttribute(window, "AXMinimized", GetBoolean(minimized)));
     }
 
-    public bool TryRaise(int processId, string windowIdentifier)
+    public bool TryRaise(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        Func<bool> canRaise)
     {
         if (string.IsNullOrWhiteSpace(windowIdentifier)) return false;
-        return WithSelectedWindow(processId, windowIdentifier, window =>
+        return WithSelectedWindow(process, windowIdentifier, window =>
         {
+            if (!canRaise()) return false;
             var action = CreateString("AXRaise");
             if (action == nint.Zero) return false;
             try { return NativeMethods.AXUIElementPerformAction(window, action) == 0; }
@@ -109,20 +132,70 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         });
     }
 
-    private static bool WithSelectedWindow(int processId, string identifier, Func<nint, bool> action)
+    public void ForgetWindow(Contracts.RobloxProcessIdentity process, string windowIdentifier)
     {
-        if (!OperatingSystem.IsMacOS() || processId <= 0) return false;
-        return WithApplication(processId, application =>
+        nint element = nint.Zero;
+        lock (_windowsGate)
+        {
+            if (_retainedWindows.TryGetValue(windowIdentifier, out var retained)
+                && retained.Process.Matches(process))
+            {
+                element = retained.Element;
+                _retainedWindows.Remove(windowIdentifier);
+            }
+        }
+        Release(element);
+    }
+
+    private bool WithSelectedWindow(
+        Contracts.RobloxProcessIdentity process,
+        string identifier,
+        Func<nint, bool> action)
+    {
+        if (!OperatingSystem.IsMacOS() || !IsCurrentManagedIdentity(process)) return false;
+        RetainedWindow retained;
+        lock (_windowsGate)
+        {
+            if (!_retainedWindows.TryGetValue(identifier, out retained!)
+                || !retained.Process.Matches(process)) return false;
+        }
+        return WithApplication(process.Pid, application =>
         {
             var candidates = EnumerateWindows(application);
             try
             {
-                var selected = candidates.FirstOrDefault(candidate =>
-                    string.Equals(candidate.Snapshot.Identifier, identifier, StringComparison.Ordinal));
-                return selected is not null && action(selected.Element);
+                var matches = candidates.Where(candidate =>
+                    NativeMethods.CFEqual(candidate.Element, retained.Element)).ToArray();
+                return matches.Length == 1
+                    && IsCurrentManagedIdentity(process)
+                    && action(matches[0].Element);
             }
             finally { ReleaseCandidates(candidates); }
         });
+    }
+
+    private string GetOrCreateWindowIdentifier(Contracts.RobloxProcessIdentity process, nint element)
+    {
+        lock (_windowsGate)
+        {
+            var existing = _retainedWindows.FirstOrDefault(pair =>
+                pair.Value.Process.Matches(process)
+                && NativeMethods.CFEqual(pair.Value.Element, element));
+            if (!string.IsNullOrWhiteSpace(existing.Key)) return existing.Key;
+
+            var identifier = $"ax-window-{Guid.NewGuid():N}";
+            _ = NativeMethods.CFRetain(element);
+            _retainedWindows.Add(identifier, new RetainedWindow(process, element));
+            return identifier;
+        }
+    }
+
+    private bool IsCurrentManagedIdentity(Contracts.RobloxProcessIdentity expected)
+    {
+        if (expected.Platform != Contracts.RobloxPlatform.MacOS || !expected.IsValid) return false;
+        var current = _processLocator.FindProcess(expected.Pid);
+        return current is not null && current.IsManaged
+            && _processLocator.IsSameProcess(MacCoreProcessLocator.FromCore(expected), current);
     }
 
     private static T WithApplication<T>(int processId, Func<nint, T> action)
@@ -174,15 +247,11 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
                         && !string.Equals(subrole, "AXStandardWindow", StringComparison.Ordinal))) continue;
                 if (!TryReadFrame(window, out var frame) || !frame.IsValid) continue;
                 var title = CopyStringAttribute(window, "AXTitle");
-                var nativeIdentifier = CopyStringAttribute(window, "AXIdentifier");
-                var identifier = string.IsNullOrWhiteSpace(nativeIdentifier)
-                    ? $"window-{index}"
-                    : nativeIdentifier;
                 _ = NativeMethods.CFRetain(window);
                 candidates.Add(new WindowCandidate(
                     window,
                     new MacAccessibleWindow(
-                        identifier,
+                        string.Empty,
                         title,
                         frame,
                         CopyBooleanAttribute(window, "AXMinimized"),
@@ -299,6 +368,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     }
 
     private sealed record WindowCandidate(nint Element, MacAccessibleWindow Snapshot, bool IsMain);
+    private sealed record RetainedWindow(Contracts.RobloxProcessIdentity Process, nint Element);
     [StructLayout(LayoutKind.Sequential)] private readonly record struct CGPoint(double X, double Y);
     [StructLayout(LayoutKind.Sequential)] private readonly record struct CGSize(double Width, double Height);
 
@@ -321,6 +391,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         [DllImport(CoreFoundation)] internal static extern nint CFArrayGetCount(nint array);
         [DllImport(CoreFoundation)] internal static extern nint CFArrayGetValueAtIndex(nint array, nint index);
         [DllImport(CoreFoundation)] internal static extern nint CFRetain(nint value);
+        [DllImport(CoreFoundation)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool CFEqual(nint left, nint right);
         [DllImport(CoreFoundation)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool CFBooleanGetValue(nint value);
         [DllImport(CoreFoundation)] internal static extern void CFRelease(nint value);
     }
