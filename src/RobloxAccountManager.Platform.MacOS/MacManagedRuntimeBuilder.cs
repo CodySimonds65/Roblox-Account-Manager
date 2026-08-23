@@ -306,13 +306,13 @@ public sealed class MacManagedRuntimeBuilder
         await File.WriteAllTextAsync(entitlementPath, entitlementXml, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
         var patch = await _commandRunner.RunAsync(
             "/usr/bin/plutil",
-            ["-replace", "com.apple.security.cs.disable-library-validation", "-bool", "true", "--", entitlementPath],
+            ["-replace", "com\\.apple\\.security\\.cs\\.disable-library-validation", "-bool", "true", "--", entitlementPath],
             cancellationToken).ConfigureAwait(false);
         if (!patch.Succeeded)
         {
             patch = await _commandRunner.RunAsync(
                 "/usr/bin/plutil",
-                ["-insert", "com.apple.security.cs.disable-library-validation", "-bool", "true", "--", entitlementPath],
+                ["-insert", "com\\.apple\\.security\\.cs\\.disable-library-validation", "-bool", "true", "--", entitlementPath],
                 cancellationToken).ConfigureAwait(false);
             if (!patch.Succeeded)
                 throw new InvalidOperationException("Unable to prepare managed-runtime entitlements.");

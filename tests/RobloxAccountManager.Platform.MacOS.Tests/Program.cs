@@ -299,6 +299,12 @@ Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblo
                     && call.Arguments.Contains("--options", StringComparer.Ordinal)
                     && call.Arguments.Contains("runtime", StringComparer.Ordinal)),
                 "The managed Roblox clone was not signed with hardened-runtime options.");
+            Check(runtimeRunner.Calls.Any(call =>
+                    call.Executable == "/usr/bin/plutil"
+                    && call.Arguments.Contains(
+                        "com\\.apple\\.security\\.cs\\.disable-library-validation",
+                        StringComparer.Ordinal)),
+                "The managed Roblox entitlement key was not escaped for plutil key-path parsing.");
         }
     }
     finally
