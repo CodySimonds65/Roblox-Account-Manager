@@ -22,6 +22,7 @@ jobs:
     outputs:
       commit_sha: ${{ steps.release.outputs.commit_sha }}
       release_tag: ${{ steps.release.outputs.release_tag }}
+      release_id: ${{ steps.release.outputs.release_id }}
     steps:
       - name: Resolve verified draft tag
         id: release
@@ -33,21 +34,38 @@ jobs:
           [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
             echo "Invalid release tag." >&2; exit 1;
           }
-          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$REQUESTED_TAG")"
+          # Draft releases do not create a Git ref, and GitHub permits more
+          # than one draft with the same tag name. Resolve the intended draft
+          # from the immutable target commit instead of /releases/tags.
+          git init verified-release
+          git -C verified-release remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C verified-release fetch --no-tags origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          main_sha="$(git -C verified-release rev-parse refs/remotes/origin/main)"
+          releases_json="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --slurp | jq -c 'add')"
+          matching_count="$(jq --arg tag "$REQUESTED_TAG" '[.[] | select(.draft == true and .tag_name == $tag)] | length' <<<"$releases_json")"
+          if [[ "$matching_count" == 1 ]]; then
+            release_json="$(jq -c --arg tag "$REQUESTED_TAG" '[.[] | select(.draft == true and .tag_name == $tag)][0]' <<<"$releases_json")"
+          else
+            release_json="$(jq -c --arg tag "$REQUESTED_TAG" --arg main_sha "$main_sha" '[.[] | select(.draft == true and .tag_name == $tag and .target_commitish == $main_sha)] | if length == 1 then .[0] else empty end' <<<"$releases_json")"
+          fi
+          [[ -n "$release_json" ]] || {
+            echo "Could not resolve exactly one draft release for $REQUESTED_TAG targeting main ($main_sha)." >&2; exit 1;
+          }
           test "$(jq -r .draft <<<"$release_json")" = "true" || {
             echo "The selected release is not a draft." >&2; exit 1;
           }
           test "$(jq -r .tag_name <<<"$release_json")" = "$REQUESTED_TAG" || {
             echo "Release tag mismatch." >&2; exit 1;
           }
+          release_id="$(jq -r .id <<<"$release_json")"
           release_target="$(jq -r .target_commitish <<<"$release_json")"
-          git init verified-release
-          git -C verified-release remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
-          git -C verified-release fetch --no-tags origin \
-            "refs/tags/$REQUESTED_TAG:refs/tags/$REQUESTED_TAG"
-          git -C verified-release fetch --no-tags origin \
-            "refs/heads/main:refs/remotes/origin/main"
-          commit_sha="$(git -C verified-release rev-parse "$REQUESTED_TAG^{commit}")"
+          [[ "$release_id" =~ ^[0-9]+$ ]] || { echo "Draft release ID is invalid." >&2; exit 1; }
+          [[ "$release_target" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Draft release target is not an immutable commit SHA." >&2; exit 1;
+          }
+          commit_sha="$release_target"
+          git -C verified-release cat-file -e "$commit_sha^{commit}"
           [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Unable to resolve immutable release commit." >&2; exit 1; }
           test "$release_target" = "$commit_sha" || {
             echo "Draft release target does not match its tag commit." >&2; exit 1;
@@ -57,6 +75,7 @@ jobs:
           }
           echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
           echo "release_tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
   package:
     if: inputs.functional_matrix_passed == true
@@ -197,10 +216,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          is_draft="$(gh release view "${{ needs.resolve.outputs.release_tag }}" --json isDraft --jq .isDraft)"
-          test "$is_draft" = "true" || { echo "Refusing to mutate a published release." >&2; exit 1; }
-          shopt -s nullglob
+          release_id="${{ needs.resolve.outputs.release_id }}"
           release_tag="${{ needs.resolve.outputs.release_tag }}"
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id")"
+          test "$(jq -r .draft <<<"$release_json")" = "true" || { echo "Refusing to mutate a published release." >&2; exit 1; }
+          test "$(jq -r .tag_name <<<"$release_json")" = "$release_tag" || { echo "Release tag changed while artifacts were staged." >&2; exit 1; }
+          shopt -s nullglob
           version="${release_tag#v}"
           artifacts=(dist/*.pkg dist/*.pkg.sha256)
           expected=(
@@ -216,7 +237,19 @@ jobs:
           (cd dist && shasum -a 256 -c \
             "RobloxAccountManager-${version}-osx-arm64.pkg.sha256" \
             "RobloxAccountManager-${version}-osx-x64.pkg.sha256")
-          gh release upload "${{ needs.resolve.outputs.release_tag }}" "${artifacts[@]}" --clobber
-          is_draft="$(gh release view "${{ needs.resolve.outputs.release_tag }}" --json isDraft --jq .isDraft)"
+          for artifact in "${artifacts[@]}"; do
+            name="$(basename "$artifact")"
+            while IFS= read -r asset_id; do
+              [[ -n "$asset_id" ]] || continue
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id/assets/$asset_id"
+            done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq -r --arg name "$name" '.[] | select(.name == $name) | .id')
+            curl --fail-with-body --silent --show-error --request POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$artifact" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$name" >/dev/null
+          done
+          is_draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)"
           test "$is_draft" = "true" || { echo "Release changed while artifacts were staged; refusing to publish." >&2; exit 1; }
-          gh release edit "${{ needs.resolve.outputs.release_tag }}" --draft=false
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" -F draft=false >/dev/null
