@@ -1257,6 +1257,14 @@ sealed class RobloxMetadataFallbackCommandRunner : IMacProcessCommandRunner
 
         if (string.Equals(executable, "/usr/bin/codesign", StringComparison.Ordinal))
         {
+            if (values.Contains("--verbose=4", StringComparer.Ordinal))
+            {
+                return Task.FromResult(new MacProcessCommandResult(
+                    0,
+                    string.Empty,
+                    "Signature=adhoc\nIdentifier=com.roblox.RobloxPlayer\nTeamIdentifier=not set"));
+            }
+
             return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
         }
 
