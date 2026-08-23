@@ -848,6 +848,152 @@ if (!OperatingSystem.IsMacOS())
         "The native semaphore was invoked or misreported off macOS.");
 }
 
+var convertedOverlayFrame = MacViewportCoordinateConverter.FromAvaloniaPixels(
+    screenPixelX: 1920,
+    screenPixelY: 1080,
+    widthInDips: 800,
+    heightInDips: 600,
+    renderScaling: 2);
+Check(convertedOverlayFrame == new MacWindowFrame(960, 540, 800, 600)
+      && convertedOverlayFrame.IsValid,
+    "Avalonia screen pixels were not converted to the expected macOS point frame.");
+
+var layoutFixture = CreateOverlayFixture();
+var layoutManager = new MacClientOverlayManager(layoutFixture.Locator, layoutFixture.Accessibility);
+var layoutResult = await layoutManager.ShowOnlyAsync(
+    layoutFixture.Windows,
+    "account-a",
+    new MacWindowFrame(20, 30, 900, 700),
+    explicitUserSelection: false);
+Check(layoutResult.Succeeded && layoutResult.DiagnosticCode == "overlay-ready",
+    "The macOS overlay layout operation did not succeed.");
+Check(layoutFixture.Accessibility.Windows.Values.Count(window => !window.IsMinimized) == 1
+      && !layoutFixture.Accessibility.Windows[layoutFixture.Windows[0].Process.Pid].IsMinimized
+      && layoutFixture.Accessibility.Windows[layoutFixture.Windows[1].Process.Pid].IsMinimized,
+    "Overlay layout did not leave exactly one visible client.");
+Check(layoutFixture.Accessibility.RaiseCalls == 0,
+    "Passive overlay layout raised a Roblox window during layout.");
+
+var selectionFixture = CreateOverlayFixture();
+var selectionManager = new MacClientOverlayManager(selectionFixture.Locator, selectionFixture.Accessibility);
+var selectionResult = await selectionManager.ShowOnlyAsync(
+    selectionFixture.Windows,
+    "account-b",
+    new MacWindowFrame(40, 50, 900, 700),
+    explicitUserSelection: true,
+    canRaise: () => true);
+Check(selectionResult.Succeeded && selectionFixture.Accessibility.RaiseCalls == 1,
+    "Explicit client selection did not raise exactly the selected Roblox window.");
+Check(selectionFixture.Accessibility.Raised.Single() ==
+      (selectionFixture.Windows[1].Process.Pid, selectionFixture.Windows[1].WindowIdentifier!),
+    "The overlay raise targeted the wrong Roblox window.");
+
+var takeoverFixture = CreateOverlayFixture();
+var takeoverManager = new MacClientOverlayManager(takeoverFixture.Locator, takeoverFixture.Accessibility);
+var takeoverResult = await takeoverManager.ShowOnlyAsync(
+    takeoverFixture.Windows,
+    "account-b",
+    new MacWindowFrame(40, 50, 900, 700),
+    explicitUserSelection: true,
+    canRaise: () => false);
+Check(!takeoverResult.Succeeded
+      && takeoverResult.DiagnosticCode == "raise-cancelled"
+      && takeoverFixture.Accessibility.RaiseCalls == 0,
+    "A stale tab-selection intent raised Roblox after launcher foreground was lost.");
+
+var restorationFixture = CreateOverlayFixture(
+    firstFrame: new MacWindowFrame(120, 140, 1024, 768),
+    firstMinimized: false,
+    secondFrame: new MacWindowFrame(80, 90, 900, 700),
+    secondMinimized: true);
+var restorationManager = new MacClientOverlayManager(
+    restorationFixture.Locator,
+    restorationFixture.Accessibility);
+var restorationLayout = await restorationManager.ShowOnlyAsync(
+    restorationFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+var restorationResult = await restorationManager.RestoreAllAsync();
+Check(restorationLayout.Succeeded && restorationResult.Succeeded,
+    "The macOS overlay did not restore its tracked clients successfully.");
+Check(restorationFixture.Accessibility.Windows[restorationFixture.Windows[0].Process.Pid].Frame ==
+          new MacWindowFrame(120, 140, 1024, 768)
+      && !restorationFixture.Accessibility.Windows[restorationFixture.Windows[0].Process.Pid].IsMinimized
+      && restorationFixture.Accessibility.Windows[restorationFixture.Windows[1].Process.Pid].Frame ==
+          new MacWindowFrame(80, 90, 900, 700)
+      && restorationFixture.Accessibility.Windows[restorationFixture.Windows[1].Process.Pid].IsMinimized,
+    "The macOS overlay did not restore original frames and minimized states.");
+
+var retryFixture = CreateOverlayFixture();
+var retryManager = new MacClientOverlayManager(retryFixture.Locator, retryFixture.Accessibility);
+var retryLayout = await retryManager.ShowOnlyAsync(
+    retryFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+retryFixture.Accessibility.FailFrameWrites = true;
+var failedRestore = await retryManager.RestoreAllAsync();
+retryFixture.Accessibility.FailFrameWrites = false;
+var retriedRestore = await retryManager.RestoreAllAsync();
+Check(retryLayout.Succeeded
+      && !failedRestore.Succeeded
+      && retriedRestore.Succeeded
+      && retryFixture.Accessibility.Windows[retryFixture.Windows[0].Process.Pid].Frame ==
+          new MacWindowFrame(100, 110, 1024, 768),
+    "A transient restore failure discarded the original macOS window snapshot.");
+
+var permissionFixture = CreateOverlayFixture();
+permissionFixture.Accessibility.Capability = MacCapabilityResult.PermissionRequired(
+    "Accessibility permission is required for this test.");
+var permissionManager = new MacClientOverlayManager(
+    permissionFixture.Locator,
+    permissionFixture.Accessibility);
+var permissionResult = await permissionManager.ShowOnlyAsync(
+    permissionFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: true);
+Check(!permissionResult.Succeeded
+      && permissionResult.DiagnosticCode == "accessibility-permission-required"
+      && permissionFixture.Accessibility.FindCalls == 0
+      && permissionFixture.Accessibility.FrameCalls == 0
+      && permissionFixture.Accessibility.MinimizeCalls == 0
+      && permissionFixture.Accessibility.RaiseCalls == 0,
+    "Accessibility permission denial mutated or inspected client windows.");
+
+var staleFixture = CreateOverlayFixture();
+var staleManager = new MacClientOverlayManager(staleFixture.Locator, staleFixture.Accessibility);
+var staleLayout = await staleManager.ShowOnlyAsync(
+    [staleFixture.Windows[0]],
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+var staleMutationCount = staleFixture.Accessibility.FrameCalls
+    + staleFixture.Accessibility.MinimizeCalls
+    + staleFixture.Accessibility.RaiseCalls;
+var staleFindCount = staleFixture.Accessibility.FindCalls;
+staleFixture.Locator.Replace(staleFixture.Processes[0] with
+{
+    Identity = staleFixture.Processes[0].Identity with
+    {
+        StartTime = staleFixture.Processes[0].Identity.StartTime.AddMinutes(1)
+    }
+});
+var staleResult = await staleManager.ShowOnlyAsync(
+    [staleFixture.Windows[0]],
+    "account-a",
+    new MacWindowFrame(30, 40, 800, 600),
+    explicitUserSelection: true);
+Check(staleLayout.Succeeded
+      && !staleResult.Succeeded
+      && staleResult.DiagnosticCode == "stale-process-identity"
+      && staleFixture.Accessibility.FindCalls == staleFindCount
+      && staleFixture.Accessibility.FrameCalls
+          + staleFixture.Accessibility.MinimizeCalls
+          + staleFixture.Accessibility.RaiseCalls == staleMutationCount,
+    "A stale macOS process identity was accepted or caused overlay mutation.");
+
 Console.WriteLine($"macOS platform safety tests passed: {passed}; skipped: {skipped}.");
 
 static string BuildReleaseJson(params (string Kind, bool Prerelease, string Tag, string Package, string Checksum)[] releases) =>
@@ -862,6 +1008,69 @@ static string BuildReleaseJson(params (string Kind, bool Prerelease, string Tag,
             new { name = release.Checksum, browser_download_url = $"https://downloads.example.test/{release.Checksum}" }
         }
     }));
+
+static OverlayFixture CreateOverlayFixture(
+    MacWindowFrame? firstFrame = null,
+    bool firstMinimized = false,
+    MacWindowFrame? secondFrame = null,
+    bool secondMinimized = false)
+{
+    var first = CreateOverlayWindow(
+        "account-a",
+        4101,
+        firstFrame ?? new MacWindowFrame(100, 110, 1024, 768),
+        firstMinimized);
+    var second = CreateOverlayWindow(
+        "account-b",
+        4102,
+        secondFrame ?? new MacWindowFrame(200, 210, 1024, 768),
+        secondMinimized);
+    return new OverlayFixture(
+        [first.Window, second.Window],
+        [first.Process, second.Process],
+        new OverlayProcessLocatorFake([first.Process, second.Process]),
+        new OverlayAccessibilityFake([first.Accessible, second.Accessible]));
+}
+
+static OverlayWindowFixture CreateOverlayWindow(
+    string accountId,
+    int processId,
+    MacWindowFrame frame,
+    bool minimized)
+{
+    var bundlePath = $"/Applications/{accountId}.app";
+    var executablePath = $"{bundlePath}/Contents/MacOS/RobloxPlayer";
+    var startTime = new DateTimeOffset(2026, 8, 23, 12, processId - 4100, 0, TimeSpan.Zero);
+    var nativeIdentity = new RobloxProcessIdentity(
+        processId,
+        startTime,
+        executablePath,
+        bundlePath);
+    var nativeProcess = new RobloxProcessInfo(
+        nativeIdentity,
+        "RobloxPlayer",
+        IsManaged: true,
+        IsStable: true);
+    var coreIdentity = new Contracts.RobloxProcessIdentity(
+        processId,
+        startTime,
+        executablePath,
+        bundlePath,
+        Contracts.RobloxPlatform.MacOS);
+    var windowIdentifier = $"ax-{accountId}";
+    var window = new Contracts.RobloxWindowInfo(
+        coreIdentity,
+        windowIdentifier,
+        $"Roblox {accountId}",
+        AccountId: accountId);
+    var accessible = new MacAccessibleWindow(
+        windowIdentifier,
+        window.Title,
+        frame,
+        minimized,
+        IsFullScreen: false);
+    return new OverlayWindowFixture(window, nativeProcess, accessible);
+}
 
 sealed class UpdateHttpHandler(string releaseJson, byte[] packageBytes, string checksum, string packageName) : HttpMessageHandler
 {
@@ -1131,4 +1340,113 @@ sealed class ManagedRuntimeTestCommandRunner : IMacProcessCommandRunner
 
         return Task.FromResult(new MacProcessCommandResult(0, string.Empty, string.Empty));
     }
+}
+
+sealed record OverlayWindowFixture(
+    Contracts.RobloxWindowInfo Window,
+    RobloxProcessInfo Process,
+    MacAccessibleWindow Accessible);
+
+sealed record OverlayFixture(
+    IReadOnlyList<Contracts.RobloxWindowInfo> Windows,
+    IReadOnlyList<RobloxProcessInfo> Processes,
+    OverlayProcessLocatorFake Locator,
+    OverlayAccessibilityFake Accessibility);
+
+sealed class OverlayProcessLocatorFake : IRobloxProcessLocator
+{
+    private readonly Dictionary<int, RobloxProcessInfo> _processes;
+
+    public OverlayProcessLocatorFake(IEnumerable<RobloxProcessInfo> processes)
+    {
+        _processes = processes.ToDictionary(process => process.ProcessId);
+    }
+
+    public RobloxLaunchSnapshot CaptureSnapshot() =>
+        new(DateTimeOffset.UtcNow, _processes.Values);
+
+    public RobloxProcessInfo? FindProcess(int processId) =>
+        _processes.TryGetValue(processId, out var process) ? process : null;
+
+    public bool IsSameProcess(RobloxProcessIdentity expected, RobloxProcessInfo actual) =>
+        expected.Matches(actual.Identity) && actual.IsStable;
+
+    public void Replace(RobloxProcessInfo process) => _processes[process.ProcessId] = process;
+}
+
+sealed class OverlayAccessibilityFake : IMacAccessibilityApi
+{
+    public OverlayAccessibilityFake(IEnumerable<MacAccessibleWindow> windows)
+    {
+        Windows = windows.ToDictionary(window => ParseProcessId(window.Identifier));
+    }
+
+    public Dictionary<int, MacAccessibleWindow> Windows { get; }
+    public MacCapabilityResult Capability { get; set; } = MacCapabilityResult.Supported();
+    public int FindCalls { get; private set; }
+    public int FrameCalls { get; private set; }
+    public int MinimizeCalls { get; private set; }
+    public int RaiseCalls { get; private set; }
+    public bool FailFrameWrites { get; set; }
+    public List<(int ProcessId, string WindowIdentifier)> Raised { get; } = [];
+
+    public MacCapabilityResult GetCapability() => Capability;
+
+    public MacAccessibleWindow? FindMainWindow(Contracts.RobloxProcessIdentity process)
+    {
+        FindCalls++;
+        return Windows.TryGetValue(process.Pid, out var window) ? window : null;
+    }
+
+    public bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame)
+    {
+        FrameCalls++;
+        if (FailFrameWrites) return false;
+        if (!TryGetWindow(process.Pid, windowIdentifier, out var window)) return false;
+        Windows[process.Pid] = window with { Frame = frame };
+        return true;
+    }
+
+    public bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized)
+    {
+        MinimizeCalls++;
+        if (!TryGetWindow(process.Pid, windowIdentifier, out var window)) return false;
+        Windows[process.Pid] = window with { IsMinimized = minimized };
+        return true;
+    }
+
+    public bool TryRaise(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        Func<bool> canRaise)
+    {
+        if (!canRaise()) return false;
+        RaiseCalls++;
+        if (!TryGetWindow(process.Pid, windowIdentifier, out _)) return false;
+        Raised.Add((process.Pid, windowIdentifier));
+        return true;
+    }
+
+    public void ForgetWindow(Contracts.RobloxProcessIdentity process, string windowIdentifier)
+    {
+    }
+
+    private bool TryGetWindow(int processId, string windowIdentifier, out MacAccessibleWindow window)
+    {
+        if (Windows.TryGetValue(processId, out window!)
+            && string.Equals(window.Identifier, windowIdentifier, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        window = null!;
+        return false;
+    }
+
+    private static int ParseProcessId(string identifier) => identifier switch
+    {
+        "ax-account-a" => 4101,
+        "ax-account-b" => 4102,
+        _ => throw new InvalidOperationException($"Unknown fake AX identifier: {identifier}")
+    };
 }
