@@ -107,7 +107,6 @@ public sealed record RobloxLaunchRequest(
     int MaxAttempts = 3,
     MacLaunchLevel? PreferredMacLevel = null,
     string? RobloxBundlePath = null,
-    bool UserConsentedToMultiInstanceChanges = false,
     TimeSpan? VerificationTimeout = null,
     // Populated by the platform launcher after it validates the bundle and is
     // carried into process verification so a post-launch path replacement
@@ -226,7 +225,8 @@ public sealed record RobloxWindowInfo(
     RobloxProcessIdentity Process,
     string? WindowIdentifier,
     string? Title,
-    int? LegacyWindowHandle = null);
+    int? LegacyWindowHandle = null,
+    string? AccountId = null);
 
 public sealed record CapabilityDescriptor(
     string Name,

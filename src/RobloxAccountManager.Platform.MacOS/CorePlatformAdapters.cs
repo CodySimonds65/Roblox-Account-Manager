@@ -63,7 +63,7 @@ public sealed class MacCoreProcessLocator : Contracts.IRobloxProcessLocator
             cancellationToken).ConfigureAwait(false);
         if (result.Succeeded && result.NewProcess is not null)
         {
-            _inner.RegisterManaged(result.NewProcess.Identity);
+            _inner.RegisterManaged(result.NewProcess.Identity, request.AccountId);
             var managed = ToCoreInfo(result.NewProcess) with { IsManaged = true, AccountId = request.AccountId };
             return new Contracts.LaunchVerificationResult(
                 true,
@@ -84,7 +84,10 @@ public sealed class MacCoreProcessLocator : Contracts.IRobloxProcessLocator
         cancellationToken.ThrowIfCancellationRequested();
         IReadOnlyList<Contracts.RobloxProcessInfo> result = _inner.CaptureSnapshot().Processes
             .Where(process => process.IsManaged)
-            .Select(ToCoreInfo)
+            .Select(process => ToCoreInfo(process) with
+            {
+                AccountId = _inner.GetManagedAccountId(process.Identity)
+            })
             .ToArray();
         return ValueTask.FromResult(result);
     }
@@ -122,13 +125,6 @@ public sealed class MacCoreMultiInstanceStrategy : Contracts.IRobloxMultiInstanc
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!request.UserConsentedToMultiInstanceChanges)
-        {
-            return Contracts.RobloxLaunchPreparation.Failure(
-                request,
-                Contracts.LaunchFailureKind.LauncherRejected,
-                "consent-required");
-        }
         if (!OperatingSystem.IsMacOS())
         {
             return Contracts.RobloxLaunchPreparation.Failure(
@@ -159,7 +155,6 @@ public sealed class MacCoreMultiInstanceStrategy : Contracts.IRobloxMultiInstanc
                 new MacManagedRuntimeRequest(
                     request.RobloxBundlePath,
                     "reserved-by-slot-manager",
-                    request.UserConsentedToMultiInstanceChanges,
                     Level: MacLaunchLevel.ManagedSlots),
                 cancellationToken).ConfigureAwait(false);
         }
@@ -358,7 +353,11 @@ public sealed class MacCoreClientWindowManager : Contracts.IClientWindowManager
     public async ValueTask<IReadOnlyList<Contracts.RobloxWindowInfo>> GetWindowsAsync(CancellationToken cancellationToken = default)
     {
         var processes = await _locator.GetManagedProcessesAsync(cancellationToken).ConfigureAwait(false);
-        return processes.Select(process => new Contracts.RobloxWindowInfo(process.Identity, null, null)).ToArray();
+        return processes.Select(process => new Contracts.RobloxWindowInfo(
+            process.Identity,
+            null,
+            null,
+            AccountId: process.AccountId)).ToArray();
     }
 
     public async ValueTask<bool> FocusAsync(Contracts.RobloxWindowInfo window, CancellationToken cancellationToken = default)

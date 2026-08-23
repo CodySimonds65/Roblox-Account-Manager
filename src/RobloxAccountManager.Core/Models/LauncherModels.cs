@@ -112,7 +112,6 @@ public sealed class LauncherSettings
     public string LastGameName { get; set; } = string.Empty;
     public List<string> RecentGameNames { get; set; } = [];
     public bool ClearBrowserDataOnNextStart { get; set; }
-    public bool MultiInstanceConsentGranted { get; set; }
     public bool RobloxSettingsConsentGranted { get; set; }
     public bool UnsignedUpdatesConsentGranted { get; set; }
     public GameSettings GameSettings { get; set; } = new();

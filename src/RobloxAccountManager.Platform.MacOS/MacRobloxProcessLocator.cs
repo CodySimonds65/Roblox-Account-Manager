@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace RobloxAccountManager.Platform.MacOS;
 
@@ -78,7 +79,11 @@ public sealed class MacRobloxProcessLocator : IRobloxProcessLocator
     public bool IsSameProcess(RobloxProcessIdentity expected, RobloxProcessInfo actual) =>
         expected.Matches(actual.Identity) && actual.IsStable;
 
-    public void RegisterManaged(RobloxProcessIdentity identity) => _registry.Register(identity);
+    public void RegisterManaged(RobloxProcessIdentity identity, string? accountId = null) =>
+        _registry.Register(identity, accountId);
+
+    public string? GetManagedAccountId(RobloxProcessIdentity identity) =>
+        _registry.GetAccountId(identity);
 
     private static bool IsCandidateProcess(Process process)
     {
@@ -146,7 +151,15 @@ public sealed class MacManagedProcessRegistry
             "Library", "Application Support", "RobloxAccountManager", "managed-processes.json");
     }
 
-    public IReadOnlyList<RobloxProcessIdentity> Read()
+    public IReadOnlyList<RobloxProcessIdentity> Read() =>
+        ReadRegistrations().Select(registration => registration.Identity).ToArray();
+
+    public string? GetAccountId(RobloxProcessIdentity identity) =>
+        ReadRegistrations()
+            .FirstOrDefault(registration => registration.Identity.Matches(identity))
+            ?.AccountId;
+
+    private IReadOnlyList<MacManagedProcessRegistration> ReadRegistrations()
     {
         lock (_gate)
         {
@@ -160,33 +173,69 @@ public sealed class MacManagedProcessRegistry
 
                 if (!File.Exists(_path))
                 {
-                    return Array.Empty<RobloxProcessIdentity>();
+                    return Array.Empty<MacManagedProcessRegistration>();
                 }
 
-                return System.Text.Json.JsonSerializer.Deserialize<List<RobloxProcessIdentity>>(File.ReadAllText(_path))
-                    ?? [];
+                using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(_path));
+                if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array)
+                    return Array.Empty<MacManagedProcessRegistration>();
+
+                var registrations = new List<MacManagedProcessRegistration>();
+                foreach (var element in document.RootElement.EnumerateArray())
+                {
+                    if (element.ValueKind != System.Text.Json.JsonValueKind.Object)
+                        continue;
+
+                    RobloxProcessIdentity? identity;
+                    string? accountId = null;
+                    if (element.TryGetProperty(nameof(MacManagedProcessRegistration.Identity), out var identityElement))
+                    {
+                        identity = identityElement.Deserialize<RobloxProcessIdentity>();
+                        if (element.TryGetProperty(nameof(MacManagedProcessRegistration.AccountId), out var accountElement)
+                            && accountElement.ValueKind == System.Text.Json.JsonValueKind.String)
+                        {
+                            accountId = accountElement.GetString();
+                        }
+                    }
+                    else
+                    {
+                        // v1 stored a bare identity array. Retain authorization while
+                        // leaving the account unbound until the next verified launch.
+                        identity = element.Deserialize<RobloxProcessIdentity>();
+                    }
+
+                    if (identity is not null && identity.ProcessId > 0 && identity.HasStableStartTime
+                        && !string.IsNullOrWhiteSpace(identity.ExecutablePath)
+                        && !string.IsNullOrWhiteSpace(identity.BundlePath))
+                    {
+                        registrations.Add(new MacManagedProcessRegistration(accountId, identity));
+                    }
+                }
+
+                return registrations;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
             {
-                return Array.Empty<RobloxProcessIdentity>();
+                return Array.Empty<MacManagedProcessRegistration>();
             }
         }
     }
 
     public bool IsRegistered(RobloxProcessIdentity identity) => Read().Any(existing => existing.Matches(identity));
 
-    public void Register(RobloxProcessIdentity identity)
+    public void Register(RobloxProcessIdentity identity, string? accountId = null)
     {
         lock (_gate)
         {
-            var values = Read().Where(existing => existing.ProcessId != identity.ProcessId).Append(identity).ToList();
-            var directory = Path.GetDirectoryName(_path) ?? throw new InvalidOperationException("Registry path has no parent.");
-            PathSafety.EnsureOwnerOnlyDirectory(directory);
-            PathSafety.RejectSymlinkComponents(_path);
-            var temporary = _path + $".{Guid.NewGuid():N}.tmp";
-            File.WriteAllText(temporary, System.Text.Json.JsonSerializer.Serialize(values));
-            PathSafety.RejectSymlinkComponents(_path);
-            File.Move(temporary, _path, overwrite: true);
+            var values = ReadRegistrations()
+                .Where(existing => existing.Identity.ProcessId != identity.ProcessId
+                    && (string.IsNullOrWhiteSpace(accountId)
+                        || !string.Equals(existing.AccountId, accountId, StringComparison.Ordinal)))
+                .Append(new MacManagedProcessRegistration(
+                    string.IsNullOrWhiteSpace(accountId) ? null : accountId,
+                    identity))
+                .ToList();
+            Write(values);
         }
     }
 
@@ -194,7 +243,7 @@ public sealed class MacManagedProcessRegistry
     {
         lock (_gate)
         {
-            var values = Read().Where(existing => !existing.Matches(identity)).ToList();
+            var values = ReadRegistrations().Where(existing => !existing.Identity.Matches(identity)).ToList();
             if (File.Exists(_path))
             {
                 PathSafety.RejectSymlinkComponents(_path);
@@ -210,7 +259,20 @@ public sealed class MacManagedProcessRegistry
                 return;
             }
 
-            File.WriteAllText(_path, System.Text.Json.JsonSerializer.Serialize(values));
+            Write(values);
         }
     }
+
+    private void Write(IReadOnlyList<MacManagedProcessRegistration> values)
+    {
+        var directory = Path.GetDirectoryName(_path) ?? throw new InvalidOperationException("Registry path has no parent.");
+        PathSafety.EnsureOwnerOnlyDirectory(directory);
+        PathSafety.RejectSymlinkComponents(_path);
+        var temporary = _path + $".{Guid.NewGuid():N}.tmp";
+        File.WriteAllText(temporary, System.Text.Json.JsonSerializer.Serialize(values));
+        PathSafety.RejectSymlinkComponents(_path);
+        File.Move(temporary, _path, overwrite: true);
+    }
+
+    private sealed record MacManagedProcessRegistration(string? AccountId, RobloxProcessIdentity Identity);
 }
