@@ -6,6 +6,8 @@ namespace RobloxAccountManager.Platform.MacOS;
 
 public sealed class MacManagedRuntimeBuilder
 {
+    public const int CurrentRuntimeRevision = 2;
+
     private readonly MacBundleDiscovery _bundleDiscovery;
     private readonly IMacProcessCommandRunner _commandRunner;
     private readonly MacSignatureVerifier _signatureVerifier;
@@ -61,6 +63,7 @@ public sealed class MacManagedRuntimeBuilder
         if (Directory.Exists(runtimePath)
             && !request.ForceRebuild
             && await ReadStampAsync(stampPath, cancellationToken).ConfigureAwait(false) is { } current
+            && current.BuilderRevision == CurrentRuntimeRevision
             && string.Equals(current.SourceFingerprint, source.SourceFingerprint, StringComparison.Ordinal)
             && current.Level == request.Level
             && await _bundleDiscovery.ValidateManagedMultiInstanceRuntimeAsync(managedBundlePath, cancellationToken).ConfigureAwait(false) is { } verifiedRuntime
@@ -117,7 +120,8 @@ public sealed class MacManagedRuntimeBuilder
                 source.ExecutableFingerprint,
                 source.PlistFingerprint,
                 DateTimeOffset.UtcNow,
-                request.Level);
+                request.Level,
+                CurrentRuntimeRevision);
             await WriteJsonAtomicAsync(sidecarStage, stamp, cancellationToken).ConfigureAwait(false);
             CommitAtomically(stage, runtimePath, sidecarStage, stampPath);
             return new MacManagedRuntimeBuildResult(
@@ -294,19 +298,7 @@ public sealed class MacManagedRuntimeBuilder
             RuntimeRoot,
             Path.Combine(RuntimeRoot, $".entitlements-{Guid.NewGuid():N}.plist"));
         await File.WriteAllTextAsync(entitlementPath, entitlementXml, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-        var patch = await _commandRunner.RunAsync(
-            "/usr/bin/plutil",
-            ["-replace", "com\\.apple\\.security\\.cs\\.disable-library-validation", "-bool", "true", "--", entitlementPath],
-            cancellationToken).ConfigureAwait(false);
-        if (!patch.Succeeded)
-        {
-            patch = await _commandRunner.RunAsync(
-                "/usr/bin/plutil",
-                ["-insert", "com\\.apple\\.security\\.cs\\.disable-library-validation", "-bool", "true", "--", entitlementPath],
-                cancellationToken).ConfigureAwait(false);
-            if (!patch.Succeeded)
-                throw new InvalidOperationException("Unable to prepare managed-runtime entitlements.");
-        }
+        await EnsureDisableLibraryValidationAsync(entitlementPath, cancellationToken).ConfigureAwait(false);
 
         return entitlementPath;
     }
@@ -318,34 +310,42 @@ public sealed class MacManagedRuntimeBuilder
         string? entitlementPath,
         CancellationToken cancellationToken)
     {
-        var codePaths = Directory.EnumerateFileSystemEntries(stagedBundle, "*", SearchOption.AllDirectories)
-            .Where(path => path.EndsWith(".framework", StringComparison.OrdinalIgnoreCase)
-                || path.EndsWith(".xpc", StringComparison.OrdinalIgnoreCase)
-                || path.EndsWith(".app", StringComparison.OrdinalIgnoreCase)
-                || path.EndsWith(".dylib", StringComparison.OrdinalIgnoreCase))
-            .Concat([PathSafety.RequireContainedPath(stagedBundle, Path.Combine(stagedBundle,
-                Path.GetRelativePath(sourceBundle, sourceExecutablePath)))])
-            .Distinct(StringComparer.Ordinal)
-            .OrderByDescending(path => path.Count(characters => characters == Path.DirectorySeparatorChar || characters == Path.AltDirectorySeparatorChar))
+        var mainExecutable = PathSafety.RequireContainedPath(
+            stagedBundle,
+            Path.Combine(stagedBundle, Path.GetRelativePath(sourceBundle, sourceExecutablePath)));
+        var codeObjects = MacCodeObjectDiscovery.Enumerate(stagedBundle)
+            .Concat([new MacCodeObject(mainExecutable, MacMachOFileType.Executable, IsBundle: false)])
+            .DistinctBy(item => item.Path, StringComparer.Ordinal)
+            .OrderByDescending(item => item.Path.Count(character =>
+                character == Path.DirectorySeparatorChar || character == Path.AltDirectorySeparatorChar))
+            .ThenBy(item => item.IsBundle)
+            .ThenBy(item => item.Path, StringComparer.Ordinal)
             .ToList();
-        foreach (var codePath in codePaths)
+        foreach (var codeObject in codeObjects)
         {
+            var codePath = codeObject.Path;
             if (!PathSafety.IsContainedBy(stagedBundle, codePath))
             {
                 throw new InvalidOperationException("A nested code path escaped the staged bundle.");
             }
 
-            var isMainExecutable = PathSafety.PathsEqual(
-                codePath,
-                Path.Combine(stagedBundle, Path.GetRelativePath(sourceBundle, sourceExecutablePath)));
+            var isMainExecutable = PathSafety.PathsEqual(codePath, mainExecutable);
+            var needsRuntimeEntitlements = isMainExecutable
+                || codeObject.IsExecutable
+                || IsExecutableCodeBundle(codePath);
             var nestedEntitlementPath = isMainExecutable
                 ? entitlementPath
                 : await ExtractNestedEntitlementsAsync(
                     sourceBundle,
                     Path.GetRelativePath(stagedBundle, codePath),
-                    stagedBundle,
+                    needsRuntimeEntitlements,
                     cancellationToken).ConfigureAwait(false);
             var args = new List<string> { "--force", "--sign", "-" };
+            if (needsRuntimeEntitlements)
+            {
+                args.Add("--options");
+                args.Add("runtime");
+            }
             if (nestedEntitlementPath is not null)
             {
                 args.Add("--entitlements");
@@ -354,15 +354,20 @@ public sealed class MacManagedRuntimeBuilder
 
             args.Add("--");
             args.Add(codePath);
-            var result = await _commandRunner.RunAsync("/usr/bin/codesign", args, cancellationToken).ConfigureAwait(false);
-            if (!result.Succeeded)
+            try
             {
-                throw new InvalidOperationException("A nested Roblox code-signing stage failed.");
+                var result = await _commandRunner.RunAsync("/usr/bin/codesign", args, cancellationToken).ConfigureAwait(false);
+                if (!result.Succeeded)
+                {
+                    throw new InvalidOperationException("A nested Roblox code-signing stage failed.");
+                }
             }
-
-            if (!isMainExecutable && nestedEntitlementPath is not null)
+            finally
             {
-                DeleteSafeFile(nestedEntitlementPath, RuntimeRoot);
+                if (!isMainExecutable && nestedEntitlementPath is not null)
+                {
+                    DeleteSafeFile(nestedEntitlementPath, RuntimeRoot);
+                }
             }
         }
 
@@ -388,11 +393,10 @@ public sealed class MacManagedRuntimeBuilder
     private async Task<string?> ExtractNestedEntitlementsAsync(
         string sourceBundle,
         string relativePath,
-        string stagedBundle,
+        bool ensureDisableLibraryValidation,
         CancellationToken cancellationToken)
     {
         var sourcePath = PathSafety.RequireContainedPath(sourceBundle, Path.Combine(sourceBundle, relativePath));
-        var stagedPath = PathSafety.RequireContainedPath(stagedBundle, Path.Combine(stagedBundle, relativePath));
         if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
         {
             return null;
@@ -400,18 +404,49 @@ public sealed class MacManagedRuntimeBuilder
 
         var extracted = await _signatureVerifier.ExtractEntitlementsAsync(sourcePath, cancellationToken).ConfigureAwait(false);
         var entitlementXml = ExtractEntitlementXml(extracted);
-        if (!extracted.Succeeded || entitlementXml is null)
+        if (!extracted.Succeeded && !ensureDisableLibraryValidation)
         {
             return null;
         }
+
+        entitlementXml ??= ensureDisableLibraryValidation
+            ? "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict/></plist>"
+            : null;
+        if (entitlementXml is null)
+            return null;
 
         var entitlementPath = PathSafety.RequireContainedPath(
             RuntimeRoot,
             Path.Combine(RuntimeRoot, $".nested-entitlements-{Guid.NewGuid():N}.plist"));
         await File.WriteAllTextAsync(entitlementPath, entitlementXml, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-        _ = stagedPath;
+        if (ensureDisableLibraryValidation)
+            await EnsureDisableLibraryValidationAsync(entitlementPath, cancellationToken).ConfigureAwait(false);
         return entitlementPath;
     }
+
+    private async Task EnsureDisableLibraryValidationAsync(
+        string entitlementPath,
+        CancellationToken cancellationToken)
+    {
+        var patch = await _commandRunner.RunAsync(
+            "/usr/bin/plutil",
+            ["-replace", "com\\.apple\\.security\\.cs\\.disable-library-validation", "-bool", "true", "--", entitlementPath],
+            cancellationToken).ConfigureAwait(false);
+        if (patch.Succeeded)
+            return;
+
+        patch = await _commandRunner.RunAsync(
+            "/usr/bin/plutil",
+            ["-insert", "com\\.apple\\.security\\.cs\\.disable-library-validation", "-bool", "true", "--", entitlementPath],
+            cancellationToken).ConfigureAwait(false);
+        if (!patch.Succeeded)
+            throw new InvalidOperationException("Unable to prepare managed-runtime entitlements.");
+    }
+
+    private static bool IsExecutableCodeBundle(string path) =>
+        path.EndsWith(".app", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".appex", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".xpc", StringComparison.OrdinalIgnoreCase);
 
     private void CommitAtomically(string stage, string destination, string stagedStamp, string destinationStamp)
     {

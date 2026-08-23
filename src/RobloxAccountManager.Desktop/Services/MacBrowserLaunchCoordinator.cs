@@ -85,13 +85,10 @@ public sealed class MacBrowserLaunchCoordinator
                 await Task.Delay(_pollInterval, launchTimeout.Token);
             }
 
-            var navigation = await pending.WaitAsync(launchTimeout.Token);
-            if (!navigation.TryConsumeLaunchUri(out var launchUri) || launchUri is null)
-            {
-                throw new InvalidOperationException("macos-launch-uri-not-captured");
-            }
-
-            return launchUri;
+            return await WaitForCapturedLaunchUriAsync(
+                accountId,
+                pending,
+                launchTimeout.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException exception)
             when (launchTimeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
@@ -103,6 +100,47 @@ public sealed class MacBrowserLaunchCoordinator
         finally
         {
             launchTimeout.Cancel();
+        }
+    }
+
+    private async ValueTask<Uri> WaitForCapturedLaunchUriAsync(
+        string accountId,
+        Task<BrowserNavigationResult> pending,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            if (pending.IsCompleted)
+            {
+                var navigation = await pending.ConfigureAwait(false);
+                if (navigation.TryConsumeLaunchUri(out var routedUri) && routedUri is not null)
+                    return routedUri;
+                throw new InvalidOperationException("macos-launch-uri-not-captured");
+            }
+
+            try
+            {
+                var captured = await _session.InvokeScriptAsync(
+                    accountId,
+                    RobloxPlayControl.CapturedLaunchUriScript,
+                    cancellationToken).ConfigureAwait(false);
+                if (RobloxPlayControl.TryParseCapturedLaunchUri(captured, out var scriptUri)
+                    && scriptUri is not null)
+                {
+                    return scriptUri;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                // The native navigation routes remain authoritative. A transient script
+                // failure is retried until the same bounded launch timeout expires.
+            }
+
+            await Task.WhenAny(pending, Task.Delay(_pollInterval, cancellationToken)).ConfigureAwait(false);
         }
     }
 }

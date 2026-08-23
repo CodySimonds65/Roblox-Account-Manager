@@ -184,7 +184,8 @@ public sealed record MacRuntimeStamp(
     string ExecutableFingerprint,
     string PlistFingerprint,
     DateTimeOffset BuiltAt,
-    MacLaunchLevel Level);
+    MacLaunchLevel Level,
+    int BuilderRevision = 0);
 
 public sealed record MacManagedRuntimeSlot(
     int SlotNumber,

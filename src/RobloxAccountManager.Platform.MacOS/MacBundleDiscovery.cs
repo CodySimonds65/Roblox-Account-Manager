@@ -351,7 +351,43 @@ public sealed class MacSignatureVerifier
             "/usr/bin/codesign",
             ["--verify", "--deep", "--strict", "--verbose=2", "--", bundlePath],
             cancellationToken).ConfigureAwait(false);
-        return result.Succeeded;
+        if (!result.Succeeded
+            || !await HasAdHocSignatureAsync(bundlePath, cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        // --deep validates individual signatures but does not prove that every nested Mach-O
+        // object was replaced with our local identity. A still-vendor-signed extensionless
+        // helper can pass static verification and then be killed by library validation when it
+        // maps an ad-hoc-signed dylib. Verify every code object explicitly and require one
+        // consistent local ad-hoc signing model.
+        foreach (var codeObject in MacCodeObjectDiscovery.Enumerate(bundlePath))
+        {
+            var nestedVerification = await _commandRunner.RunAsync(
+                "/usr/bin/codesign",
+                ["--verify", "--strict", "--verbose=2", "--", codeObject.Path],
+                cancellationToken).ConfigureAwait(false);
+            if (!nestedVerification.Succeeded
+                || !await HasAdHocSignatureAsync(codeObject.Path, cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private async Task<bool> HasAdHocSignatureAsync(string path, CancellationToken cancellationToken)
+    {
+        var details = await _commandRunner.RunAsync(
+            "/usr/bin/codesign",
+            ["--display", "--verbose=4", "--", path],
+            cancellationToken).ConfigureAwait(false);
+        var output = details.StandardOutput + "\n" + details.StandardError;
+        return details.Succeeded
+            && output.Contains("Signature=adhoc", StringComparison.OrdinalIgnoreCase)
+            && !output.Contains("Authority=Developer ID", StringComparison.OrdinalIgnoreCase);
     }
 
     public Task<MacProcessCommandResult> ExtractEntitlementsAsync(

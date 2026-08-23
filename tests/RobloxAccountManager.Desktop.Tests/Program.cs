@@ -5,6 +5,7 @@ using RobloxAccountManager.Core.Models;
 using RobloxAccountManager.Core.Navigation;
 using RobloxAccountManager.Desktop;
 using RobloxAccountManager.Desktop.Services;
+using System.Text.Json;
 
 static void Require(bool condition, string message)
 {
@@ -76,8 +77,15 @@ Require(RobloxPlayControl.ParseResult("arbitrary page text") == RobloxPlayContro
     "Arbitrary WebView script output was treated as a valid Play-control result.");
 Require(RobloxPlayControl.Script.Contains("location.hostname", StringComparison.Ordinal)
         && RobloxPlayControl.Script.Contains("roblox.com", StringComparison.OrdinalIgnoreCase)
-        && RobloxPlayControl.Script.Contains("Play", StringComparison.Ordinal),
+        && RobloxPlayControl.Script.Contains("Play", StringComparison.Ordinal)
+        && RobloxPlayControl.Script.Contains("window.open", StringComparison.Ordinal),
     "The Play-control script did not restrict itself to a trusted Roblox Play action.");
+Require(RobloxPlayControl.TryParseCapturedLaunchUri(
+            "\"roblox-player:1+gameinfo:script-hook-ticket\"",
+            out var scriptHookUri)
+        && scriptHookUri?.Scheme == "roblox-player"
+        && !RobloxPlayControl.TryParseCapturedLaunchUri("\"https://www.roblox.com/games/123\"", out _),
+    "The trusted-page capture fallback accepted an invalid scheme or rejected Roblox.");
 
 var navigationGate = new RobloxNavigationGate();
 navigationGate.CommitTopLevelNavigation(new Uri("https://www.roblox.com/games/123/Test"), succeeded: true);
@@ -173,6 +181,23 @@ var transientOriginCapture = await new MacBrowserLaunchCoordinator(
 Require(transientOriginCapture.Scheme == "roblox-player",
     "The initial WebView wrong-origin state incorrectly aborted a later Roblox Play click.");
 
+var scriptHookSession = new FakeMacBrowserLaunchSession(
+    new Uri("roblox-player:1+gameinfo:native-route-never-arrived"),
+    clickAfterPolls: int.MaxValue,
+    scriptedResults: ["clicked"],
+    completeCaptureOnClick: false,
+    capturedScriptUri: new Uri("roblox-player:1+gameinfo:script-hook-captured"));
+var scriptHookCapture = await new MacBrowserLaunchCoordinator(
+        scriptHookSession,
+        pollInterval: TimeSpan.FromMilliseconds(1))
+    .CaptureAsync(
+        "account-id",
+        new Uri("https://www.roblox.com/games/123/Test"),
+        TimeSpan.FromSeconds(1));
+Require(scriptHookCapture.AbsoluteUri.Contains("script-hook-captured", StringComparison.Ordinal)
+        && scriptHookSession.Events.Contains("capture-script", StringComparer.Ordinal),
+    "The trusted-page fallback did not recover a Roblox URI omitted by WKWebView routes.");
+
 var schemeTimeoutSession = new FakeMacBrowserLaunchSession(
     new Uri("roblox-player:1+gameinfo:missing-scheme"),
     clickAfterPolls: int.MaxValue,
@@ -231,12 +256,14 @@ sealed class FakeMacBrowserLaunchSession(
     int clickAfterPolls,
     int scriptFailures = 0,
     IReadOnlyList<string>? scriptedResults = null,
-    bool completeCaptureOnClick = true) : IMacBrowserLaunchSession
+    bool completeCaptureOnClick = true,
+    Uri? capturedScriptUri = null) : IMacBrowserLaunchSession
 {
     private readonly TaskCompletionSource<BrowserNavigationResult> _capture =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _polls;
     private int _scriptedResultIndex;
+    private int _capturedScriptReads;
 
     public List<string> Events { get; } = [];
     public bool CaptureCanceled { get; private set; }
@@ -267,6 +294,15 @@ sealed class FakeMacBrowserLaunchSession(
         CancellationToken cancellationToken)
     {
         Events.Add("script");
+        if (string.Equals(script, RobloxPlayControl.CapturedLaunchUriScript, StringComparison.Ordinal))
+        {
+            Events.Add("capture-script");
+            var captured = Interlocked.Increment(ref _capturedScriptReads) == 1
+                ? capturedScriptUri?.AbsoluteUri ?? string.Empty
+                : string.Empty;
+            return ValueTask.FromResult(JsonSerializer.Serialize(captured));
+        }
+
         if (Interlocked.Decrement(ref scriptFailures) >= 0)
         {
             throw new InvalidOperationException("document-not-ready");

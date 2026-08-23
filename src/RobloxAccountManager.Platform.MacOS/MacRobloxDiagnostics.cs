@@ -14,7 +14,8 @@ public sealed record MacRobloxLaunchDiagnostics(
 public static partial class MacRobloxDiagnostics
 {
     private static readonly TimeSpan SessionMatchWindow = TimeSpan.FromMinutes(1);
-    private static readonly TimeSpan CrashReportMatchWindow = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan CrashReportEarlyTolerance = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan CrashReportWriteWindow = TimeSpan.FromSeconds(90);
     private const int MaxTailLines = 240;
     private const int MaxTailBytes = 256 * 1024;
 
@@ -202,8 +203,8 @@ public static partial class MacRobloxDiagnostics
         DateTimeOffset processStartUtc,
         IEnumerable<string> directories)
     {
-        var latestAllowed = DateTimeOffset.UtcNow.AddMinutes(1);
-        var earliestAllowed = processStartUtc.Subtract(CrashReportMatchWindow);
+        var latestAllowed = processStartUtc.Add(CrashReportWriteWindow);
+        var earliestAllowed = processStartUtc.Subtract(CrashReportEarlyTolerance);
         var paths = new List<string>();
         foreach (var directory in directories)
         {
@@ -270,9 +271,7 @@ public static partial class MacRobloxDiagnostics
             summary.Add("Roblox reported a required update or force-close condition.");
         }
 
-        if (tail.Any(line => line.Contains("fatal", StringComparison.OrdinalIgnoreCase)
-                             || line.Contains("crash", StringComparison.OrdinalIgnoreCase)
-                             || line.Contains("[FLog::Error]", StringComparison.OrdinalIgnoreCase)))
+        if (tail.Any(ContainsSeriousFailureMarker))
         {
             summary.Add("Roblox reported an error, fatal, or crash marker.");
         }
@@ -284,6 +283,23 @@ public static partial class MacRobloxDiagnostics
         }
 
         return summary;
+    }
+
+    private static bool ContainsSeriousFailureMarker(string line)
+    {
+        if (line.Contains("fatal", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("crash", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!line.Contains("[FLog::Error]", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return line.Contains("terminate", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("exception", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("launch failed", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("render view is null", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? WriteArtifact(IReadOnlyList<string> lines, string? artifactDirectory)
