@@ -380,9 +380,15 @@ public sealed class MainWindow : Window
         StyleButton(add);
         add.Click += async (_, _) =>
         {
-            var values = await PromptAsync("New account profile", "Roblox account", string.Empty);
+            var values = await PromptAsync("New account profile", "Roblox account", string.Empty, false);
             if (values is null) return;
-            _viewModel.Accounts.Add(new AccountProfile { Label = values.Value.Label, Group = values.Value.Group, SortOrder = _viewModel.Accounts.Count });
+            _viewModel.Accounts.Add(new AccountProfile
+            {
+                Label = values.Value.Label,
+                Group = values.Value.Group,
+                EmbedInClients = values.Value.ShowInClients,
+                SortOrder = _viewModel.Accounts.Count
+            });
             await SaveAsync();
             RenderPage();
         };
@@ -394,10 +400,11 @@ public sealed class MainWindow : Window
         {
             if (_viewModel.SelectedAccount is null) return;
             var account = _viewModel.SelectedAccount;
-            var values = await PromptAsync("Edit account profile", account.Label, account.Group);
+            var values = await PromptAsync("Edit account profile", account.Label, account.Group, account.EmbedInClients);
             if (values is null) return;
             account.Label = values.Value.Label;
             account.Group = values.Value.Group;
+            account.EmbedInClients = values.Value.ShowInClients;
             await SaveAsync();
             RenderPage();
         };
@@ -1350,11 +1357,6 @@ public sealed class MainWindow : Window
         var preferred = new ComboBox { ItemsSource = new[] { "Auto", "Bloxstrap", "Standard" }, SelectedItem = _viewModel.Settings.PreferredLauncher };
         var continueOnFailure = new CheckBox { Content = "Continue after a failed account", IsChecked = _viewModel.Settings.ContinueOnFailure };
         var remember = new CheckBox { Content = "Remember account and preset selections", IsChecked = _viewModel.Settings.RememberSelections };
-        var multiInstanceConsent = new CheckBox
-        {
-            Content = "Enable macOS multi-client managed runtime slots",
-            IsChecked = _viewModel.Settings.MultiInstanceConsentGranted
-        };
         var clearSessions = new CheckBox { Content = "Clear all Roblox browser sessions on next restart", IsChecked = _viewModel.Settings.ClearBrowserDataOnNextStart };
         var updates = new CheckBox { Content = "Enable automatic updates", IsChecked = _viewModel.Settings.UpdateChecksEnabled };
         var showGamePresetPanel = new CheckBox { Content = "Show game preset panel on the launch workspace", IsChecked = _viewModel.Settings.ShowGamePresetPanel };
@@ -1375,7 +1377,6 @@ public sealed class MainWindow : Window
             _viewModel.Settings.PreferredLauncher = preferred.SelectedItem?.ToString() ?? "Auto";
             _viewModel.Settings.ContinueOnFailure = continueOnFailure.IsChecked == true;
             _viewModel.Settings.RememberSelections = remember.IsChecked == true;
-            _viewModel.Settings.MultiInstanceConsentGranted = multiInstanceConsent.IsChecked == true;
             _viewModel.Settings.ClearBrowserDataOnNextStart = clearSessions.IsChecked == true;
             _viewModel.Settings.UpdateChecksEnabled = updates.IsChecked == true;
             _viewModel.Settings.UpdateChannel = selectedChannel;
@@ -1401,16 +1402,6 @@ public sealed class MainWindow : Window
         panel.Children.Add(new TextBlock { Text = "Delay between accounts (seconds)" }); panel.Children.Add(delay);
         panel.Children.Add(new TextBlock { Text = "Preferred launcher" }); panel.Children.Add(preferred);
         panel.Children.Add(continueOnFailure); panel.Children.Add(remember); panel.Children.Add(clearSessions); panel.Children.Add(showGamePresetPanel);
-        if (OperatingSystem.IsMacOS())
-        {
-            panel.Children.Add(multiInstanceConsent);
-            panel.Children.Add(new TextBlock
-            {
-                Text = "Multi-client mode keeps the official Roblox app unchanged. It creates reusable local copies, disables Roblox's Launch Services single-instance flag, and ad-hoc signs those copies with the source entitlements.",
-                Foreground = MutedTextBrush,
-                TextWrapping = TextWrapping.Wrap
-            });
-        }
         panel.Children.Add(updateRow);
         panel.Children.Add(new TextBlock { Text = "Signed packages install automatically after validation. Unsigned packages always ask once before Apple Installer opens.", Foreground = MutedTextBrush, TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(validation); panel.Children.Add(save);
@@ -1472,7 +1463,25 @@ public sealed class MainWindow : Window
                 return;
             }
             var current = account.GameSettings?.Clone() ?? new GameSettings();
-            editor.Content = BuildGameSettingsEditor(current, true, settings => account.GameSettings = settings.HasOverrides ? settings : null);
+            var showInClients = new CheckBox
+            {
+                Content = "Show Roblox client in the Clients panel",
+                IsChecked = account.EmbedInClients
+            };
+            showInClients.Click += async (_, _) =>
+            {
+                account.EmbedInClients = showInClients.IsChecked == true;
+                await SaveAsync();
+            };
+            editor.Content = new StackPanel
+            {
+                Spacing = 12,
+                Children =
+                {
+                    showInClients,
+                    BuildGameSettingsEditor(current, true, settings => account.GameSettings = settings.HasOverrides ? settings : null)
+                }
+            };
         }
         list.SelectionChanged += (_, _) => SelectProfile(list.SelectedItem as AccountProfile);
         if (_viewModel.Accounts.Count > 0) list.SelectedIndex = 0;
@@ -1708,11 +1717,6 @@ public sealed class MainWindow : Window
     {
         if (_launches is null || preset is null || !DesktopPresetPolicy.TryResolveLaunchUrl(preset, customUrl, out var gameUrl)) { _viewModel.AppendActivity("Launch blocked: configure a validated Roblox bundle and a valid game preset."); return; }
         if (accounts.Count == 0) { _viewModel.AppendActivity("Launch blocked: favorite or open at least one account."); return; }
-        if (OperatingSystem.IsMacOS() && !_viewModel.Settings.MultiInstanceConsentGranted)
-        {
-            _viewModel.AppendActivity("Launch blocked: enable macOS multi-client managed runtime slots in General settings first.");
-            return;
-        }
         _lastGameUrl = gameUrl;
         _lastLaunchPreset = preset;
         _lastCustomUrl = DesktopPresetPolicy.IsCustomUrlPreset(preset) ? customUrl : null;
@@ -1745,7 +1749,6 @@ public sealed class MainWindow : Window
                     MaxAttempts: 3,
                     PreferredMacLevel: CoreMacLaunchLevel.ManagedSlots,
                     RobloxBundlePath: await DiscoverRobloxBundleAsync(),
-                    UserConsentedToMultiInstanceChanges: _viewModel.Settings.MultiInstanceConsentGranted,
                     VerificationTimeout: TimeSpan.FromSeconds(Math.Clamp(_viewModel.Settings.LaunchTimeoutSeconds, 15, 180)));
                 LaunchResult result;
                 var launchStartedUtc = DateTimeOffset.UtcNow;
@@ -2082,18 +2085,34 @@ public sealed class MainWindow : Window
         Child = child
     };
 
-    private async Task<(string Label, string Group)?> PromptAsync(string title, string labelValue, string groupValue)
+    private async Task<(string Label, string Group, bool ShowInClients)?> PromptAsync(
+        string title,
+        string labelValue,
+        string groupValue,
+        bool showInClientsValue)
     {
-        var dialog = new Window { Title = title, Width = 420, Height = 230, CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var dialog = new Window { Title = title, Width = 420, Height = 280, CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner };
         var label = new TextBox { Text = labelValue, PlaceholderText = "Account label" };
         var group = new TextBox { Text = groupValue, PlaceholderText = "Group (optional)" };
-        var result = new TaskCompletionSource<(string, string)?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var showInClients = new CheckBox
+        {
+            Content = "Show Roblox client in the Clients panel",
+            IsChecked = showInClientsValue
+        };
+        var result = new TaskCompletionSource<(string, string, bool)?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var ok = new Button { Content = "Save" };
         var cancel = new Button { Content = "Cancel" };
-        ok.Click += (_, _) => { if (!string.IsNullOrWhiteSpace(label.Text)) { result.TrySetResult((label.Text.Trim(), group.Text?.Trim() ?? string.Empty)); dialog.Close(); } };
+        ok.Click += (_, _) =>
+        {
+            if (!string.IsNullOrWhiteSpace(label.Text))
+            {
+                result.TrySetResult((label.Text.Trim(), group.Text?.Trim() ?? string.Empty, showInClients.IsChecked == true));
+                dialog.Close();
+            }
+        };
         cancel.Click += (_, _) => { result.TrySetResult(null); dialog.Close(); };
         dialog.Closed += (_, _) => result.TrySetResult(null);
-        dialog.Content = new StackPanel { Margin = new Thickness(20), Spacing = 12, Children = { label, group, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { ok, cancel } } } };
+        dialog.Content = new StackPanel { Margin = new Thickness(20), Spacing = 12, Children = { label, group, showInClients, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { ok, cancel } } } };
         dialog.Show(this);
         return await result.Task;
     }

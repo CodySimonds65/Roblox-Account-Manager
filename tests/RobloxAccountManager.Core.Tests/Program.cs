@@ -89,7 +89,7 @@ var rejected = await new SerializedLaunchCoordinator(
 Require(!rejected.Succeeded
         && rejected.FailureKind == LaunchFailureKind.LauncherRejected
         && rejected.Attempts.Count == 1
-        && rejected.Attempts[0].DiagnosticCode == "consent-required"
+        && rejected.Attempts[0].DiagnosticCode == "preparation-policy-rejected"
         && rejectedTicketCalls == 0
         && rejectedLocator.SnapshotCount == 0,
     "A non-retryable preparation failure reached snapshot or ticket acquisition.");
@@ -145,14 +145,24 @@ try
     var roundTrippedSettings = await settingsStore.LoadAsync();
     Require(roundTrippedSettings.UpdateChannel == UpdateChannel.Unsigned && !roundTrippedSettings.ShowGamePresetPanel,
         "The update channel or game preset visibility did not survive a settings-file round trip.");
-    await accounts.SaveAsync([new AccountProfile { Id = Guid.NewGuid().ToString("N"), Label = "Imported" }]);
+    await File.WriteAllTextAsync(paths.Settings,
+        "{\"MultiInstanceConsentGranted\":false,\"UpdateChecksEnabled\":true}");
+    var legacySettings = await settingsStore.LoadAsync();
+    Require(legacySettings.UpdateChecksEnabled,
+        "A legacy runtime-slot consent property prevented settings migration.");
+    await accounts.SaveAsync([new AccountProfile
+    {
+        Id = Guid.NewGuid().ToString("N"),
+        Label = "Imported",
+        EmbedInClients = true
+    }]);
     var loadedAccounts = await accounts.LoadAsync();
-    Require(loadedAccounts.Count == 1 && loadedAccounts[0].Label == "Imported", "Portable account storage did not round-trip.");
+    Require(loadedAccounts.Count == 1 && loadedAccounts[0].Label == "Imported" && loadedAccounts[0].EmbedInClients,
+        "Portable account storage did not round-trip the Clients-panel profile option.");
 
     var exportPath = Path.Combine(storeRoot, "profile-export.json");
     var transferSettings = new LauncherSettings
     {
-        MultiInstanceConsentGranted = true,
         RobloxSettingsConsentGranted = true,
         UnsignedUpdatesConsentGranted = true,
         UpdateChannel = UpdateChannel.Unsigned,
@@ -165,7 +175,7 @@ try
         [new GamePreset("Test", "https://www.roblox.com/games/123/test")],
         transferSettings);
     var imported = await ProfileTransferService.ImportAsync(exportPath);
-    Require(!imported.Settings.MultiInstanceConsentGranted
+    Require(imported.Accounts.Count == 1 && imported.Accounts[0].EmbedInClients
             && !imported.Settings.RobloxSettingsConsentGranted
             && !imported.Settings.UnsignedUpdatesConsentGranted
             && !imported.Settings.ClearBrowserDataOnNextStart
@@ -275,7 +285,7 @@ sealed class RejectingStrategy : IRobloxMultiInstanceStrategy
         ValueTask.FromResult(RobloxLaunchPreparation.Failure(
             request,
             LaunchFailureKind.LauncherRejected,
-            "consent-required"));
+            "preparation-policy-rejected"));
     public ValueTask<SingletonReleaseResult> ReleaseSingletonAsync(CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Singleton release must not run after preparation rejection.");
     public ValueTask<MacLaunchLevel?> GetActiveMacLevelAsync(CancellationToken cancellationToken = default) =>

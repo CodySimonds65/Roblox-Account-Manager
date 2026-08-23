@@ -39,16 +39,6 @@ public sealed class MacManagedRuntimeBuilder
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!request.UserConsented)
-        {
-            return new MacManagedRuntimeBuildResult(
-                MacRuntimeBuildStatus.ConsentRequired,
-                null,
-                null,
-                null,
-                "Explicit consent is required before cloning or re-signing Roblox.");
-        }
-
         MacBundleInfo? source = await _bundleDiscovery.ValidateAsync(request.SourceBundlePath, cancellationToken).ConfigureAwait(false);
         if (source is null)
         {

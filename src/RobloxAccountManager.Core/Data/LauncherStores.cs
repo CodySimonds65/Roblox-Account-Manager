@@ -197,10 +197,9 @@ public static class ProfileTransferService
         LastSelectedProfileIds = settings.LastSelectedProfileIds.ToList(),
         LastGameName = settings.LastGameName,
         RecentGameNames = settings.RecentGameNames.ToList(),
-        // ClearBrowserDataOnNextStart, MultiInstanceConsentGranted, and
-        // UnsignedUpdatesConsentGranted are deliberately reset for imported data.
+        // ClearBrowserDataOnNextStart and UnsignedUpdatesConsentGranted are
+        // deliberately reset for imported data.
         ClearBrowserDataOnNextStart = false,
-        MultiInstanceConsentGranted = false,
         RobloxSettingsConsentGranted = false,
         UnsignedUpdatesConsentGranted = false,
         GameSettings = settings.GameSettings?.Clone() ?? new GameSettings(),

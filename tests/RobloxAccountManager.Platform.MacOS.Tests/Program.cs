@@ -227,7 +227,6 @@ Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblo
         var buildRequest = new MacManagedRuntimeRequest(
             sourceBundle,
             "single-runtime",
-            UserConsented: true,
             Level: MacLaunchLevel.ManagedRuntime);
         var built = await builder.BuildAsync(buildRequest);
         Check(built.Status == MacRuntimeBuildStatus.Built && built.RuntimePath is not null,
@@ -259,20 +258,16 @@ Console.WriteLine("PASS: macOS launcher composes without a maintainer-only Roblo
         var coreStrategy = new MacCoreMultiInstanceStrategy(
             slotManager: slotManager,
             bundleDiscovery: testDiscovery);
-        var deniedPreparation = await coreStrategy.PrepareAsync(new Contracts.RobloxLaunchRequest(
+        var automaticPreparation = await coreStrategy.PrepareAsync(new Contracts.RobloxLaunchRequest(
             "test-account",
             _ => ValueTask.FromResult(new Uri("roblox-player:1+gameinfo:test")),
             PreferredMacLevel: Contracts.MacLaunchLevel.ManagedSlots,
-            RobloxBundlePath: sourceBundle,
-            UserConsentedToMultiInstanceChanges: false));
-        Check(!deniedPreparation.Succeeded && deniedPreparation.DiagnosticCode == "consent-required",
-            "macOS managed-runtime preparation did not enforce explicit consent.");
+            RobloxBundlePath: sourceBundle));
+        Check(automaticPreparation.DiagnosticCode != "consent-required",
+            "macOS managed-runtime preparation retained the removed user-consent gate.");
         if (OperatingSystem.IsMacOS())
         {
-            var prepared = await coreStrategy.PrepareAsync(deniedPreparation.Request with
-            {
-                UserConsentedToMultiInstanceChanges = true
-            });
+            var prepared = automaticPreparation;
             Check(prepared.Succeeded
                   && prepared.ActiveMacLevel == Contracts.MacLaunchLevel.ManagedSlots
                   && prepared.Request.RobloxBundlePath?.Contains("slot-1", StringComparison.Ordinal) == true
@@ -512,10 +507,19 @@ try
         Path.Combine(tempRoot, "Roblox.app"));
     Check(!registry.IsRegistered(identity),
         "A discovered identity was treated as managed before explicit registration.");
-    registry.Register(identity);
+    registry.Register(identity, "account-a");
     Check(registry.IsRegistered(identity), "An explicitly registered identity was not retained.");
+    Check(registry.GetAccountId(identity) == "account-a",
+        "The managed registry did not retain the verified account binding.");
     registry.Unregister(identity);
     Check(!registry.IsRegistered(identity), "An unregistered identity remained managed.");
+    await File.WriteAllTextAsync(registryPath, System.Text.Json.JsonSerializer.Serialize(new[] { identity }));
+    Check(registry.IsRegistered(identity) && registry.GetAccountId(identity) is null,
+        "The managed registry did not accept the legacy identity-only schema.");
+    registry.Register(identity, "account-b");
+    Check(registry.GetAccountId(identity) == "account-b",
+        "A legacy registration was not upgraded with an account binding.");
+    registry.Unregister(identity);
 
     var robloxSettingsPath = Path.Combine(tempRoot, "GlobalBasicSettings_13.xml");
     var robloxEnginePath = Path.Combine(tempRoot, "ClientAppSettings.json");

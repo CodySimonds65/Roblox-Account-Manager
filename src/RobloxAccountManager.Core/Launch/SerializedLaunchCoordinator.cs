@@ -45,16 +45,7 @@ public sealed class SerializedLaunchCoordinator
             for (var attempt = 1; attempt <= request.MaxAttempts; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                RobloxLaunchPreparation preparation;
-                try
-                {
-                    preparation = await _multiInstanceStrategy.PrepareAsync(request, cancellationToken).ConfigureAwait(false);
-                }
-                catch (InvalidOperationException exception) when (exception.Message == "consent-required")
-                {
-                    attempts.Add(new LaunchAttemptDiagnostic(attempt, LaunchFailureKind.LauncherRejected, "consent-required"));
-                    return new LaunchResult(false, null, attempts, LaunchFailureKind.LauncherRejected);
-                }
+                var preparation = await _multiInstanceStrategy.PrepareAsync(request, cancellationToken).ConfigureAwait(false);
                 if (!preparation.Succeeded)
                 {
                     var failureKind = preparation.FailureKind == LaunchFailureKind.None

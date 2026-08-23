@@ -154,7 +154,6 @@ public sealed record MacBundleInfo(
 public sealed record MacManagedRuntimeRequest(
     string SourceBundlePath,
     string RuntimeName,
-    bool UserConsented,
     bool ForceRebuild = false,
     MacLaunchLevel Level = MacLaunchLevel.ManagedRuntime);
 
@@ -163,7 +162,6 @@ public enum MacRuntimeBuildStatus
     Built,
     Reused,
     Busy,
-    ConsentRequired,
     InvalidSource,
     Failed
 }
