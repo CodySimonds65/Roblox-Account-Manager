@@ -220,6 +220,24 @@ try
     Require(loadedAccounts.Count == 1 && loadedAccounts[0].Label == "Imported" && loadedAccounts[0].EmbedInClients,
         "Portable account storage did not round-trip the Clients-panel profile option.");
 
+    var duplicateId = "duplicate-profile-id";
+    await File.WriteAllTextAsync(paths.Accounts, JsonSerializer.Serialize(new List<AccountProfile>
+    {
+        new() { Id = duplicateId, Label = "First duplicate" },
+        new() { Id = duplicateId, Label = "Second duplicate" },
+        new() { Id = "", Label = "Blank id" }
+    }));
+    var repairedAccounts = await accounts.LoadAsync();
+    Require(repairedAccounts.Count == 3
+            && repairedAccounts[0].Id == duplicateId
+            && repairedAccounts.Select(account => account.Id).Distinct(StringComparer.Ordinal).Count() == 3
+            && repairedAccounts.All(account => !string.IsNullOrWhiteSpace(account.Id)),
+        "Account loading did not repair duplicate or blank profile IDs before Clients overlay indexing.");
+    var persistedRepairedAccounts = JsonSerializer.Deserialize<List<AccountProfile>>(
+        await File.ReadAllTextAsync(paths.Accounts)) ?? [];
+    Require(persistedRepairedAccounts.Select(account => account.Id).Distinct(StringComparer.Ordinal).Count() == 3,
+        "Repaired profile IDs were not persisted for the next launch.");
+
     var exportPath = Path.Combine(storeRoot, "profile-export.json");
     var transferSettings = new LauncherSettings
     {

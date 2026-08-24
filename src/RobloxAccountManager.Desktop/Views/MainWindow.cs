@@ -112,7 +112,7 @@ public sealed class MainWindow : Window
         Width = 1380;
         Height = 860;
         MinWidth = 1080;
-        MinHeight = 700;
+        MinHeight = DesktopPanelLayoutPolicy.WindowMinimumHeight;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Background = AppBackgroundBrush;
         Foreground = TextBrush;
@@ -152,9 +152,9 @@ public sealed class MainWindow : Window
             RowDefinitions = new RowDefinitions
             {
                 new RowDefinition(GridLength.Auto),
-                new RowDefinition(1.2, GridUnitType.Star) { MinHeight = 160 },
+                new RowDefinition(1.2, GridUnitType.Star) { MinHeight = DesktopPanelLayoutPolicy.ContentMinimumHeight },
                 new RowDefinition(6, GridUnitType.Pixel),
-                new RowDefinition(1, GridUnitType.Star) { MinHeight = 130 }
+                new RowDefinition(1, GridUnitType.Star) { MinHeight = DesktopPanelLayoutPolicy.ActivityMinimumHeight }
             },
             RowSpacing = 14,
             Margin = new Thickness(0, 2, 0, 0),
@@ -683,8 +683,16 @@ public sealed class MainWindow : Window
         var title = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         title.Children.Add(new TextBlock { Text = "Activity", FontSize = 13, FontWeight = FontWeight.SemiBold });
         title.Children.Add(new TextBlock { Text = "Live diagnostics", FontSize = 11, Foreground = MutedTextBrush, VerticalAlignment = VerticalAlignment.Center });
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, HorizontalAlignment = HorizontalAlignment.Right };
-        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, HorizontalAlignment = HorizontalAlignment.Left };
+        var controlsScroll = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Content = controls
+        };
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 8 };
         header.Children.Add(title);
 
         _activityTimeout.ItemsSource = new[] { "30s", "45s", "60s", "90s" };
@@ -731,8 +739,8 @@ public sealed class MainWindow : Window
             _viewModel.AppendActivity("Activity log copied to the clipboard.");
         };
         controls.Children.Add(_copyActivity);
-        Grid.SetColumn(controls, 1);
-        header.Children.Add(controls);
+        Grid.SetColumn(controlsScroll, 1);
+        header.Children.Add(controlsScroll);
         layout.Children.Add(header);
 
         _queueSummary.Margin = new Thickness(0, 0, 0, 0);
@@ -985,7 +993,8 @@ public sealed class MainWindow : Window
         {
             ItemsSource = _viewModel.Presets,
             SelectedItem = selectedPreset,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Width = 260,
             MinWidth = 260,
             Background = InputBrush,
             Foreground = TextBrush,
@@ -1006,7 +1015,8 @@ public sealed class MainWindow : Window
                 presetPicker.SelectedItem = filteredPresets.FirstOrDefault();
             }
         };
-        var presetActions = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 5 };
+        var presetActions = new WrapPanel { Orientation = Orientation.Horizontal };
+        presetPicker.Margin = new Thickness(0, 0, 5, 5);
         presetActions.Children.Add(presetPicker);
         var presetActionNames = new[]
         {
@@ -1025,6 +1035,7 @@ public sealed class MainWindow : Window
                 Width = 34,
                 Height = 34,
                 Padding = new Thickness(0),
+                Margin = new Thickness(0, 0, 5, 5),
                 IsEnabled = presetActionNames[i].Key is "add" or "import" or "export"
                     || presetActionNames[i].Key is "duplicate" && selectedPreset?.Url is not null && selectedPreset.Url.Length > 0
                     || presetActionNames[i].Key is "remove" or "edit" && selectedPreset is { IsBuiltIn: false }
@@ -1033,7 +1044,6 @@ public sealed class MainWindow : Window
             StyleButton(action, secondary: true);
             var actionKey = presetActionNames[i].Key;
             action.Click += async (_, _) => await HandlePresetActionAsync(actionKey);
-            Grid.SetColumn(action, i + 1);
             presetActions.Children.Add(action);
         }
 
@@ -1061,15 +1071,15 @@ public sealed class MainWindow : Window
             customUrl.Text = DesktopPresetPolicy.GetUrlEditorValue(preset);
             customUrl.IsReadOnly = !DesktopPresetPolicy.IsCustomUrlPreset(preset);
         };
-        var customUrlPanel = new StackPanel { Spacing = 5, Margin = new Thickness(12, 0, 0, 0) };
+        var customUrlPanel = new StackPanel { Spacing = 5, Margin = new Thickness(0, 0, 12, 5) };
         customUrlPanel.Children.Add(new TextBlock { Text = "CUSTOM ROBLOX URL", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush });
         customUrlPanel.Children.Add(customUrl);
 
-        var login = new Button { Content = "Login / Home", Margin = new Thickness(12, 16, 8, 0), VerticalAlignment = VerticalAlignment.Top };
+        var login = new Button { Content = "Login / Home", Margin = new Thickness(0, 0, 8, 5), VerticalAlignment = VerticalAlignment.Top };
         StyleButton(login, secondary: true);
         login.Click += async (_, _) => await ShowLoginAsync();
         var accounts = _viewModel.Accounts.Where(account => _queueSelectedAccounts.Contains(account.Id)).ToList();
-        var launch = new Button { Content = "▶  Auto-launch selected", IsEnabled = _launches is not null && _launchCancellation is null, Margin = new Thickness(0, 16, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+        var launch = new Button { Content = "▶  Auto-launch selected", IsEnabled = _launches is not null && _launchCancellation is null, Margin = new Thickness(0, 0, 0, 5), VerticalAlignment = VerticalAlignment.Top };
         _launchSelected = launch;
         StyleButton(launch);
         launch.Click += async (_, _) =>
@@ -1090,18 +1100,22 @@ public sealed class MainWindow : Window
             Margin = new Thickness(0, 0, 0, 0),
             Child = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("500,*,Auto,Auto"),
-                ColumnSpacing = 0,
-                Children = { presetControls, customUrlPanel, login, launch }
+                RowDefinitions = new RowDefinitions("Auto,Auto"),
+                RowSpacing = 8,
+                Children = { presetControls }
             }
         };
-        Grid.SetColumn(customUrlPanel, 1);
-        Grid.SetColumn(login, 2);
-        Grid.SetColumn(launch, 3);
+        var presetBarLayout = (Grid)presetBar.Child!;
+        var presetBarActions = new WrapPanel { Orientation = Orientation.Horizontal };
+        presetBarActions.Children.Add(customUrlPanel);
+        presetBarActions.Children.Add(login);
+        presetBarActions.Children.Add(launch);
+        Grid.SetRow(presetBarActions, 1);
+        presetBarLayout.Children.Add(presetBarActions);
 
         var sessionHeader = BuildSessionNavigationBar();
 
-        _browserHost.MinHeight = 160;
+        _browserHost.MinHeight = DesktopPanelLayoutPolicy.BrowserMinimumHeight;
         _browserHost.HorizontalAlignment = HorizontalAlignment.Stretch;
         _browserHost.VerticalAlignment = VerticalAlignment.Stretch;
         _browserHost.HorizontalContentAlignment = HorizontalAlignment.Stretch;
@@ -1204,8 +1218,16 @@ public sealed class MainWindow : Window
         clients.Click += (_, _) => SelectPage("clients");
         sessionActions.Children.Add(browse);
         sessionActions.Children.Add(clients);
-        Grid.SetColumn(sessionActions, 1);
-        sessionHeader.Children.Add(sessionActions);
+        var sessionActionsScroll = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalContentAlignment = HorizontalAlignment.Right,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Content = sessionActions
+        };
+        Grid.SetColumn(sessionActionsScroll, 1);
+        sessionHeader.Children.Add(sessionActionsScroll);
         return sessionHeader;
     }
 
@@ -1404,9 +1426,12 @@ public sealed class MainWindow : Window
             SelectionMode = SelectionMode.Single,
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(0),
+            MinHeight = 54,
             ItemsPanel = new FuncTemplate<Panel?>(() => new StackPanel { Orientation = Orientation.Horizontal }),
             ItemTemplate = new FuncDataTemplate<ClientTabItem>((item, _) => item is null ? null : BuildClientTab(item))
         };
+        ScrollViewer.SetHorizontalScrollBarVisibility(_clientTabsControl, ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(_clientTabsControl, ScrollBarVisibility.Disabled);
         _clientTabsControl.SelectionChanged += async (_, _) =>
         {
             if (_suppressClientSelection || _clientTabsControl.SelectedItem is not ClientTabItem selected) return;
@@ -1540,7 +1565,9 @@ public sealed class MainWindow : Window
             cancellationToken.ThrowIfCancellationRequested();
             var windows = await _clients.GetWindowsAsync(cancellationToken);
             EnsureClientOverlayActive(generation, cancellationToken);
-            var accountsById = _viewModel.Accounts.ToDictionary(account => account.Id, StringComparer.Ordinal);
+            var accountsById = _viewModel.Accounts
+                .GroupBy(account => account.Id, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
             var eligible = windows
                 .Where(window => !string.IsNullOrWhiteSpace(window.AccountId)
                     && accountsById.TryGetValue(window.AccountId, out var account)
@@ -1730,7 +1757,9 @@ public sealed class MainWindow : Window
     private void ApplyClientDiagnostics(IReadOnlyList<MacOverlayClientDiagnostic> diagnostics)
     {
         if (diagnostics.Count == 0 || _clientTabs.Count == 0) return;
-        var byAccount = diagnostics.ToDictionary(diagnostic => diagnostic.AccountId, StringComparer.Ordinal);
+        var byAccount = diagnostics
+            .GroupBy(diagnostic => diagnostic.AccountId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
         _suppressClientSelection = true;
         try
         {

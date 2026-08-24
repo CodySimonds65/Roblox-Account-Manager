@@ -51,6 +51,17 @@ Require(!ClientOverlayFailureText.IsRetryable(MacOverlayOperationResult.Failure(
                 "restore-overlay-failed",
                 clients: [new MacOverlayClientDiagnostic("account", 1, "accessibility-window-not-settled", false, 0, 0, "restore", true)])),
     "Hard restore failures were retried automatically or transient restore failures were not retryable.");
+Require(DesktopPanelLayoutPolicy.CanRenderWithoutClipping(
+            DesktopPanelLayoutPolicy.ContentMinimumHeight,
+            DesktopPanelLayoutPolicy.ActivityMinimumHeight)
+        && !DesktopPanelLayoutPolicy.CanRenderWithoutClipping(
+            DesktopPanelLayoutPolicy.ContentMinimumHeight - 1,
+            DesktopPanelLayoutPolicy.ActivityMinimumHeight)
+        && !DesktopPanelLayoutPolicy.CanRenderWithoutClipping(
+            DesktopPanelLayoutPolicy.ContentMinimumHeight,
+            DesktopPanelLayoutPolicy.ActivityMinimumHeight - 1)
+        && DesktopPanelLayoutPolicy.WindowMinimumHeight >= DesktopPanelLayoutPolicy.RequiredWindowHeight,
+    "Desktop panel minimums did not protect the Clients, Browse, and Activity content from splitter clipping.");
 
 try
 {
