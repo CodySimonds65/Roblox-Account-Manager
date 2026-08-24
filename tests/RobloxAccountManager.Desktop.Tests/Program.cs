@@ -12,6 +12,26 @@ static void Require(bool condition, string message)
     if (!condition) throw new InvalidOperationException(message);
 }
 
+var firstRefreshStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var releaseFirstRefresh = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var refreshKinds = new List<bool>();
+var refreshScheduler = new ClientOverlayRefreshScheduler(async explicitSelection =>
+{
+    refreshKinds.Add(explicitSelection);
+    if (refreshKinds.Count == 1)
+    {
+        firstRefreshStarted.TrySetResult();
+        await releaseFirstRefresh.Task;
+    }
+});
+var passiveRefresh = refreshScheduler.RequestAsync();
+await firstRefreshStarted.Task;
+await refreshScheduler.RequestAsync(explicitUserSelection: true);
+releaseFirstRefresh.TrySetResult();
+await passiveRefresh;
+Require(refreshKinds.SequenceEqual([false, true]),
+    "An explicit client-tab selection was dropped while a passive overlay refresh was active.");
+
 try
 {
     _ = DesktopComposition.Create(RobloxPlatform.Windows);

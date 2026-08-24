@@ -1029,6 +1029,81 @@ Check(!permissionResult.Succeeded
       && permissionFixture.Accessibility.MinimizeCalls == 0
       && permissionFixture.Accessibility.RaiseCalls == 0,
     "Accessibility permission denial mutated or inspected client windows.");
+permissionFixture.Accessibility.Capability = MacCapabilityResult.Supported();
+var permissionRecovery = await permissionManager.ShowOnlyAsync(
+    permissionFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(permissionRecovery.Succeeded,
+    "The overlay did not recover after Accessibility permission became available.");
+
+var fullscreenFixture = CreateOverlayFixture();
+var fullscreenPid = fullscreenFixture.Windows[1].Process.Pid;
+fullscreenFixture.Accessibility.Windows[fullscreenPid] =
+    fullscreenFixture.Accessibility.Windows[fullscreenPid] with { IsFullScreen = true };
+var fullscreenManager = new MacClientOverlayManager(
+    fullscreenFixture.Locator,
+    fullscreenFixture.Accessibility);
+var fullscreenResult = await fullscreenManager.ShowOnlyAsync(
+    fullscreenFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(!fullscreenResult.Succeeded
+      && fullscreenResult.DiagnosticCode == "fullscreen-window-not-supported"
+      && fullscreenResult.AccountId == "account-b"
+      && fullscreenFixture.Accessibility.FrameCalls == 0
+      && fullscreenFixture.Accessibility.MinimizeCalls == 0
+      && fullscreenFixture.Accessibility.RaiseCalls == 0,
+    "A fullscreen opted-in client allowed another Roblox window to mutate before preflight completed.");
+
+var partialReadinessFixture = CreateOverlayFixture();
+partialReadinessFixture.Accessibility.UnavailableProcessIds.Add(
+    partialReadinessFixture.Windows[1].Process.Pid);
+var partialReadinessManager = new MacClientOverlayManager(
+    partialReadinessFixture.Locator,
+    partialReadinessFixture.Accessibility);
+var partialReadinessResult = await partialReadinessManager.ShowOnlyAsync(
+    partialReadinessFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(!partialReadinessResult.Succeeded
+      && partialReadinessResult.DiagnosticCode == "accessibility-no-windows"
+      && partialReadinessResult.AccountId == "account-b"
+      && partialReadinessResult.Clients.Count == 2
+      && partialReadinessResult.Clients.Count(client => client.IsReady) == 1
+      && partialReadinessFixture.Accessibility.FrameCalls == 0
+      && partialReadinessFixture.Accessibility.MinimizeCalls == 0
+      && partialReadinessFixture.Accessibility.RaiseCalls == 0
+      && partialReadinessFixture.Accessibility.Windows.Values.All(window => !window.IsMinimized),
+    "An unresolved opted-in client mutated or minimized another Roblox window during preflight.");
+partialReadinessFixture.Accessibility.UnavailableProcessIds.Clear();
+var recoveredReadinessResult = await partialReadinessManager.ShowOnlyAsync(
+    partialReadinessFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(recoveredReadinessResult.Succeeded
+      && partialReadinessFixture.Accessibility.Windows.Values.Count(window => !window.IsMinimized) == 1,
+    "The overlay did not recover after every opted-in client published a usable window.");
+var dockActivatedPid = partialReadinessFixture.Windows[1].Process.Pid;
+partialReadinessFixture.Accessibility.Windows[dockActivatedPid] =
+    partialReadinessFixture.Accessibility.Windows[dockActivatedPid] with { IsMinimized = false };
+partialReadinessFixture.Accessibility.UnavailableProcessIds.Add(dockActivatedPid);
+var minimizeRequestBaseline = partialReadinessFixture.Accessibility.MinimizeRequests.Count;
+var dockActivationRefresh = await partialReadinessManager.ShowOnlyAsync(
+    partialReadinessFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(!dockActivationRefresh.Succeeded
+      && !partialReadinessFixture.Accessibility.Windows[dockActivatedPid].IsMinimized
+      && !partialReadinessFixture.Accessibility.MinimizeRequests
+          .Skip(minimizeRequestBaseline)
+          .Any(request => request.ProcessId == dockActivatedPid && request.Minimized),
+    "A passive refresh immediately re-minimized a Dock-activated client whose AX window was unavailable.");
 
 var staleFixture = CreateOverlayFixture();
 var staleManager = new MacClientOverlayManager(staleFixture.Locator, staleFixture.Accessibility);
@@ -1475,14 +1550,19 @@ sealed class OverlayAccessibilityFake : IMacAccessibilityApi
     public int MinimizeCalls { get; private set; }
     public int RaiseCalls { get; private set; }
     public bool FailFrameWrites { get; set; }
+    public HashSet<int> UnavailableProcessIds { get; } = [];
+    public List<(int ProcessId, bool Minimized)> MinimizeRequests { get; } = [];
     public List<(int ProcessId, string WindowIdentifier)> Raised { get; } = [];
 
     public MacCapabilityResult GetCapability() => Capability;
 
-    public MacAccessibleWindow? FindMainWindow(Contracts.RobloxProcessIdentity process)
+    public MacAccessibilityWindowProbe ProbeMainWindow(Contracts.RobloxProcessIdentity process)
     {
         FindCalls++;
-        return Windows.TryGetValue(process.Pid, out var window) ? window : null;
+        return !UnavailableProcessIds.Contains(process.Pid)
+               && Windows.TryGetValue(process.Pid, out var window)
+            ? MacAccessibilityWindowProbe.Ready(window, 1, 1)
+            : MacAccessibilityWindowProbe.Failure("accessibility-no-windows");
     }
 
     public bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame)
@@ -1497,6 +1577,7 @@ sealed class OverlayAccessibilityFake : IMacAccessibilityApi
     public bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized)
     {
         MinimizeCalls++;
+        MinimizeRequests.Add((process.Pid, minimized));
         if (!TryGetWindow(process.Pid, windowIdentifier, out var window)) return false;
         Windows[process.Pid] = window with { IsMinimized = minimized };
         return true;

@@ -18,10 +18,31 @@ public sealed record MacAccessibleWindow(
     bool IsMinimized,
     bool IsFullScreen);
 
+public sealed record MacAccessibilityWindowProbe(
+    string DiagnosticCode,
+    MacAccessibleWindow? Window,
+    int TotalWindowCount,
+    int EligibleWindowCount)
+{
+    public bool IsReady => Window is not null;
+
+    public static MacAccessibilityWindowProbe Ready(
+        MacAccessibleWindow window,
+        int totalWindowCount,
+        int eligibleWindowCount) =>
+        new("accessible-window-ready", window, totalWindowCount, eligibleWindowCount);
+
+    public static MacAccessibilityWindowProbe Failure(
+        string diagnosticCode,
+        int totalWindowCount = 0,
+        int eligibleWindowCount = 0) =>
+        new(diagnosticCode, null, totalWindowCount, eligibleWindowCount);
+}
+
 public interface IMacAccessibilityApi
 {
     MacCapabilityResult GetCapability();
-    MacAccessibleWindow? FindMainWindow(Contracts.RobloxProcessIdentity process);
+    MacAccessibilityWindowProbe ProbeMainWindow(Contracts.RobloxProcessIdentity process);
     bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame);
     bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized);
     bool TryRaise(
@@ -63,21 +84,52 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
                 "Grant Accessibility permission in System Settings > Privacy & Security > Accessibility.");
     }
 
-    public MacAccessibleWindow? FindMainWindow(Contracts.RobloxProcessIdentity process)
+    public MacAccessibilityWindowProbe ProbeMainWindow(Contracts.RobloxProcessIdentity process)
     {
-        if (!GetCapability().IsSupported || !IsCurrentManagedIdentity(process)) return null;
-        return WithApplication(process.Pid, application =>
+        var capability = GetCapability();
+        if (!capability.IsSupported)
+            return MacAccessibilityWindowProbe.Failure(capability.Code);
+        if (!IsCurrentManagedIdentity(process))
+            return MacAccessibilityWindowProbe.Failure("stale-process-identity");
+        if (TryProbeRetainedWindow(process, out var retainedProbe))
+            return retainedProbe;
+
+        var probe = WithApplication(process.Pid, application =>
         {
-            var candidates = EnumerateWindows(application);
+            var enumeration = EnumerateWindows(application);
             try
             {
-                var selected = SelectWindow(candidates);
-                return selected is not null && IsCurrentManagedIdentity(process)
-                    ? selected.Snapshot with { Identifier = GetOrCreateWindowIdentifier(process, selected.Element) }
-                    : null;
+                var selected = SelectWindow(enumeration.Candidates);
+                if (selected is null)
+                {
+                    var code = enumeration.TotalWindowCount == 0
+                        ? "accessibility-no-windows"
+                        : enumeration.Candidates.Count == 0
+                            ? "accessibility-no-eligible-window"
+                            : "accessibility-window-ambiguous";
+                    return MacAccessibilityWindowProbe.Failure(
+                        code,
+                        enumeration.TotalWindowCount,
+                        enumeration.Candidates.Count);
+                }
+                if (!IsCurrentManagedIdentity(process))
+                    return MacAccessibilityWindowProbe.Failure(
+                        "stale-process-identity",
+                        enumeration.TotalWindowCount,
+                        enumeration.Candidates.Count);
+
+                var window = selected.Snapshot with
+                {
+                    Identifier = RetainWindow(process, selected.Element)
+                };
+                return MacAccessibilityWindowProbe.Ready(
+                    window,
+                    enumeration.TotalWindowCount,
+                    enumeration.Candidates.Count);
             }
-            finally { ReleaseCandidates(candidates); }
+            finally { ReleaseCandidates(enumeration.Candidates); }
         });
+        return probe ?? MacAccessibilityWindowProbe.Failure("accessibility-application-unavailable");
     }
 
     public bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame)
@@ -154,34 +206,75 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     {
         if (!OperatingSystem.IsMacOS() || !IsCurrentManagedIdentity(process)) return false;
         RetainedWindow retained;
+        nint retainedElement;
         lock (_windowsGate)
         {
             if (!_retainedWindows.TryGetValue(identifier, out retained!)
                 || !retained.Process.Matches(process)) return false;
+            retainedElement = NativeMethods.CFRetain(retained.Element);
         }
-        return WithApplication(process.Pid, application =>
+        try
         {
-            var candidates = EnumerateWindows(application);
-            try
-            {
-                var matches = candidates.Where(candidate =>
-                    NativeMethods.CFEqual(candidate.Element, retained.Element)).ToArray();
-                return matches.Length == 1
-                    && IsCurrentManagedIdentity(process)
-                    && action(matches[0].Element);
-            }
-            finally { ReleaseCandidates(candidates); }
-        });
+            return NativeMethods.AXUIElementGetPid(retainedElement, out var actualPid) == 0
+                && actualPid == process.Pid
+                && IsCurrentManagedIdentity(process)
+                && action(retainedElement);
+        }
+        finally { Release(retainedElement); }
     }
 
-    private string GetOrCreateWindowIdentifier(Contracts.RobloxProcessIdentity process, nint element)
+    private bool TryProbeRetainedWindow(
+        Contracts.RobloxProcessIdentity process,
+        out MacAccessibilityWindowProbe probe)
     {
+        string? identifier = null;
+        nint element = nint.Zero;
         lock (_windowsGate)
         {
             var existing = _retainedWindows.FirstOrDefault(pair =>
-                pair.Value.Process.Matches(process)
-                && NativeMethods.CFEqual(pair.Value.Element, element));
-            if (!string.IsNullOrWhiteSpace(existing.Key)) return existing.Key;
+                pair.Value.Process.Matches(process));
+            if (!string.IsNullOrWhiteSpace(existing.Key))
+            {
+                identifier = existing.Key;
+                element = NativeMethods.CFRetain(existing.Value.Element);
+            }
+        }
+
+        if (identifier is null || element == nint.Zero)
+        {
+            probe = null!;
+            return false;
+        }
+
+        try
+        {
+            if (TryReadWindowCandidate(element, process.Pid, out var candidate))
+            {
+                probe = MacAccessibilityWindowProbe.Ready(
+                    candidate.Snapshot with { Identifier = identifier },
+                    totalWindowCount: 1,
+                    eligibleWindowCount: 1);
+                return true;
+            }
+        }
+        finally { Release(element); }
+
+        ForgetWindow(process, identifier);
+        probe = null!;
+        return false;
+    }
+
+    private string RetainWindow(Contracts.RobloxProcessIdentity process, nint element)
+    {
+        lock (_windowsGate)
+        {
+            foreach (var stale in _retainedWindows
+                         .Where(pair => pair.Value.Process.Matches(process))
+                         .ToArray())
+            {
+                _retainedWindows.Remove(stale.Key);
+                Release(stale.Value.Element);
+            }
 
             var identifier = $"ax-window-{Guid.NewGuid():N}";
             _ = NativeMethods.CFRetain(element);
@@ -228,10 +321,10 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         return ordered[0];
     }
 
-    private static IReadOnlyList<WindowCandidate> EnumerateWindows(nint application)
+    private static WindowEnumeration EnumerateWindows(nint application)
     {
         var array = CopyAttribute(application, "AXWindows");
-        if (array == nint.Zero) return Array.Empty<WindowCandidate>();
+        if (array == nint.Zero) return new WindowEnumeration(0, []);
         try
         {
             var count = NativeMethods.CFArrayGetCount(array);
@@ -239,28 +332,40 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
             for (nint index = 0; index < count; index++)
             {
                 var window = NativeMethods.CFArrayGetValueAtIndex(array, index);
-                if (window == nint.Zero || NativeMethods.AXUIElementGetPid(window, out _) != 0) continue;
-                var role = CopyStringAttribute(window, "AXRole");
-                var subrole = CopyStringAttribute(window, "AXSubrole");
-                if (!string.Equals(role, "AXWindow", StringComparison.Ordinal)
-                    || (!string.IsNullOrWhiteSpace(subrole)
-                        && !string.Equals(subrole, "AXStandardWindow", StringComparison.Ordinal))) continue;
-                if (!TryReadFrame(window, out var frame) || !frame.IsValid) continue;
-                var title = CopyStringAttribute(window, "AXTitle");
+                if (!TryReadWindowCandidate(window, expectedPid: null, out var candidate)) continue;
                 _ = NativeMethods.CFRetain(window);
-                candidates.Add(new WindowCandidate(
-                    window,
-                    new MacAccessibleWindow(
-                        string.Empty,
-                        title,
-                        frame,
-                        CopyBooleanAttribute(window, "AXMinimized"),
-                        CopyBooleanAttribute(window, "AXFullScreen")),
-                    CopyBooleanAttribute(window, "AXMain")));
+                candidates.Add(candidate);
             }
-            return candidates;
+            return new WindowEnumeration((int)count, candidates);
         }
         finally { Release(array); }
+    }
+
+    private static bool TryReadWindowCandidate(
+        nint window,
+        int? expectedPid,
+        out WindowCandidate candidate)
+    {
+        candidate = null!;
+        if (window == nint.Zero
+            || NativeMethods.AXUIElementGetPid(window, out var actualPid) != 0
+            || expectedPid is int pid && actualPid != pid) return false;
+        var role = CopyStringAttribute(window, "AXRole");
+        var subrole = CopyStringAttribute(window, "AXSubrole");
+        if (!string.Equals(role, "AXWindow", StringComparison.Ordinal)
+            || (!string.IsNullOrWhiteSpace(subrole)
+                && !string.Equals(subrole, "AXStandardWindow", StringComparison.Ordinal))) return false;
+        if (!TryReadFrame(window, out var frame) || !frame.IsValid) return false;
+        candidate = new WindowCandidate(
+            window,
+            new MacAccessibleWindow(
+                string.Empty,
+                CopyStringAttribute(window, "AXTitle"),
+                frame,
+                CopyBooleanAttribute(window, "AXMinimized"),
+                CopyBooleanAttribute(window, "AXFullScreen")),
+            CopyBooleanAttribute(window, "AXMain"));
+        return true;
     }
 
     private static bool TryReadFrame(nint window, out MacWindowFrame frame)
@@ -368,6 +473,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     }
 
     private sealed record WindowCandidate(nint Element, MacAccessibleWindow Snapshot, bool IsMain);
+    private sealed record WindowEnumeration(int TotalWindowCount, IReadOnlyList<WindowCandidate> Candidates);
     private sealed record RetainedWindow(Contracts.RobloxProcessIdentity Process, nint Element);
     [StructLayout(LayoutKind.Sequential)] private readonly record struct CGPoint(double X, double Y);
     [StructLayout(LayoutKind.Sequential)] private readonly record struct CGSize(double Width, double Height);
@@ -391,7 +497,6 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         [DllImport(CoreFoundation)] internal static extern nint CFArrayGetCount(nint array);
         [DllImport(CoreFoundation)] internal static extern nint CFArrayGetValueAtIndex(nint array, nint index);
         [DllImport(CoreFoundation)] internal static extern nint CFRetain(nint value);
-        [DllImport(CoreFoundation)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool CFEqual(nint left, nint right);
         [DllImport(CoreFoundation)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool CFBooleanGetValue(nint value);
         [DllImport(CoreFoundation)] internal static extern void CFRelease(nint value);
     }

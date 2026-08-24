@@ -19,6 +19,17 @@ Shared business rules, persisted-data models, plugin contracts, and serializatio
 platform-neutral libraries. UI controls, native transports, and operating-system integration remain
 inside their frontend or platform projects.
 
+### macOS Clients overlay
+
+The macOS Clients panel keeps Roblox as a separate top-level window and uses Accessibility only for
+verified frame, minimized-state, and explicit-user-selection raise operations. A refresh must resolve
+every opted-in managed process before changing any window. Discovery or identity failures restore
+previously tracked state and must never minimize a newly discovered or unresolved client. Passive
+timer refreshes are coalesced, while an explicit tab selection is retained and runs next.
+
+Accessibility probe and overlay state changes are written to the Activity log without titles or
+authentication data. Repeated identical timer results are deduplicated.
+
 ## Pull-request release candidates
 
 Every non-draft pull request produces a test-only GitHub draft containing an unsigned Windows x64
