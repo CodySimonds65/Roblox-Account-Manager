@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
@@ -88,6 +89,9 @@ public sealed class MainWindow : Window
     private CancellationTokenSource? _clientOverlayActivation;
     private long _clientOverlayGeneration;
     private volatile bool _launcherIsActive;
+    private bool _isClampingPanelLayout;
+    private GridLength? _activityHeightBeforeClamp;
+    private double _activityClampMaximumHeight;
     private readonly SemaphoreSlim _pageNavigationGate = new(1, 1);
 
     public MainWindow(
@@ -147,14 +151,22 @@ public sealed class MainWindow : Window
 
         var header = BuildWorkspaceHeader();
 
+        var contentRow = new RowDefinition(1.2, GridUnitType.Star)
+        {
+            MinHeight = DesktopPanelLayoutPolicy.ContentMinimumHeight
+        };
+        var activityRow = new RowDefinition(1, GridUnitType.Star)
+        {
+            MinHeight = DesktopPanelLayoutPolicy.ActivityMinimumHeight
+        };
         var page = new Grid
         {
             RowDefinitions = new RowDefinitions
             {
                 new RowDefinition(GridLength.Auto),
-                new RowDefinition(1.2, GridUnitType.Star) { MinHeight = DesktopPanelLayoutPolicy.ContentMinimumHeight },
+                contentRow,
                 new RowDefinition(6, GridUnitType.Pixel),
-                new RowDefinition(1, GridUnitType.Star) { MinHeight = DesktopPanelLayoutPolicy.ActivityMinimumHeight }
+                activityRow
             },
             RowSpacing = 14,
             Margin = new Thickness(0, 2, 0, 0),
@@ -176,11 +188,14 @@ public sealed class MainWindow : Window
             ShowsPreview = false,
             Cursor = new Cursor(StandardCursorType.SizeNorthSouth)
         };
+        ToolTip.SetTip(activitySplitter, "Drag to resize the workspace and Activity panel");
+        AutomationProperties.SetName(activitySplitter, "Resize activity log");
         Grid.SetRow(activitySplitter, 2);
         page.Children.Add(activitySplitter);
         var activityCard = BuildActivityCard();
         Grid.SetRow(activityCard, 3);
         page.Children.Add(activityCard);
+        page.LayoutUpdated += (_, _) => ClampPanelLayout(page, contentRow, activityRow, activitySplitter);
 
         var workspace = new Border
         {
@@ -228,6 +243,54 @@ public sealed class MainWindow : Window
         };
         Activated += (_, _) => _launcherIsActive = true;
         Deactivated += (_, _) => _launcherIsActive = false;
+    }
+
+    private void ClampPanelLayout(
+        Grid page,
+        RowDefinition contentRow,
+        RowDefinition activityRow,
+        GridSplitter activitySplitter)
+    {
+        if (_isClampingPanelLayout || page.Bounds.Height <= 0 || page.Children.Count == 0)
+            return;
+
+        var fixedHeight = page.Children[0].Bounds.Height
+            + activitySplitter.Bounds.Height
+            + page.RowSpacing * 3;
+        var maximumActivityHeight = DesktopPanelLayoutPolicy.GetMaximumActivityHeight(
+            page.Bounds.Height,
+            fixedHeight);
+
+        if (_activityHeightBeforeClamp is { } previousHeight
+            && maximumActivityHeight > _activityClampMaximumHeight + 1)
+        {
+            if (previousHeight.GridUnitType != GridUnitType.Pixel
+                || previousHeight.Value <= maximumActivityHeight + 0.5)
+            {
+                _isClampingPanelLayout = true;
+                try { activityRow.Height = previousHeight; }
+                finally { _isClampingPanelLayout = false; }
+                _activityHeightBeforeClamp = null;
+                _activityClampMaximumHeight = 0;
+                return;
+            }
+        }
+
+        if (activityRow.ActualHeight <= maximumActivityHeight + 0.5)
+            return;
+
+        _isClampingPanelLayout = true;
+        try
+        {
+            _activityHeightBeforeClamp ??= activityRow.Height;
+            _activityClampMaximumHeight = maximumActivityHeight;
+            activityRow.Height = new GridLength(maximumActivityHeight, GridUnitType.Pixel);
+            contentRow.MinHeight = DesktopPanelLayoutPolicy.ContentMinimumHeight;
+        }
+        finally
+        {
+            _isClampingPanelLayout = false;
+        }
     }
 
     private Control BuildWorkspaceHeader()
@@ -1090,6 +1153,26 @@ public sealed class MainWindow : Window
             await RunLaunchQueueAsync(presetPicker.SelectedItem as GamePreset, accounts, customUrl.Text);
         };
 
+        var presetBarLayout = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("*"),
+            RowSpacing = 8,
+            ColumnSpacing = 12,
+            ClipToBounds = true
+        };
+        presetBarLayout.Children.Add(presetControls);
+        presetBarLayout.Children.Add(customUrlPanel);
+        presetBarLayout.Children.Add(login);
+        presetBarLayout.Children.Add(launch);
+        presetBarLayout.SizeChanged += (_, _) => ApplyPresetBarLayout(
+            presetBarLayout,
+            presetControls,
+            customUrlPanel,
+            login,
+            launch);
+        ApplyPresetBarLayout(presetBarLayout, presetControls, customUrlPanel, login, launch);
+
         var presetBar = new Border
         {
             Background = SurfaceBrush,
@@ -1097,21 +1180,9 @@ public sealed class MainWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(14),
             Padding = new Thickness(15),
-            Margin = new Thickness(0, 0, 0, 0),
-            Child = new Grid
-            {
-                RowDefinitions = new RowDefinitions("Auto,Auto"),
-                RowSpacing = 8,
-                Children = { presetControls }
-            }
+            Margin = new Thickness(0),
+            Child = presetBarLayout
         };
-        var presetBarLayout = (Grid)presetBar.Child!;
-        var presetBarActions = new WrapPanel { Orientation = Orientation.Horizontal };
-        presetBarActions.Children.Add(customUrlPanel);
-        presetBarActions.Children.Add(login);
-        presetBarActions.Children.Add(launch);
-        Grid.SetRow(presetBarActions, 1);
-        presetBarLayout.Children.Add(presetBarActions);
 
         var sessionHeader = BuildSessionNavigationBar();
 
@@ -1121,6 +1192,7 @@ public sealed class MainWindow : Window
         _browserHost.HorizontalContentAlignment = HorizontalAlignment.Stretch;
         _browserHost.VerticalContentAlignment = VerticalAlignment.Stretch;
         _browserHost.Margin = new Thickness(0);
+        _browserHost.ClipToBounds = true;
         if (_viewModel.SelectedAccount is null)
         {
             _browserHost.Content = new StackPanel
@@ -1151,23 +1223,105 @@ public sealed class MainWindow : Window
         browserBody.Children.Add(progress);
         Grid.SetRow(_browserHost, 2);
         browserBody.Children.Add(_browserHost);
-        var browserCard = new Border { Background = SurfaceBrush, BorderBrush = ControlBorderBrush, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), ClipToBounds = true, Child = browserBody };
+        var browserHint = new TextBlock
+        {
+            Text = "Sessions stay isolated and local to this PC. Browser data is never included in exports.",
+            FontSize = 11,
+            Foreground = MutedTextBrush,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(3, 8, 3, 0)
+        };
+        var browserCardLayout = new Grid
+        {
+            RowDefinitions = new RowDefinitions("*,Auto"),
+            RowSpacing = 0,
+            ClipToBounds = true,
+            Children = { browserBody, browserHint }
+        };
+        Grid.SetRow(browserHint, 1);
+        var browserCard = new Border
+        {
+            Background = SurfaceBrush,
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            ClipToBounds = true,
+            Child = browserCardLayout
+        };
 
         var showPresetPanel = _viewModel.Settings.ShowGamePresetPanel;
         var workspace = new Grid
         {
-            RowDefinitions = new RowDefinitions(showPresetPanel ? "Auto,*,Auto" : "*,Auto"),
+            RowDefinitions = new RowDefinitions(showPresetPanel ? "Auto,*" : "*"),
             RowSpacing = 14,
             ClipToBounds = true
         };
         if (showPresetPanel) workspace.Children.Add(presetBar);
-        Grid.SetRow(browserCard, 1);
-        if (!showPresetPanel) Grid.SetRow(browserCard, 0);
+        Grid.SetRow(browserCard, showPresetPanel ? 1 : 0);
         workspace.Children.Add(browserCard);
-        var hint = new TextBlock { Text = "Sessions stay isolated and local to this PC. Browser data is never included in exports.", FontSize = 11, Foreground = MutedTextBrush, Margin = new Thickness(3, 0, 3, 0) };
-        Grid.SetRow(hint, showPresetPanel ? 2 : 1);
-        workspace.Children.Add(hint);
         return workspace;
+    }
+
+    private static void ApplyPresetBarLayout(
+        Grid layout,
+        StackPanel presetControls,
+        StackPanel customUrlPanel,
+        Button login,
+        Button launch)
+    {
+        var width = layout.Bounds.Width;
+        if (DesktopPanelLayoutPolicy.UseCompactPresetBar(width))
+        {
+            layout.RowDefinitions = new RowDefinitions("Auto");
+            layout.ColumnDefinitions = new ColumnDefinitions("500,*,Auto,Auto");
+            Grid.SetRow(presetControls, 0);
+            Grid.SetColumn(presetControls, 0);
+            Grid.SetColumnSpan(presetControls, 1);
+            Grid.SetRow(customUrlPanel, 0);
+            Grid.SetColumn(customUrlPanel, 1);
+            Grid.SetRow(login, 0);
+            Grid.SetColumn(login, 2);
+            Grid.SetRow(launch, 0);
+            Grid.SetColumn(launch, 3);
+            customUrlPanel.Margin = new Thickness(0, 0, 0, 0);
+            login.Margin = new Thickness(0);
+            launch.Margin = new Thickness(0);
+            return;
+        }
+
+        if (width >= 900)
+        {
+            layout.RowDefinitions = new RowDefinitions("Auto,Auto");
+            layout.ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto");
+            Grid.SetRow(presetControls, 0);
+            Grid.SetColumn(presetControls, 0);
+            Grid.SetColumnSpan(presetControls, 3);
+            Grid.SetRow(customUrlPanel, 1);
+            Grid.SetColumn(customUrlPanel, 0);
+            Grid.SetRow(login, 1);
+            Grid.SetColumn(login, 1);
+            Grid.SetRow(launch, 1);
+            Grid.SetColumn(launch, 2);
+            customUrlPanel.Margin = new Thickness(0);
+            login.Margin = new Thickness(0, 0, 8, 0);
+            launch.Margin = new Thickness(0);
+            return;
+        }
+
+        layout.RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto");
+        layout.ColumnDefinitions = new ColumnDefinitions("*");
+        Grid.SetRow(presetControls, 0);
+        Grid.SetColumn(presetControls, 0);
+        Grid.SetColumnSpan(presetControls, 1);
+        Grid.SetRow(customUrlPanel, 1);
+        Grid.SetColumn(customUrlPanel, 0);
+        Grid.SetRow(login, 2);
+        Grid.SetColumn(login, 0);
+        Grid.SetRow(launch, 3);
+        Grid.SetColumn(launch, 0);
+        customUrlPanel.Margin = new Thickness(0);
+        login.Margin = new Thickness(0);
+        launch.Margin = new Thickness(0);
     }
 
     private static Control BuildPresetActionIcon(string action)
@@ -1568,10 +1722,15 @@ public sealed class MainWindow : Window
             var accountsById = _viewModel.Accounts
                 .GroupBy(account => account.Id, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
-            var eligible = windows
+            var discovery = MacClientWindowReconciliation.Reconcile(windows);
+            var discoveryDetail = DescribeClientDiscovery(discovery);
+            var eligible = discovery.StableWindows
                 .Where(window => !string.IsNullOrWhiteSpace(window.AccountId)
                     && accountsById.TryGetValue(window.AccountId, out var account)
                     && account.EmbedInClients)
+                .ToArray();
+            var blockingDuplicates = discovery.Duplicates
+                .Where(duplicate => accountsById.TryGetValue(duplicate.AccountId, out var account) && account.EmbedInClients)
                 .ToArray();
 
             var nextIds = eligible.Select(window => window.AccountId!).ToHashSet(StringComparer.Ordinal);
@@ -1588,7 +1747,7 @@ public sealed class MainWindow : Window
                 foreach (var window in eligible)
                 {
                     var account = accountsById[window.AccountId!];
-                    _clientTabs.Add(new ClientTabItem(account.Id, account.Label, window, "Discovering window…", false));
+                    _clientTabs.Add(new ClientTabItem(account.Id, account.Label, window, "Waiting for Accessibility…", false));
                 }
                 if (_selectedClientAccountId is null || !nextIds.Contains(_selectedClientAccountId))
                     _selectedClientAccountId = _clientTabs.FirstOrDefault()?.AccountId;
@@ -1601,13 +1760,19 @@ public sealed class MainWindow : Window
             {
                 var restore = await _clientOverlay.RestoreAllAsync(cancellationToken);
                 EnsureClientOverlayActive(generation, cancellationToken);
+                var duplicateMessage = blockingDuplicates.Length > 0
+                    ? "Multiple managed Roblox processes were found for one account. Close the extra client or relaunch it."
+                    : "No opted-in RAM-managed Roblox clients are running.";
+                var noClientCode = restore.Succeeded && blockingDuplicates.Length > 0
+                    ? "duplicate-managed-process"
+                    : restore.DiagnosticCode;
                 SetClientOverlayStatus(
                     restore.Succeeded
-                        ? "No opted-in RAM-managed Roblox clients are running."
+                        ? duplicateMessage
                         : ClientOverlayFailureText.Describe(restore.DiagnosticCode),
                     failure: !restore.Succeeded,
-                    activityKey: restore.Succeeded ? "overlay-no-clients" : $"overlay-no-clients-restore-failed:{restore.DiagnosticCode}",
-                    activityDetail: $"code={restore.DiagnosticCode}; phase=restore; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                    activityKey: $"overlay-no-clients:{noClientCode}:{discoveryDetail}",
+                    activityDetail: $"code={noClientCode}; phase={(blockingDuplicates.Length > 0 && restore.Succeeded ? "preflight" : "restore")}; account=none; pid=none; ready=0/{windows.Count}; windows=unknown; restore={(restore.Succeeded ? "none" : restore.DiagnosticCode)}; retryable={ClientOverlayFailureText.IsRetryable(restore)}; {discoveryDetail}");
                 SetClientOverlayRecoveryAvailable(!restore.Succeeded);
                 return;
             }
@@ -1620,8 +1785,8 @@ public sealed class MainWindow : Window
                         ? viewportFailure
                         : ClientOverlayFailureText.Describe(restore.DiagnosticCode),
                     failure: !restore.Succeeded,
-                    activityKey: $"overlay-viewport:{viewportFailure}:{restore.DiagnosticCode}",
-                    activityDetail: $"code={restore.DiagnosticCode}; phase=restore; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                    activityKey: $"overlay-viewport:{viewportFailure}:{restore.DiagnosticCode}:{discoveryDetail}",
+                    activityDetail: $"code={(restore.Succeeded ? "client-viewport-unavailable" : restore.DiagnosticCode)}; phase={(restore.Succeeded ? "preflight" : "restore")}; account=none; pid=none; ready=0/{eligible.Length}; windows=unknown; restore={(restore.Succeeded ? "none" : restore.DiagnosticCode)}; retryable={ClientOverlayFailureText.IsRetryable(restore)}; viewport=unavailable; {discoveryDetail}");
                 SetClientOverlayRecoveryAvailable(!restore.Succeeded);
                 return;
             }
@@ -1653,6 +1818,7 @@ public sealed class MainWindow : Window
                 string.Equals(client.Phase, "restore", StringComparison.Ordinal));
             var phase = DescribeOverlayPhase(result.DiagnosticCode);
             var retryable = ClientOverlayFailureText.IsRetryable(result);
+            var clientDetails = DescribeClientDiagnostics(result.Clients);
             SetClientOverlayStatus(
                 result.Succeeded
                     ? explicitUserSelection
@@ -1660,8 +1826,8 @@ public sealed class MainWindow : Window
                         : "Client placement is ready. Select a tab to bring Roblox in front of RAM."
                     : DescribeOverlayFailure(result.DiagnosticCode),
                 failure: !result.Succeeded,
-                activityKey: $"overlay:{result.DiagnosticCode}:{result.AccountId}:{readyCount}/{result.Clients.Count}:{windowCounts}:{restoreDiagnostic?.DiagnosticCode}",
-                activityDetail: $"code={result.DiagnosticCode}; phase={phase}; account={failedAccount}; pid={result.ProcessId?.ToString() ?? "none"}; ready={readyCount}/{result.Clients.Count}; {windowCounts}; restore={restoreDiagnostic?.DiagnosticCode ?? "none"}; retryable={retryable}");
+                activityKey: $"overlay:{result.DiagnosticCode}:{result.AccountId}:{readyCount}/{result.Clients.Count}:{windowCounts}:{restoreDiagnostic?.DiagnosticCode}:{clientDetails}:{discoveryDetail}",
+                activityDetail: $"code={result.DiagnosticCode}; phase={phase}; account={SanitiseActivityToken(failedAccount)}; pid={result.ProcessId?.ToString() ?? "none"}; ready={readyCount}/{result.Clients.Count}; {windowCounts}; restore={restoreDiagnostic?.DiagnosticCode ?? "none"}; retryable={retryable}; viewport={FormatViewport(viewport)}; clients={clientDetails}; {discoveryDetail}");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1793,6 +1959,38 @@ public sealed class MainWindow : Window
         if (activityKey is null || string.Equals(activityKey, _lastClientOverlayActivityKey, StringComparison.Ordinal)) return;
         _lastClientOverlayActivityKey = activityKey;
         _viewModel.AppendActivity($"Clients overlay: {activityDetail ?? message}");
+    }
+
+    private static string DescribeClientDiscovery(MacClientWindowDiscovery discovery)
+    {
+        var duplicates = discovery.Duplicates.Count == 0
+            ? "none"
+            : string.Join(",", discovery.Duplicates.Select(duplicate =>
+                $"{SanitiseActivityToken(duplicate.AccountId)}:{string.Join("/", duplicate.ProcessIds)}"));
+        return $"managed={discovery.StableWindows.Count + discovery.Duplicates.Sum(duplicate => duplicate.ProcessIds.Count)}; stable={discovery.StableWindows.Count}; duplicates={duplicates}; unbound={discovery.UnboundProcessCount}";
+    }
+
+    private static string DescribeClientDiagnostics(IReadOnlyList<MacOverlayClientDiagnostic> diagnostics) =>
+        diagnostics.Count == 0
+            ? "none"
+            : string.Join(",", diagnostics.Select(diagnostic =>
+                $"{SanitiseActivityToken(diagnostic.AccountId)}:pid={diagnostic.ProcessId}:code={LaunchDiagnostics.SanitiseCode(diagnostic.DiagnosticCode)}:ready={diagnostic.IsReady}:windows={diagnostic.EligibleWindowCount}/{diagnostic.TotalWindowCount}"));
+
+    private static string FormatViewport(MacWindowFrame viewport) =>
+        viewport.IsValid
+            ? $"{viewport.Left:0},{viewport.Top:0},{viewport.Width:0}x{viewport.Height:0}"
+            : "unavailable";
+
+    private static string SanitiseActivityToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "none";
+        var characters = value
+            .Trim()
+            .Select(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.' ? character : '_')
+            .ToArray();
+        return new string(characters).Trim('_') is { Length: > 0 } sanitized
+            ? sanitized[..Math.Min(sanitized.Length, 64)]
+            : "none";
     }
 
     private static string DescribeClientDiagnostic(MacOverlayClientDiagnostic diagnostic) =>

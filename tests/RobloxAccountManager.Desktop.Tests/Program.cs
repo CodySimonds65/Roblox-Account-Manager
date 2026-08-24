@@ -7,6 +7,7 @@ using RobloxAccountManager.Desktop;
 using RobloxAccountManager.Desktop.Services;
 using RobloxAccountManager.Platform.MacOS;
 using System.Text.Json;
+using MacProcessIdentity = RobloxAccountManager.Core.Contracts.RobloxProcessIdentity;
 
 static void Require(bool condition, string message)
 {
@@ -62,6 +63,41 @@ Require(DesktopPanelLayoutPolicy.CanRenderWithoutClipping(
             DesktopPanelLayoutPolicy.ActivityMinimumHeight - 1)
         && DesktopPanelLayoutPolicy.WindowMinimumHeight >= DesktopPanelLayoutPolicy.RequiredWindowHeight,
     "Desktop panel minimums did not protect the Clients, Browse, and Activity content from splitter clipping.");
+Require(Math.Abs(DesktopPanelLayoutPolicy.GetMaximumActivityHeight(860, 150) - 250) < 0.001
+        && DesktopPanelLayoutPolicy.GetMaximumActivityHeight(700, 150) == DesktopPanelLayoutPolicy.ActivityMinimumHeight
+        && DesktopPanelLayoutPolicy.UseCompactPresetBar(1300)
+        && !DesktopPanelLayoutPolicy.UseCompactPresetBar(1000),
+    "The adaptive layout policy did not preserve browser space while leaving Activity resizable.");
+
+var duplicateProcessIdentity = new MacProcessIdentity(
+    101,
+    DateTimeOffset.UtcNow.AddMinutes(-2),
+    "/Applications/Roblox.app/Contents/MacOS/RobloxPlayer",
+    "/Applications/Roblox.app",
+    RobloxPlatform.MacOS);
+var duplicateProcessIdentityTwo = duplicateProcessIdentity with
+{
+    Pid = 102,
+    StartTimeUtc = duplicateProcessIdentity.StartTimeUtc.AddSeconds(1)
+};
+var uniqueProcessIdentity = duplicateProcessIdentity with
+{
+    Pid = 103,
+    StartTimeUtc = duplicateProcessIdentity.StartTimeUtc.AddSeconds(2)
+};
+var discovery = MacClientWindowReconciliation.Reconcile([
+    new RobloxWindowInfo(duplicateProcessIdentity, null, null, AccountId: "account-a"),
+    new RobloxWindowInfo(duplicateProcessIdentityTwo, null, null, AccountId: "account-a"),
+    new RobloxWindowInfo(uniqueProcessIdentity, null, null, AccountId: "account-b"),
+    new RobloxWindowInfo(duplicateProcessIdentity with { Pid = 104 }, null, null)
+]);
+Require(discovery.StableWindows.Count == 1
+        && discovery.StableWindows[0].AccountId == "account-b"
+        && discovery.Duplicates.Count == 1
+        && discovery.Duplicates[0].AccountId == "account-a"
+        && discovery.Duplicates[0].ProcessIds.SequenceEqual([101, 102])
+        && discovery.UnboundProcessCount == 1,
+    "Duplicate or unbound managed macOS client records were not isolated before overlay operations.");
 
 try
 {
