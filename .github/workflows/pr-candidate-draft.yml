@@ -1,0 +1,118 @@
+name: PR candidate draft
+
+on:
+  workflow_run:
+    workflows: ["PR candidate build"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: pr-candidate-draft-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    name: PR candidate draft ready
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve trusted workflow metadata
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          test "$(jq -r .event <<<"$run_json")" = pull_request
+          test "$(jq -r .head_sha <<<"$run_json")" = "$HEAD_SHA"
+          pr_number="$(jq -r '.pull_requests | if length == 1 then .[0].number else empty end' <<<"$run_json")"
+          [[ "$pr_number" =~ ^[0-9]+$ ]] || { echo 'Could not resolve exactly one pull request.' >&2; exit 1; }
+          short_sha="${HEAD_SHA:0:12}"
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=pr-${pr_number}-${short_sha}" >> "$GITHUB_OUTPUT"
+      - name: Download candidate bundle without executing it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          mkdir candidate
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name pr-candidate-bundle --dir candidate
+      - name: Validate candidate provenance and checksums
+        env:
+          EXPECTED_PR: ${{ steps.candidate.outputs.pr_number }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_RUN: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          short_sha="${EXPECTED_SHA:0:12}"
+          windows_asset="RobloxAccountManager-pr-${EXPECTED_PR}-${short_sha}-win-x64.exe"
+          arm_asset="RobloxAccountManager-pr-${EXPECTED_PR}-${short_sha}-osx-arm64-unsigned.pkg"
+          intel_asset="RobloxAccountManager-pr-${EXPECTED_PR}-${short_sha}-osx-x64-unsigned.pkg"
+          for asset in "$windows_asset" "$arm_asset" "$intel_asset" SHA256SUMS.txt candidate-provenance.json; do
+            test -f "candidate/$asset"
+          done
+          test "$(find candidate -maxdepth 1 -type f | wc -l)" -eq 5
+          expected_assets="$(printf '%s\n' "$windows_asset" "$arm_asset" "$intel_asset" | sort | jq -R . | jq -s .)"
+          jq -e --argjson pr "$EXPECTED_PR" --arg sha "$EXPECTED_SHA" --argjson run "$EXPECTED_RUN" --argjson assets "$expected_assets" \
+            '.schemaVersion == 1 and .pullRequest == $pr and .commitSha == $sha and .workflowRunId == $run and (.assets | sort) == $assets' \
+            candidate/candidate-provenance.json >/dev/null
+          test "$(wc -l < candidate/SHA256SUMS.txt)" -eq 3
+          diff \
+            <(printf '%s\n' "$windows_asset" "$arm_asset" "$intel_asset" | sort) \
+            <(awk '{print $2}' candidate/SHA256SUMS.txt | sort)
+          (cd candidate && sha256sum -c SHA256SUMS.txt)
+      - name: Create commit-specific test-only draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.candidate.outputs.pr_number }}
+          SHORT_SHA: ${{ steps.candidate.outputs.short_sha }}
+          RELEASE_TAG: ${{ steps.candidate.outputs.tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          windows_asset="RobloxAccountManager-pr-${PR_NUMBER}-${SHORT_SHA}-win-x64.exe"
+          arm_asset="RobloxAccountManager-pr-${PR_NUMBER}-${SHORT_SHA}-osx-arm64-unsigned.pkg"
+          intel_asset="RobloxAccountManager-pr-${PR_NUMBER}-${SHORT_SHA}-osx-x64-unsigned.pkg"
+          cat > release-notes.md <<EOF
+          Test-only build for PR #${PR_NUMBER} at commit ${HEAD_SHA}.
+
+          This draft contains one unsigned Windows candidate and unsigned macOS packages for Apple Silicon and Intel. Do not redistribute or publish these assets. Verify every download against SHA256SUMS.txt.
+
+          This candidate is never promoted to production; production artifacts are rebuilt from the merged commit.
+          EOF
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$HEAD_SHA" \
+            --title "PR #${PR_NUMBER} candidate — ${SHORT_SHA}" \
+            --notes-file release-notes.md \
+            --draft \
+            --prerelease \
+            "candidate/$windows_asset" \
+            "candidate/$arm_asset" \
+            "candidate/$intel_asset" \
+            candidate/SHA256SUMS.txt \
+            candidate/candidate-provenance.json
+      - name: Remove superseded drafts for this PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.candidate.outputs.pr_number }}
+          CURRENT_TAG: ${{ steps.candidate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --slurp | jq -c 'add' > releases.json
+          jq -r --arg prefix "pr-${PR_NUMBER}-" --arg current "$CURRENT_TAG" \
+            '.[] | select(.draft == true and .prerelease == true and (.tag_name | startswith($prefix)) and .tag_name != $current) | [.id, .tag_name] | @tsv' \
+            releases.json | while IFS=$'\t' read -r release_id release_tag; do
+              [[ "$release_id" =~ ^[0-9]+$ ]] || exit 1
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+              echo "Removed superseded draft $release_tag."
+            done

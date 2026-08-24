@@ -1,31 +1,17 @@
-using System.IO;
-using System.Text.Json;
-using RobloxAltClient.Models;
-
 namespace RobloxAltClient.Services;
 
 public sealed class GamePresetStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
-    private readonly string _presetFile;
+    private readonly RobloxAccountManager.Core.Data.GamePresetStore _inner;
 
     public GamePresetStore(string? appDataDirectory = null)
     {
-        appDataDirectory ??= Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "RobloxAltClient");
-        _presetFile = Path.Combine(appDataDirectory, "game-presets.json");
+        _inner = appDataDirectory is null
+            ? new RobloxAccountManager.Core.Data.GamePresetStore()
+            : new RobloxAccountManager.Core.Data.GamePresetStore(appDataDirectory);
     }
 
-    public async Task<List<GamePreset>> LoadAsync()
-    {
-        var directory = Path.GetDirectoryName(_presetFile)!;
-        Directory.CreateDirectory(directory);
-        return await JsonFileStore.LoadAsync(_presetFile, new List<GamePreset>(), JsonOptions);
-    }
+    public Task<List<GamePreset>> LoadAsync() => _inner.LoadAsync();
 
-    public async Task SaveAsync(IEnumerable<GamePreset> presets)
-    {
-        await JsonFileStore.SaveAsync(_presetFile, presets.ToList(), JsonOptions);
-    }
+    public Task SaveAsync(IEnumerable<GamePreset> presets) => _inner.SaveAsync(presets);
 }

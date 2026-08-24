@@ -26,9 +26,13 @@ public sealed record DesktopComposition(
         string? trustedInstallerIdentity = null,
         string? dataRoot = null)
     {
-        IAccountBrowserDataStoreRemover dataStoreRemover = platform == RobloxPlatform.MacOS
-            ? new MacAccountBrowserDataStoreRemover()
-            : new UnsupportedWebsiteDataStoreRemover();
+        if (platform != RobloxPlatform.MacOS)
+        {
+            throw new PlatformNotSupportedException(
+                "The Avalonia desktop is the macOS frontend. Use the WPF client under client/ on Windows.");
+        }
+
+        IAccountBrowserDataStoreRemover dataStoreRemover = new MacAccountBrowserDataStoreRemover();
         var browserSessions = new AvaloniaAccountBrowserSessionService(dataStoreRemover);
         var paths = new LauncherDataPaths(dataRoot);
         var accounts = new AccountStore(paths);
@@ -42,46 +46,43 @@ public sealed record DesktopComposition(
         RobloxAccountManager.Core.Contracts.IRobloxSettingsAdapter? robloxSettings = null;
         RobloxAccountManager.Core.Contracts.IPluginHostFacade? plugins = null;
         var accessibilityGranted = false;
-        if (platform == RobloxPlatform.MacOS)
+        var registry = new MacManagedProcessRegistry();
+        var nativeLocator = new MacRobloxProcessLocator(registry);
+        var discovery = new MacBundleDiscovery();
+        var runtimeRoot = MacManagedRuntimeBuilder.GetDefaultRuntimeRoot();
+        var slotManager = new MacManagedRuntimeSlotManager(
+            runtimeRoot,
+            discovery,
+            processLocator: nativeLocator);
+        var coreLocator = new MacCoreProcessLocator(nativeLocator, discovery);
+        launches = new SerializedLaunchCoordinator(
+            coreLocator,
+            new MacCoreMultiInstanceStrategy(slotManager: slotManager, bundleDiscovery: discovery),
+            new MacCorePlatformLauncher(discovery, managedRuntimeRoot: runtimeRoot));
+        clients = new MacCoreClientWindowManager(new MacAccessibilityWindowManager(nativeLocator), coreLocator);
+        var accessibility = new MacAccessibilityApi(nativeLocator);
+        accessibilityGranted = accessibility.GetCapability().IsSupported;
+        clientOverlay = new MacClientOverlayManager(nativeLocator, accessibility);
+        robloxSettings = new MacRobloxSettingsAdapter();
+        plugins = new MacPluginHostFacade();
+        updateSource = new MacGitHubReleaseUpdateSource(rid: MacPkgUpdateInstaller.GetCurrentRid());
+        if (!string.IsNullOrWhiteSpace(trustedInstallerIdentity) || OperatingSystem.IsMacOS())
         {
-            var registry = new MacManagedProcessRegistry();
-            var nativeLocator = new MacRobloxProcessLocator(registry);
-            var discovery = new MacBundleDiscovery();
-            var runtimeRoot = MacManagedRuntimeBuilder.GetDefaultRuntimeRoot();
-            var slotManager = new MacManagedRuntimeSlotManager(
-                runtimeRoot,
-                discovery,
-                processLocator: nativeLocator);
-            var coreLocator = new MacCoreProcessLocator(nativeLocator, discovery);
-            launches = new SerializedLaunchCoordinator(
-                coreLocator,
-                new MacCoreMultiInstanceStrategy(slotManager: slotManager, bundleDiscovery: discovery),
-                new MacCorePlatformLauncher(discovery, managedRuntimeRoot: runtimeRoot));
-            clients = new MacCoreClientWindowManager(new MacAccessibilityWindowManager(nativeLocator), coreLocator);
-            var accessibility = new MacAccessibilityApi(nativeLocator);
-            accessibilityGranted = accessibility.GetCapability().IsSupported;
-            clientOverlay = new MacClientOverlayManager(nativeLocator, accessibility);
-            robloxSettings = new MacRobloxSettingsAdapter();
-            plugins = new MacPluginHostFacade();
-            updateSource = new MacGitHubReleaseUpdateSource(rid: MacPkgUpdateInstaller.GetCurrentRid());
-            if (!string.IsNullOrWhiteSpace(trustedInstallerIdentity) || OperatingSystem.IsMacOS())
+            try
             {
-                try
-                {
-                    updates = new MacPkgUpdateInstaller(
-                        expectedRid: MacPkgUpdateInstaller.GetCurrentRid(),
-                        trust: new MacPkgTrustConfiguration(
-                            trustedInstallerIdentity ?? "unsigned-development",
-                            "io.github.codysimonds65.roblox-account-manager",
-                            "io.github.codysimonds65.roblox-account-manager",
-                            "RobloxAccountManager",
-                            AllowUnsignedPackages: true));
-                }
-                catch (ArgumentException)
-                {
-                    // Update installation remains unavailable until the signed bundle provides
-                    // a complete installer identity and current numeric package version.
-                }
+                updates = new MacPkgUpdateInstaller(
+                    expectedRid: MacPkgUpdateInstaller.GetCurrentRid(),
+                    trust: new MacPkgTrustConfiguration(
+                        trustedInstallerIdentity ?? "unsigned-development",
+                        "io.github.codysimonds65.roblox-account-manager",
+                        "io.github.codysimonds65.roblox-account-manager",
+                        "RobloxAccountManager",
+                        AllowUnsignedPackages: true));
+            }
+            catch (ArgumentException)
+            {
+                // Update installation remains unavailable until the signed bundle provides
+                // a complete installer identity and current numeric package version.
             }
         }
 

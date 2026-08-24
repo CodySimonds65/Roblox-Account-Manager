@@ -101,8 +101,8 @@ jobs:
       - name: Test and publish unsigned build
         run: |
           set -euo pipefail
-          dotnet run --project tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release
-          dotnet run --project tests/RobloxAccountManager.Platform.MacOS.Tests/RobloxAccountManager.Platform.MacOS.Tests.csproj -c Release
+          dotnet test tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release --nologo --verbosity minimal
+          dotnet test tests/RobloxAccountManager.Platform.MacOS.Tests/RobloxAccountManager.Platform.MacOS.Tests.csproj -c Release --nologo --verbosity minimal
           version="${{ needs.resolve.outputs.release_tag }}"; version="${version#v}"
           app_version="${version%%-*}"
           dotnet publish src/RobloxAccountManager.Desktop/RobloxAccountManager.Desktop.csproj \

@@ -1,0 +1,28 @@
+name: PR candidate cleanup
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete test-only drafts for the closed PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --slurp | jq -c 'add' > releases.json
+          jq -r --arg prefix "pr-${PR_NUMBER}-" \
+            '.[] | select(.draft == true and .prerelease == true and (.tag_name | startswith($prefix))) | [.id, .tag_name] | @tsv' \
+            releases.json | while IFS=$'\t' read -r release_id release_tag; do
+              [[ "$release_id" =~ ^[0-9]+$ ]] || exit 1
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+              echo "Removed closed-PR candidate draft $release_tag."
+            done

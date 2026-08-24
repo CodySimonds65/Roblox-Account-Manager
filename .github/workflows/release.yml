@@ -35,7 +35,7 @@ jobs:
           $hasReleaseLabel = $env:PR_LABELS -match '(?i)"release"'
           $bump = if ($signals -match '(?i)\b(BREAKING|major)\b') {
               'major'
-          } elseif ($signals -match '(?i)\b(feat|feature|minor)\b') {
+          } elseif ($signals -match '(?i)\b(feat|feature|minor|refactor)\b') {
               'minor'
           } elseif ($signals -match '(?i)\b(fix|chore)\b') {
               'patch'
@@ -92,7 +92,7 @@ jobs:
         run: |
           $testProject = '.\tests\RobloxAltClient.SmokeTests\RobloxAltClient.SmokeTests.csproj'
           if (Test-Path -LiteralPath $testProject) {
-              dotnet run --project $testProject -c Release
+              dotnet test $testProject -c Release --nologo --verbosity minimal
           } else {
               Write-Host 'No smoke-test project is present in this revision.'
           }

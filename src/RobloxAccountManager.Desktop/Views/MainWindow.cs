@@ -2081,15 +2081,21 @@ public sealed class MainWindow : Window
                     ? "Waiting for Roblox Play control"
                     : "Waiting for Roblox launch URI";
                 RefreshQueueSummary();
-                GameSettings? gameSettings = preset.Settings;
-                if (_viewModel.Settings.GameOverrides.TryGetValue(gameUrl, out var urlSettings))
+                if (!LaunchSettingsResolver.TryResolve(
+                        _viewModel.Settings,
+                        preset,
+                        gameUrl,
+                        item.Account,
+                        out var scopedSettings,
+                        out var settingsError))
                 {
-                    gameSettings = GameSettings.Resolve(new GameSettings(), gameSettings, urlSettings);
+                    item.State = LaunchQueueState.Failed;
+                    item.Detail = "Invalid settings";
+                    RefreshQueueSummary();
+                    _viewModel.AppendActivity($"{item.Label}: {settingsError}");
+                    if (!_viewModel.Settings.ContinueOnFailure) break;
+                    continue;
                 }
-                var scopedSettings = GameSettings.Resolve(
-                    _viewModel.Settings.GameSettings,
-                    gameSettings,
-                    item.Account.GameSettings);
                 var request = new CoreRobloxLaunchRequest(
                     item.Account.Id,
                     cancellationToken => new ValueTask<Uri>(CaptureLaunchUriAsync(item.Account, scopedSettings, gameUrl, cancellationToken)),

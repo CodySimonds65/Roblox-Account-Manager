@@ -5,9 +5,9 @@ namespace RobloxAltClient.Plugins;
 
 public static class PluginProtocol
 {
-    public const int CurrentMajor = 1;
-    public const int CurrentMinor = 0;
-    public const int MaxMessageBytes = 1 * 1024 * 1024;
+    public const int CurrentMajor = RobloxAccountManager.PluginSdk.PluginProtocol.CurrentMajor;
+    public const int CurrentMinor = RobloxAccountManager.PluginSdk.PluginProtocol.CurrentMinor;
+    public const int MaxMessageBytes = RobloxAccountManager.PluginSdk.PluginProtocol.MaxMessageBytes;
     public const string PipePrefix = "RobloxAccountManager.PluginHost.v1.";
 }
 
@@ -28,42 +28,6 @@ public static class PluginCapabilities
     public const string SystemWatchGlobalInput = "system.watch-global-input";
     public const string SystemReadScreen = "system.read-screen";
 }
-
-public sealed record ManagedAccountSnapshot(
-    string AccountId,
-    string Label,
-    int ProcessId,
-    long ProcessStartTimeUtcTicks,
-    nint WindowHandle,
-    int ClientX,
-    int ClientY,
-    int ClientWidth,
-    int ClientHeight,
-    uint Dpi,
-    bool IsMinimized,
-    DateTime LastActivityUtc,
-    bool IsRunning,
-    nint RootWindowHandle = 0,
-    int? ExitCode = null,
-    string? Platform = null,
-    string? WindowIdentifier = null);
-
-public sealed record ThemePalette(
-    string Background,
-    string Surface,
-    string Elevated,
-    string Hover,
-    string Border,
-    string Text,
-    string MutedText,
-    string Accent,
-    string AccentHover,
-    string AccentPressed,
-    string Danger,
-    string Success,
-    string Input,
-    string SelectionSurface,
-    string SelectionBorder);
 
 public enum PluginInputKind
 {
@@ -105,46 +69,6 @@ public sealed record ForegroundSessionCloseRequest(
     bool RestoreForeground = true,
     bool UserInitiated = false);
 
-public sealed record ActionDescriptor(
-    string ActionId,
-    string DisplayName,
-    string Description,
-    string ArgumentSchemaJson,
-    IReadOnlyList<string> RequiredCapabilities);
-
-public sealed record ActionInvocation(
-    string ActionId,
-    string RequestId,
-    IReadOnlyList<string> AccountIds,
-    JsonElement Arguments,
-    DateTime RequestedUtc);
-
-public sealed record ActionResult(bool Accepted, string Code, string Message, JsonElement? Data = null)
-{
-    public static ActionResult Ok(string message = "Accepted") => new(true, "ok", message);
-    public static ActionResult Fail(string code, string message) => new(false, code, message);
-}
-
-public sealed record PluginManifest(
-    int SchemaVersion,
-    string Id,
-    string Name,
-    string Version,
-    string ContractVersion,
-    string Publisher,
-    string Description,
-    IReadOnlyList<string> Capabilities,
-    string EntryPoint,
-    string? Icon = null,
-    string? UpdateFeed = null,
-    string? MinHostVersion = null,
-    bool AutostartDefault = false,
-    IReadOnlyDictionary<string, string>? EntryPoints = null,
-    string? SelectedRuntimeIdentifier = null)
-{
-    public bool IsAvailableOnCurrentPlatform => !string.IsNullOrWhiteSpace(EntryPoint);
-}
-
 public sealed record InstalledPlugin(
     PluginManifest Manifest,
     string InstallDirectory,
@@ -176,75 +100,17 @@ public sealed record PluginHandshake(
 
 public sealed class PluginJson
 {
-    public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
+    public static readonly JsonSerializerOptions Options = CreateOptions();
+
+    private static JsonSerializerOptions CreateOptions()
     {
-        WriteIndented = false,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters = { new JsonStringEnumConverter(), new NativeIntJsonConverter(), new ManagedAccountSnapshotJsonConverter(), new BackgroundInputResultJsonConverter() }
-    };
-}
-
-internal sealed class NativeIntJsonConverter : JsonConverter<IntPtr>
-{
-    public override IntPtr Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
-        new(reader.GetInt64());
-
-    public override void Write(Utf8JsonWriter writer, IntPtr value, JsonSerializerOptions options) =>
-        writer.WriteNumberValue(value.ToInt64());
-}
-
-internal sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<ManagedAccountSnapshot>
-{
-    public override ManagedAccountSnapshot Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        using var document = JsonDocument.ParseValue(ref reader);
-        var value = document.RootElement;
-        return new ManagedAccountSnapshot(
-            value.GetProperty("accountId").GetString() ?? string.Empty,
-            value.GetProperty("label").GetString() ?? string.Empty,
-            value.GetProperty("processId").GetInt32(),
-            value.GetProperty("processStartTimeUtcTicks").GetInt64(),
-            (nint)value.GetProperty("windowHandle").GetInt64(),
-            value.GetProperty("clientX").GetInt32(),
-            value.GetProperty("clientY").GetInt32(),
-            value.GetProperty("clientWidth").GetInt32(),
-            value.GetProperty("clientHeight").GetInt32(),
-            value.GetProperty("dpi").GetUInt32(),
-            value.GetProperty("isMinimized").GetBoolean(),
-            value.GetProperty("lastActivityUtc").GetDateTime(),
-            value.GetProperty("isRunning").GetBoolean(),
-            value.TryGetProperty("rootWindowHandle", out var root) ? (nint)root.GetInt64() : nint.Zero,
-            value.TryGetProperty("exitCode", out var exitCode) && exitCode.ValueKind != JsonValueKind.Null ? exitCode.GetInt32() : null,
-            value.TryGetProperty("platform", out var platform) && platform.ValueKind == JsonValueKind.String ? platform.GetString() : null,
-            value.TryGetProperty("windowIdentifier", out var windowIdentifier) && windowIdentifier.ValueKind == JsonValueKind.String
-                ? windowIdentifier.GetString()
-                : null);
-    }
-
-    public override void Write(Utf8JsonWriter writer, ManagedAccountSnapshot value, JsonSerializerOptions options)
-    {
-        writer.WriteStartObject();
-        writer.WriteString("accountId", value.AccountId);
-        writer.WriteString("label", value.Label);
-        writer.WriteNumber("processId", value.ProcessId);
-        writer.WriteNumber("processStartTimeUtcTicks", value.ProcessStartTimeUtcTicks);
-        writer.WriteNumber("windowHandle", value.WindowHandle.ToInt64());
-        writer.WriteNumber("clientX", value.ClientX);
-        writer.WriteNumber("clientY", value.ClientY);
-        writer.WriteNumber("clientWidth", value.ClientWidth);
-        writer.WriteNumber("clientHeight", value.ClientHeight);
-        writer.WriteNumber("dpi", value.Dpi);
-        writer.WriteBoolean("isMinimized", value.IsMinimized);
-        writer.WriteString("lastActivityUtc", value.LastActivityUtc);
-        writer.WriteBoolean("isRunning", value.IsRunning);
-        writer.WriteNumber("rootWindowHandle", value.RootWindowHandle.ToInt64());
-        if (value.ExitCode is int exitCode)
+        var options = new JsonSerializerOptions(RobloxAccountManager.PluginSdk.PluginJson.Options)
         {
-            writer.WriteNumber("exitCode", exitCode);
-        }
-        if (value.Platform is not null) writer.WriteString("platform", value.Platform);
-        if (value.WindowIdentifier is not null) writer.WriteString("windowIdentifier", value.WindowIdentifier);
-        writer.WriteEndObject();
+            WriteIndented = false,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+        options.Converters.Add(new BackgroundInputResultJsonConverter());
+        return options;
     }
 }
 

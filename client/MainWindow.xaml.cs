@@ -10,6 +10,7 @@ using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Win32;
+using RobloxAccountManager.Core.Launch;
 using RobloxAltClient.Models;
 using RobloxAltClient.Plugins;
 using RobloxAltClient.Services;
@@ -853,9 +854,13 @@ public partial class MainWindow : Window
     {
         item.State = LaunchQueueState.Preparing;
         item.Detail = "Opening session";
-        var gameOverride = GetGameOverrideForLaunch(gameUrl);
-        var profileOverride = item.Account.GameSettings;
-        if (!GameSettings.TryResolve(_settings.GameSettings, gameOverride, profileOverride, out var resolvedSettings, out var settingsError))
+        if (!LaunchSettingsResolver.TryResolve(
+                _settings,
+                GamePicker.SelectedItem as GamePreset,
+                gameUrl,
+                item.Account,
+                out var resolvedSettings,
+                out var settingsError))
         {
             Log($"Could not prepare {item.Label}: {settingsError}");
             return (false, "Invalid settings");
@@ -1337,11 +1342,6 @@ public partial class MainWindow : Window
 
     private GameSettings? GetGameOverride(string gameUrl) =>
         _settings.GameOverrides.TryGetValue(NormalizeGameUrl(gameUrl), out var settings) ? settings : null;
-
-    private GameSettings? GetGameOverrideForLaunch(string gameUrl) =>
-        GamePicker.SelectedItem is GamePreset { Url.Length: > 0 }
-            ? GetGameOverride(gameUrl)
-            : null;
 
     private string GetSelectedGameUrl() => GamePicker.SelectedItem is GamePreset game && !string.IsNullOrEmpty(game.Url)
         ? game.Url

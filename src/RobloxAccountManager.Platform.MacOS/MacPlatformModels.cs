@@ -91,6 +91,7 @@ public enum SingletonReleaseStatus
 {
     Removed,
     AlreadyAbsent,
+    PermissionDenied,
     Failed,
     NotMacOS
 }

@@ -9,6 +9,11 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text.Json;
+using ManagedAccountSnapshot = RobloxAccountManager.PluginSdk.ManagedAccountSnapshot;
+using AccountProfile = RobloxAccountManager.Core.Models.AccountProfile;
+using GamePreset = RobloxAccountManager.Core.Models.GamePreset;
+using GameSettings = RobloxAccountManager.Core.Models.GameSettings;
+using LauncherSettings = RobloxAccountManager.Core.Models.LauncherSettings;
 
 static void Require(bool condition, string message)
 {
@@ -284,12 +289,18 @@ try
         "Running-account HWND persistence was not written as a numeric value.");
     var snapshotJson = JsonSerializer.Serialize(new ManagedAccountSnapshot(
         "state-test", "State test", 1, 1, (nint)42, 0, 0, 100, 100, 96, false, DateTime.UtcNow, true,
-        Platform: "windows", WindowIdentifier: "hwnd:42"), PluginJson.Options);
+        ExitCode: 5, Platform: "windows", WindowIdentifier: "hwnd:42"), PluginJson.Options);
     Require(snapshotJson.Contains("\"windowHandle\":42", StringComparison.Ordinal),
         "Managed-account HWND wire serialization was not numeric.");
     Require(snapshotJson.Contains("\"platform\":\"windows\"", StringComparison.Ordinal) &&
-            snapshotJson.Contains("\"windowIdentifier\":\"hwnd:42\"", StringComparison.Ordinal),
+            snapshotJson.Contains("\"windowIdentifier\":\"hwnd:42\"", StringComparison.Ordinal) &&
+            snapshotJson.Contains("\"exitCode\":5", StringComparison.Ordinal),
         "Managed-account cross-platform identity fields were not serialized.");
+    var sdkReadsHost = JsonSerializer.Deserialize<RobloxAccountManager.PluginSdk.ManagedAccountSnapshot>(
+        snapshotJson,
+        RobloxAccountManager.PluginSdk.PluginJson.Options);
+    Require(sdkReadsHost?.ExitCode == 5 && sdkReadsHost.WindowIdentifier == "hwnd:42",
+        "The public SDK could not read a host-generated account snapshot.");
     var inputResultJson = JsonSerializer.Serialize(BackgroundInputResult.Failure("test", "test", (nint)7, (nint)8), PluginJson.Options);
     Require(inputResultJson.Contains("\"foregroundBefore\":7", StringComparison.Ordinal) && inputResultJson.Contains("\"foregroundAfter\":8", StringComparison.Ordinal),
         "Background input HWND wire serialization was not numeric.");
@@ -320,7 +331,7 @@ try
     Require(sdkSnapshotJson.Contains("\"windowHandle\":4660", StringComparison.Ordinal),
         "Published SDK did not serialize HWNDs as numeric values.");
     var sdkRoundTrip = JsonSerializer.Deserialize<RobloxAccountManager.PluginSdk.ManagedAccountSnapshot>(sdkSnapshotJson,
-        RobloxAccountManager.PluginSdk.PluginJson.Options);
+        PluginJson.Options);
     Require(sdkRoundTrip?.WindowHandle == (nint)0x1234 && sdkRoundTrip.RootWindowHandle == (nint)0x5678,
         "Published SDK did not round-trip numeric HWNDs.");
 }

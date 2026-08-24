@@ -12,6 +12,17 @@ static void Require(bool condition, string message)
     if (!condition) throw new InvalidOperationException(message);
 }
 
+try
+{
+    _ = DesktopComposition.Create(RobloxPlatform.Windows);
+    throw new InvalidOperationException("The macOS Avalonia composition accepted Windows.");
+}
+catch (PlatformNotSupportedException exception)
+{
+    Require(exception.Message.Contains("WPF", StringComparison.Ordinal),
+        "The unsupported-platform diagnostic did not direct Windows users to the WPF frontend.");
+}
+
 var account = new AccountProfile { Id = Guid.NewGuid().ToString("N"), Label = "Test account" };
 var accounts = new[] { account };
 

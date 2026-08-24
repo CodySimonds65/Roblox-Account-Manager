@@ -23,6 +23,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\src\RobloxAccountManager.Core\RobloxAccountManager.Core.csproj" />
+    <ProjectReference Include="..\sdk\RobloxAccountManager.PluginSdk\RobloxAccountManager.PluginSdk.csproj" />
     <PackageReference Include="NSec.Cryptography" Version="24.4.0" />
     <Resource Include="Assets\RobloxAccountManager.ico" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />

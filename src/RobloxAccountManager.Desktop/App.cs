@@ -307,10 +307,8 @@ public sealed class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            var platform = OperatingSystem.IsMacOS() ? RobloxPlatform.MacOS :
-                OperatingSystem.IsWindows() ? RobloxPlatform.Windows : RobloxPlatform.Unknown;
             var composition = DesktopComposition.Create(
-                platform,
+                RobloxPlatform.MacOS,
                 TrustedRobloxIdentityConfiguration.LoadInstallerIdentity(),
                 _dataRoot);
             var shell = new DesktopShellViewModel(composition.Capabilities, composition.Accounts, composition.Presets, composition.Settings, composition.Updates, composition.UpdateSource, composition.RobloxSettings, composition.Plugins);

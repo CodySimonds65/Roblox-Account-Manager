@@ -21,14 +21,14 @@ public sealed class PluginActionRouter : IAsyncDisposable
         _host.Disconnected += Host_Disconnected;
     }
 
-    public IReadOnlyList<ActionDescriptor> Actions => _actions.Values.Select(value => value.Descriptor).OrderBy(value => value.ActionId, StringComparer.Ordinal).ToArray();
+    public IReadOnlyList<PluginActionDescriptor> Actions => _actions.Values.Select(value => value.Descriptor).OrderBy(value => value.ActionId, StringComparer.Ordinal).ToArray();
 
-    public async Task<ActionInvocationResult> InvokeAsync(ActionInvocation invocation, CancellationToken cancellationToken = default)
+    public async Task<ActionInvocationResult> InvokeAsync(PluginActionInvocation invocation, CancellationToken cancellationToken = default)
     {
         if (!_actions.TryGetValue(invocation.ActionId, out var action))
             return ActionInvocationResult.Fail("missing-action", $"Action '{invocation.ActionId}' is not registered.");
         var requestId = string.IsNullOrWhiteSpace(invocation.RequestId) ? Guid.NewGuid().ToString("N") : invocation.RequestId;
-        var waiter = new TaskCompletionSource<ActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiter = new TaskCompletionSource<PluginActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pending = new PendingAction(action.Connection, waiter);
         if (!_pending.TryAdd(requestId, pending)) return ActionInvocationResult.Fail("duplicate-request", "The action request id is already in use.");
         try
@@ -52,7 +52,7 @@ public sealed class PluginActionRouter : IAsyncDisposable
         {
             if (message.Envelope.Type == "action.register")
             {
-                var descriptor = message.Envelope.Payload.Deserialize<ActionDescriptor>(PluginJson.Options)
+                var descriptor = message.Envelope.Payload.Deserialize<PluginActionDescriptor>(PluginJson.Options)
                                  ?? throw new InvalidDataException("Action descriptor is invalid.");
                 if (string.IsNullOrWhiteSpace(descriptor.ActionId) || descriptor.ActionId.Length > 200)
                     throw new InvalidDataException("Action id is invalid.");
@@ -67,14 +67,14 @@ public sealed class PluginActionRouter : IAsyncDisposable
             }
             else if (message.Envelope.Type == "action.result")
             {
-                var result = message.Envelope.Payload.Deserialize<ActionResult>(PluginJson.Options);
+                var result = message.Envelope.Payload.Deserialize<PluginActionResult>(PluginJson.Options);
                 if (result is not null && _pending.TryGetValue(message.Envelope.RequestId, out var pending) &&
                     ReferenceEquals(pending.Provider, message.Connection))
                     pending.Waiter.TrySetResult(result);
             }
             else if (message.Envelope.Type == "action.invoke")
             {
-                var invocation = message.Envelope.Payload.Deserialize<ActionInvocation>(PluginJson.Options)
+                var invocation = message.Envelope.Payload.Deserialize<PluginActionInvocation>(PluginJson.Options)
                                  ?? throw new InvalidDataException("Action invocation is invalid.");
                 var result = await InvokeAsync(invocation).ConfigureAwait(false);
                 await message.Connection.SendAsync("action.result", result, message.Envelope.RequestId, CancellationToken.None).ConfigureAwait(false);
@@ -82,7 +82,7 @@ public sealed class PluginActionRouter : IAsyncDisposable
         }
         catch (Exception ex) when (ex is InvalidDataException or JsonException or IOException or ObjectDisposedException)
         {
-            try { await message.Connection.SendAsync("action.result", ActionResult.Fail("invalid-request", ex.Message), message.Envelope.RequestId, CancellationToken.None).ConfigureAwait(false); } catch { }
+            try { await message.Connection.SendAsync("action.result", PluginActionResult.Fail("invalid-request", ex.Message), message.Envelope.RequestId, CancellationToken.None).ConfigureAwait(false); } catch { }
         }
     }
 
@@ -92,7 +92,7 @@ public sealed class PluginActionRouter : IAsyncDisposable
         foreach (var item in _pending.Where(pair => ReferenceEquals(pair.Value.Provider, connection)).ToArray())
         {
             if (_pending.TryRemove(item.Key, out var pending))
-                pending.Waiter.TrySetResult(ActionResult.Fail("disconnected", "The action provider disconnected."));
+                pending.Waiter.TrySetResult(PluginActionResult.Fail("disconnected", "The action provider disconnected."));
         }
     }
 
@@ -106,6 +106,6 @@ public sealed class PluginActionRouter : IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
-    private sealed record RegisteredAction(ActionDescriptor Descriptor, PluginConnection Connection);
-    private sealed record PendingAction(PluginConnection Provider, TaskCompletionSource<ActionResult> Waiter);
+    private sealed record RegisteredAction(PluginActionDescriptor Descriptor, PluginConnection Connection);
+    private sealed record PendingAction(PluginConnection Provider, TaskCompletionSource<PluginActionResult> Waiter);
 }

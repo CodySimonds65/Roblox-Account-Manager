@@ -1,0 +1,148 @@
+name: PR candidate build
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-candidate-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    if: github.event.pull_request.draft == false
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify checked-out pull-request commit
+        shell: pwsh
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne $env:HEAD_SHA) {
+            throw 'The checked-out Windows candidate commit does not match the pull-request head.'
+          }
+      - name: Test Windows and shared projects
+        shell: pwsh
+        run: ./build/test-all.ps1 -SkipMacOS
+      - name: Publish unsigned Windows candidate
+        shell: pwsh
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          $shortSha = $env:HEAD_SHA.Substring(0, 12)
+          $version = "0.0.0-pr.$env:PR_NUMBER.$env:GITHUB_RUN_ATTEMPT"
+          dotnet publish .\client\RobloxAltClient.csproj -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=$version -o candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Windows candidate publish failed.' }
+          $name = "RobloxAccountManager-pr-$env:PR_NUMBER-$shortSha-win-x64.exe"
+          Move-Item -LiteralPath .\candidate\RobloxAccountManager.exe -Destination (Join-Path .\candidate $name)
+          Get-ChildItem .\candidate -File | Where-Object Name -ne $name | Remove-Item -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr-candidate-windows
+          path: candidate/RobloxAccountManager-*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    if: github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            rid: osx-arm64
+          - runner: macos-15-intel
+            rid: osx-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify checked-out pull-request commit
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+      - name: Run shared and macOS tests
+        shell: pwsh
+        run: ./build/test-all.ps1 -SkipWindows
+      - name: Publish and package unsigned macOS candidate
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RID: ${{ matrix.rid }}
+        run: |
+          set -euo pipefail
+          short_sha="${HEAD_SHA:0:12}"
+          version="0.0.0-pr.${PR_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          dotnet publish src/RobloxAccountManager.Desktop/RobloxAccountManager.Desktop.csproj \
+            -c Release -r "$RID" --self-contained true -p:Version="$version" -o publish
+          mkdir -p candidate
+          app="candidate/Roblox Account Manager.app"
+          pkg="candidate/RobloxAccountManager-pr-${PR_NUMBER}-${short_sha}-${RID}-unsigned.pkg"
+          bash build/macos/package-app.sh publish "$app" 0.0.0
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" "$app/Contents/Info.plist"
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-composition
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-gui-startup
+          "$app/Contents/MacOS/RobloxAccountManager" --validate-browser-startup
+          bash build/macos/package-pkg.sh --unsigned "$app" "$pkg" "$RID" "$GITHUB_RUN_NUMBER"
+          bash build/macos/smoke-install-root-pkg.sh "$pkg"
+          rm -rf "$app"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr-candidate-${{ matrix.rid }}
+          path: candidate/*.pkg
+          if-no-files-found: error
+          retention-days: 14
+
+  bundle:
+    if: github.event.pull_request.draft == false
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pr-candidate-*
+          path: candidate
+          merge-multiple: true
+      - name: Verify and describe candidate bundle
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          short_sha="${HEAD_SHA:0:12}"
+          test "$(find candidate -maxdepth 1 -type f -name '*.exe' | wc -l)" -eq 1
+          test "$(find candidate -maxdepth 1 -type f -name '*.pkg' | wc -l)" -eq 2
+          (cd candidate && sha256sum RobloxAccountManager-* > SHA256SUMS.txt)
+          jq -n \
+            --argjson pr "$PR_NUMBER" \
+            --arg sha "$HEAD_SHA" \
+            --arg shortSha "$short_sha" \
+            --argjson runId "$GITHUB_RUN_ID" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg createdUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson assets "$(find candidate -maxdepth 1 -type f \( -name '*.exe' -o -name '*.pkg' \) -printf '%f\n' | sort | jq -R . | jq -s .)" \
+            '{schemaVersion:1, pullRequest:$pr, commitSha:$sha, shortSha:$shortSha, workflowRunId:$runId, repository:$repository, createdUtc:$createdUtc, assets:$assets}' \
+            > candidate/candidate-provenance.json
+          (cd candidate && sha256sum -c SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr-candidate-bundle
+          path: candidate/*
+          if-no-files-found: error
+          retention-days: 14
