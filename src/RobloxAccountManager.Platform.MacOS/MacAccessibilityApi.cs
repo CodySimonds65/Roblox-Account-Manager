@@ -39,12 +39,24 @@ public sealed record MacAccessibilityWindowProbe(
         new(diagnosticCode, null, totalWindowCount, eligibleWindowCount);
 }
 
+public readonly record struct MacAccessibilityOperationResult(bool Succeeded, string DiagnosticCode)
+{
+    public static MacAccessibilityOperationResult Success() => new(true, "accessibility-operation-ready");
+    public static MacAccessibilityOperationResult Failure(string diagnosticCode) => new(false, diagnosticCode);
+}
+
 public interface IMacAccessibilityApi
 {
     MacCapabilityResult GetCapability();
     MacAccessibilityWindowProbe ProbeMainWindow(Contracts.RobloxProcessIdentity process);
-    bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame);
-    bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized);
+    MacAccessibilityOperationResult TrySetFrame(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        MacWindowFrame frame);
+    MacAccessibilityOperationResult TrySetMinimized(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        bool minimized);
     bool TryRaise(
         Contracts.RobloxProcessIdentity process,
         string windowIdentifier,
@@ -120,7 +132,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
 
                 var window = selected.Snapshot with
                 {
-                    Identifier = RetainWindow(process, selected.Element)
+                    Identifier = RetainWindow(process, selected.Element, selected.Snapshot)
                 };
                 return MacAccessibilityWindowProbe.Ready(
                     window,
@@ -132,10 +144,14 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         return probe ?? MacAccessibilityWindowProbe.Failure("accessibility-application-unavailable");
     }
 
-    public bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame)
+    public MacAccessibilityOperationResult TrySetFrame(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        MacWindowFrame frame)
     {
-        if (!frame.IsValid || string.IsNullOrWhiteSpace(windowIdentifier)) return false;
-        return WithSelectedWindow(process, windowIdentifier, window =>
+        if (!frame.IsValid || string.IsNullOrWhiteSpace(windowIdentifier))
+            return MacAccessibilityOperationResult.Failure("accessibility-frame-request-invalid");
+        var result = WithSelectedWindow(process, windowIdentifier, window =>
         {
             var position = new CGPoint(frame.Left, frame.Top);
             var size = new CGSize(frame.Width, frame.Height);
@@ -145,13 +161,22 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
             {
                 Release(positionValue);
                 Release(sizeValue);
-                return false;
+                return MacAccessibilityOperationResult.Failure("accessibility-frame-value-create-failed");
             }
 
             try
             {
-                return SetAttribute(window, "AXPosition", positionValue)
-                    && SetAttribute(window, "AXSize", sizeValue);
+                // Resize before moving so an application-enforced size adjustment cannot
+                // recenter the final top-left position after it has already been written.
+                var sizeError = SetAttributeWithRetry(window, "AXSize", sizeValue);
+                if (sizeError != 0)
+                    return MacAccessibilityOperationResult.Failure(
+                        $"accessibility-frame-size-{DescribeAxError(sizeError)}");
+                var positionError = SetAttributeWithRetry(window, "AXPosition", positionValue);
+                return positionError == 0
+                    ? MacAccessibilityOperationResult.Success()
+                    : MacAccessibilityOperationResult.Failure(
+                        $"accessibility-frame-position-{DescribeAxError(positionError)}");
             }
             finally
             {
@@ -159,13 +184,30 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
                 Release(sizeValue);
             }
         });
+        return string.IsNullOrWhiteSpace(result.DiagnosticCode)
+            ? MacAccessibilityOperationResult.Failure("accessibility-window-reference-unavailable")
+            : result;
     }
 
-    public bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized)
+    public MacAccessibilityOperationResult TrySetMinimized(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        bool minimized)
     {
-        if (string.IsNullOrWhiteSpace(windowIdentifier)) return false;
-        return WithSelectedWindow(process, windowIdentifier,
-            window => SetAttribute(window, "AXMinimized", GetBoolean(minimized)));
+        if (string.IsNullOrWhiteSpace(windowIdentifier))
+            return MacAccessibilityOperationResult.Failure("accessibility-minimized-request-invalid");
+        var result = WithSelectedWindow(process, windowIdentifier,
+            window =>
+            {
+                var error = SetAttributeWithRetry(window, "AXMinimized", GetBoolean(minimized));
+                return error == 0
+                    ? MacAccessibilityOperationResult.Success()
+                    : MacAccessibilityOperationResult.Failure(
+                        $"accessibility-minimized-{DescribeAxError(error)}");
+            });
+        return string.IsNullOrWhiteSpace(result.DiagnosticCode)
+            ? MacAccessibilityOperationResult.Failure("accessibility-window-reference-unavailable")
+            : result;
     }
 
     public bool TryRaise(
@@ -199,18 +241,18 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         Release(element);
     }
 
-    private bool WithSelectedWindow(
+    private T WithSelectedWindow<T>(
         Contracts.RobloxProcessIdentity process,
         string identifier,
-        Func<nint, bool> action)
+        Func<nint, T> action)
     {
-        if (!OperatingSystem.IsMacOS() || !IsCurrentManagedIdentity(process)) return false;
+        if (!OperatingSystem.IsMacOS() || !IsCurrentManagedIdentity(process)) return default!;
         RetainedWindow retained;
         nint retainedElement;
         lock (_windowsGate)
         {
             if (!_retainedWindows.TryGetValue(identifier, out retained!)
-                || !retained.Process.Matches(process)) return false;
+                || !retained.Process.Matches(process)) return default!;
             retainedElement = NativeMethods.CFRetain(retained.Element);
         }
         try
@@ -218,7 +260,8 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
             return NativeMethods.AXUIElementGetPid(retainedElement, out var actualPid) == 0
                 && actualPid == process.Pid
                 && IsCurrentManagedIdentity(process)
-                && action(retainedElement);
+                    ? action(retainedElement)
+                    : default!;
         }
         finally { Release(retainedElement); }
     }
@@ -229,6 +272,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     {
         string? identifier = null;
         nint element = nint.Zero;
+        MacAccessibleWindow? fallback = null;
         lock (_windowsGate)
         {
             var existing = _retainedWindows.FirstOrDefault(pair =>
@@ -237,6 +281,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
             {
                 identifier = existing.Key;
                 element = NativeMethods.CFRetain(existing.Value.Element);
+                fallback = existing.Value.Snapshot;
             }
         }
 
@@ -248,8 +293,17 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
 
         try
         {
-            if (TryReadWindowCandidate(element, process.Pid, out var candidate))
+            if (TryReadWindowCandidate(element, process.Pid, fallback, out var candidate))
             {
+                lock (_windowsGate)
+                {
+                    if (_retainedWindows.TryGetValue(identifier, out var current)
+                        && current.Process.Matches(process)
+                        && current.Element == element)
+                    {
+                        _retainedWindows[identifier] = current with { Snapshot = candidate.Snapshot };
+                    }
+                }
                 probe = MacAccessibilityWindowProbe.Ready(
                     candidate.Snapshot with { Identifier = identifier },
                     totalWindowCount: 1,
@@ -264,7 +318,10 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         return false;
     }
 
-    private string RetainWindow(Contracts.RobloxProcessIdentity process, nint element)
+    private string RetainWindow(
+        Contracts.RobloxProcessIdentity process,
+        nint element,
+        MacAccessibleWindow snapshot)
     {
         lock (_windowsGate)
         {
@@ -278,7 +335,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
 
             var identifier = $"ax-window-{Guid.NewGuid():N}";
             _ = NativeMethods.CFRetain(element);
-            _retainedWindows.Add(identifier, new RetainedWindow(process, element));
+            _retainedWindows.Add(identifier, new RetainedWindow(process, element, snapshot));
             return identifier;
         }
     }
@@ -332,7 +389,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
             for (nint index = 0; index < count; index++)
             {
                 var window = NativeMethods.CFArrayGetValueAtIndex(array, index);
-                if (!TryReadWindowCandidate(window, expectedPid: null, out var candidate)) continue;
+                if (!TryReadWindowCandidate(window, expectedPid: null, fallback: null, out var candidate)) continue;
                 _ = NativeMethods.CFRetain(window);
                 candidates.Add(candidate);
             }
@@ -344,6 +401,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     private static bool TryReadWindowCandidate(
         nint window,
         int? expectedPid,
+        MacAccessibleWindow? fallback,
         out WindowCandidate candidate)
     {
         candidate = null!;
@@ -355,14 +413,23 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         if (!string.Equals(role, "AXWindow", StringComparison.Ordinal)
             || (!string.IsNullOrWhiteSpace(subrole)
                 && !string.Equals(subrole, "AXStandardWindow", StringComparison.Ordinal))) return false;
-        if (!TryReadFrame(window, out var frame) || !frame.IsValid) return false;
+        var minimized = CopyBooleanAttribute(window, "AXMinimized");
+        if (!TryReadFrame(window, out var frame) || !frame.IsValid)
+        {
+            // Apple only requires position and size for visible accessibility
+            // objects. A retained minimized window may temporarily omit them;
+            // keep its last verified frame so it can still be unminimized and
+            // restored instead of becoming permanently undiscoverable.
+            if (!minimized || fallback is null || !fallback.Frame.IsValid) return false;
+            frame = fallback.Frame;
+        }
         candidate = new WindowCandidate(
             window,
             new MacAccessibleWindow(
                 string.Empty,
-                CopyStringAttribute(window, "AXTitle"),
+                CopyStringAttribute(window, "AXTitle") ?? fallback?.Title,
                 frame,
-                CopyBooleanAttribute(window, "AXMinimized"),
+                minimized,
                 CopyBooleanAttribute(window, "AXFullScreen")),
             CopyBooleanAttribute(window, "AXMain"));
         return true;
@@ -422,17 +489,43 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         finally { Release(value); }
     }
 
-    private static bool SetAttribute(nint element, string name, nint value)
+    private static int SetAttribute(nint element, string name, nint value)
     {
         var attribute = CreateString(name);
         if (attribute == nint.Zero || value == nint.Zero)
         {
             Release(attribute);
-            return false;
+            return -25201;
         }
-        try { return NativeMethods.AXUIElementSetAttributeValue(element, attribute, value) == 0; }
+        try { return NativeMethods.AXUIElementSetAttributeValue(element, attribute, value); }
         finally { Release(attribute); }
     }
+
+    private static int SetAttributeWithRetry(nint element, string name, nint value)
+    {
+        const int cannotComplete = -25204;
+        var error = SetAttribute(element, name, value);
+        for (var attempt = 1; attempt < 3 && error == cannotComplete; attempt++)
+        {
+            Thread.Sleep(25);
+            error = SetAttribute(element, name, value);
+        }
+        return error;
+    }
+
+    private static string DescribeAxError(int error) => error switch
+    {
+        -25200 => "failure",
+        -25201 => "illegal-argument",
+        -25202 => "invalid-ui-element",
+        -25204 => "cannot-complete",
+        -25205 => "attribute-unsupported",
+        -25208 => "not-implemented",
+        -25211 => "api-disabled",
+        -25212 => "no-value",
+        -25214 => "not-enough-precision",
+        _ => $"ax-error-{Math.Abs(error)}"
+    };
 
     private static nint CreateString(string value) =>
         NativeMethods.CFStringCreateWithCString(nint.Zero, value, Utf8Encoding);
@@ -474,7 +567,10 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
 
     private sealed record WindowCandidate(nint Element, MacAccessibleWindow Snapshot, bool IsMain);
     private sealed record WindowEnumeration(int TotalWindowCount, IReadOnlyList<WindowCandidate> Candidates);
-    private sealed record RetainedWindow(Contracts.RobloxProcessIdentity Process, nint Element);
+    private sealed record RetainedWindow(
+        Contracts.RobloxProcessIdentity Process,
+        nint Element,
+        MacAccessibleWindow Snapshot);
     [StructLayout(LayoutKind.Sequential)] private readonly record struct CGPoint(double X, double Y);
     [StructLayout(LayoutKind.Sequential)] private readonly record struct CGSize(double Width, double Height);
 

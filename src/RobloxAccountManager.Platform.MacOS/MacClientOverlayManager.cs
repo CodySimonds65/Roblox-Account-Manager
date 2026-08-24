@@ -154,28 +154,40 @@ public sealed class MacClientOverlayManager
                 }
             }
 
-            var hiddenAllUnselected = true;
             foreach (var candidate in candidates.Where(candidate =>
                          !string.Equals(candidate.Window.AccountId, selectedAccountId, StringComparison.Ordinal)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                hiddenAllUnselected &= TrySetMinimizedVerified(
+                if (TrySetMinimizedVerified(
                     candidate.Window.Process,
                     candidate.Accessible.Identifier,
-                    true);
-            }
-            if (!hiddenAllUnselected)
+                    true,
+                    out var hideFailure)) continue;
                 return await FailAndRestoreAsync(
-                    "hide-unselected-failed",
+                    $"hide-unselected-{hideFailure}",
                     cancellationToken,
-                    clients: diagnostics).ConfigureAwait(false);
+                    candidate.Window.AccountId,
+                    candidate.Window.Process.Pid,
+                    diagnostics).ConfigureAwait(false);
+            }
 
             cancellationToken.ThrowIfCancellationRequested();
-            if (!TrySetFrameVerified(selected.Window.Process, selected.Accessible.Identifier, viewport)
-                || !TrySetMinimizedVerified(selected.Window.Process, selected.Accessible.Identifier, false))
+            // Position and size are only guaranteed AX attributes for visible
+            // objects. Unminimize first so a Dock-minimized Roblox window can be
+            // measured and placed instead of failing before it becomes visible.
+            if (!TrySetMinimizedVerified(
+                    selected.Window.Process,
+                    selected.Accessible.Identifier,
+                    false,
+                    out var showFailure)
+                || !TrySetFrameVerified(
+                    selected.Window.Process,
+                    selected.Accessible.Identifier,
+                    viewport,
+                    out showFailure))
             {
                 return await FailAndRestoreAsync(
-                    "show-selected-failed",
+                    $"show-selected-{showFailure}",
                     cancellationToken,
                     selectedAccountId,
                     selected.Window.Process.Pid,
@@ -235,7 +247,11 @@ public sealed class MacClientOverlayManager
                     RemoveTrackedIdentity(tracked.Process);
                     continue;
                 }
-                succeeded &= TrySetMinimizedVerified(tracked.Process, tracked.WindowIdentifier, true);
+                succeeded &= TrySetMinimizedVerified(
+                    tracked.Process,
+                    tracked.WindowIdentifier,
+                    true,
+                    out _);
             }
             return succeeded
                 ? MacOverlayOperationResult.Success()
@@ -326,43 +342,115 @@ public sealed class MacClientOverlayManager
         var current = _accessibility.ProbeMainWindow(tracked.Process).Window;
         if (current is null || !string.Equals(current.Identifier, tracked.WindowIdentifier, StringComparison.Ordinal))
             return false;
-        var frameRestored = TrySetFrameVerified(
-            tracked.Process,
-            tracked.WindowIdentifier,
-            tracked.OriginalFrame);
+        var frameRestored = FramesMatch(current.Frame, tracked.OriginalFrame);
+        if (!frameRestored)
+        {
+            // Position and size are only guaranteed for a visible AX object.
+            // Avoid this unminimize/write cycle entirely when the frame never
+            // changed (for example, when Roblox rejected the initial resize).
+            var madeVisible = TrySetMinimizedVerified(
+                tracked.Process,
+                tracked.WindowIdentifier,
+                false,
+                out _);
+            frameRestored = madeVisible && TrySetFrameVerified(
+                tracked.Process,
+                tracked.WindowIdentifier,
+                tracked.OriginalFrame,
+                out _);
+        }
         var minimizedRestored = TrySetMinimizedVerified(
             tracked.Process,
             tracked.WindowIdentifier,
-            tracked.OriginallyMinimized);
+            tracked.OriginallyMinimized,
+            out _);
         return frameRestored && minimizedRestored;
     }
 
     private bool TrySetFrameVerified(
         Contracts.RobloxProcessIdentity process,
         string windowIdentifier,
-        MacWindowFrame frame)
+        MacWindowFrame frame,
+        out string diagnosticCode)
     {
-        if (!IsCurrentManagedIdentity(process)
-            || !_accessibility.TrySetFrame(process, windowIdentifier, frame)
-            || !IsCurrentManagedIdentity(process)) return false;
+        diagnosticCode = "accessibility-frame-stale-process-identity";
+        if (!IsCurrentManagedIdentity(process)) return false;
+        var before = _accessibility.ProbeMainWindow(process).Window;
+        if (before is not null
+            && string.Equals(before.Identifier, windowIdentifier, StringComparison.Ordinal)
+            && FramesMatch(before.Frame, frame))
+        {
+            diagnosticCode = "accessibility-frame-already-ready";
+            return true;
+        }
+        var operation = _accessibility.TrySetFrame(process, windowIdentifier, frame);
+        if (!operation.Succeeded)
+        {
+            diagnosticCode = operation.DiagnosticCode;
+            return false;
+        }
+        if (!IsCurrentManagedIdentity(process)) return false;
         var current = _accessibility.ProbeMainWindow(process).Window;
-        return current is not null
-            && string.Equals(current.Identifier, windowIdentifier, StringComparison.Ordinal)
-            && FramesMatch(current.Frame, frame);
+        if (current is null)
+        {
+            diagnosticCode = "accessibility-frame-readback-unavailable";
+            return false;
+        }
+        if (!string.Equals(current.Identifier, windowIdentifier, StringComparison.Ordinal))
+        {
+            diagnosticCode = "accessibility-frame-window-changed";
+            return false;
+        }
+        if (!FramesMatch(current.Frame, frame))
+        {
+            diagnosticCode = DescribeFrameMismatch(current.Frame, frame);
+            return false;
+        }
+        diagnosticCode = "accessibility-frame-ready";
+        return true;
     }
 
     private bool TrySetMinimizedVerified(
         Contracts.RobloxProcessIdentity process,
         string windowIdentifier,
-        bool minimized)
+        bool minimized,
+        out string diagnosticCode)
     {
-        if (!IsCurrentManagedIdentity(process)
-            || !_accessibility.TrySetMinimized(process, windowIdentifier, minimized)
-            || !IsCurrentManagedIdentity(process)) return false;
+        diagnosticCode = "accessibility-minimized-stale-process-identity";
+        if (!IsCurrentManagedIdentity(process)) return false;
+        var before = _accessibility.ProbeMainWindow(process).Window;
+        if (before is not null
+            && string.Equals(before.Identifier, windowIdentifier, StringComparison.Ordinal)
+            && before.IsMinimized == minimized)
+        {
+            diagnosticCode = "accessibility-minimized-already-ready";
+            return true;
+        }
+        var operation = _accessibility.TrySetMinimized(process, windowIdentifier, minimized);
+        if (!operation.Succeeded)
+        {
+            diagnosticCode = operation.DiagnosticCode;
+            return false;
+        }
+        if (!IsCurrentManagedIdentity(process)) return false;
         var current = _accessibility.ProbeMainWindow(process).Window;
-        return current is not null
-            && string.Equals(current.Identifier, windowIdentifier, StringComparison.Ordinal)
-            && current.IsMinimized == minimized;
+        if (current is null)
+        {
+            diagnosticCode = "accessibility-minimized-readback-unavailable";
+            return false;
+        }
+        if (!string.Equals(current.Identifier, windowIdentifier, StringComparison.Ordinal))
+        {
+            diagnosticCode = "accessibility-minimized-window-changed";
+            return false;
+        }
+        if (current.IsMinimized != minimized)
+        {
+            diagnosticCode = "accessibility-minimized-readback-mismatch";
+            return false;
+        }
+        diagnosticCode = "accessibility-minimized-ready";
+        return true;
     }
 
     private static bool FramesMatch(MacWindowFrame left, MacWindowFrame right) =>
@@ -370,6 +458,12 @@ public sealed class MacClientOverlayManager
         && Math.Abs(left.Top - right.Top) <= 1
         && Math.Abs(left.Width - right.Width) <= 1
         && Math.Abs(left.Height - right.Height) <= 1;
+
+    private static string DescribeFrameMismatch(MacWindowFrame actual, MacWindowFrame requested) =>
+        $"accessibility-frame-readback-mismatch-left-{Math.Round(actual.Left - requested.Left)}" +
+        $"-top-{Math.Round(actual.Top - requested.Top)}" +
+        $"-width-{Math.Round(actual.Width - requested.Width)}" +
+        $"-height-{Math.Round(actual.Height - requested.Height)}";
 
     private bool IsCurrentManagedIdentity(Contracts.RobloxProcessIdentity expected)
     {

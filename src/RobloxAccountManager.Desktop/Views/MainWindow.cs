@@ -250,7 +250,7 @@ public sealed class MainWindow : Window
         {
             _viewModel.Settings.ShowGamePresetPanel = true;
             await SaveAsync();
-            SelectPage("accounts");
+            await SelectPageAsync("accounts");
         };
         actions.Children.Add(_showPresets);
         AddHeaderAction(actions, "Plugins", "plugins");
@@ -833,7 +833,9 @@ public sealed class MainWindow : Window
             {
                 SetClientOverlayStatus(
                     "Could not restore every Roblox window. Grant Accessibility permission, then try navigating again.",
-                    failure: true);
+                    failure: true,
+                    activityKey: "overlay-navigation-restore-failed",
+                    activityDetail: "code=restore-overlay-failed; navigation=blocked");
                 return;
             }
             _viewModel.SelectedPage = page;
@@ -1715,21 +1717,33 @@ public sealed class MainWindow : Window
             _ => LaunchDiagnostics.SanitiseCode(diagnostic.DiagnosticCode)
         };
 
-    private static string DescribeOverlayFailure(string code) => code.Split(':', 2)[0] switch
+    private static string DescribeOverlayFailure(string code)
     {
-        "accessibility-permission-required" => "Grant Accessibility permission to place Roblox over the Clients viewport.",
-        "accessibility-no-windows" or "accessibility-application-unavailable" => "Waiting for Roblox to publish its game window to Accessibility…",
-        "accessibility-no-eligible-window" => "Roblox windows were found, but none can be safely placed yet.",
-        "accessibility-window-ambiguous" => "More than one Roblox game-window candidate was found; waiting for a stable main window…",
-        "accessible-window-changed" => "Roblox replaced its game window; validating the replacement before placement…",
-        "fullscreen-window-not-supported" => "Exit Roblox fullscreen mode before using the Clients panel.",
-        "stale-process-identity" => "A Roblox process identity changed; refresh or relaunch that account.",
-        "hide-unselected-failed" => "A client could not be minimized safely; every tracked window was restored.",
-        "show-selected-failed" => "The selected client could not be positioned and unminimized safely; tracked windows were restored.",
-        "raise-selected-failed" => "The selected client was positioned but macOS could not bring it forward.",
-        "raise-cancelled" => "Client placement is ready. Select its tab again to bring Roblox forward.",
-        _ => $"Client overlay paused: {LaunchDiagnostics.SanitiseCode(code)}"
-    };
+        var primary = code.Split(':', 2)[0];
+        return primary switch
+        {
+            "accessibility-permission-required" => "Grant Accessibility permission to place Roblox over the Clients viewport.",
+            "accessibility-no-windows" or "accessibility-application-unavailable" => "Waiting for Roblox to publish its game window to Accessibility…",
+            "accessibility-no-eligible-window" => "Roblox windows were found, but none can be safely placed yet.",
+            "accessibility-window-ambiguous" => "More than one Roblox game-window candidate was found; waiting for a stable main window…",
+            "accessible-window-changed" => "Roblox replaced its game window; validating the replacement before placement…",
+            "fullscreen-window-not-supported" => "Exit Roblox fullscreen mode before using the Clients panel.",
+            "stale-process-identity" => "A Roblox process identity changed; refresh or relaunch that account.",
+            "raise-selected-failed" => "The selected client was positioned but macOS could not bring it forward.",
+            "raise-cancelled" => "Client placement is ready. Select its tab again to bring Roblox forward.",
+            _ when primary.StartsWith("hide-unselected-", StringComparison.Ordinal) =>
+                "A client could not be minimized safely; every tracked window was restored.",
+            _ when primary.Contains("accessibility-frame-size-", StringComparison.Ordinal) =>
+                "macOS could not resize the selected Roblox window. See Activity for the Accessibility error.",
+            _ when primary.Contains("accessibility-frame-position-", StringComparison.Ordinal) =>
+                "macOS could not move the selected Roblox window. See Activity for the Accessibility error.",
+            _ when primary.Contains("accessibility-frame-readback-mismatch", StringComparison.Ordinal) =>
+                "Roblox constrained the requested Clients viewport size; the original window state was restored.",
+            _ when primary.StartsWith("show-selected-accessibility-minimized-", StringComparison.Ordinal) =>
+                "macOS could not restore the selected Roblox window from the Dock. See Activity for the Accessibility error.",
+            _ => $"Client overlay paused: {LaunchDiagnostics.SanitiseCode(code)}"
+        };
+    }
 
     private Control BuildActivityPage()
     {
