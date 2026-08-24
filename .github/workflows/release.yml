@@ -35,7 +35,7 @@ jobs:
           $hasReleaseLabel = $env:PR_LABELS -match '(?i)"release"'
           $bump = if ($signals -match '(?i)\b(BREAKING|major)\b') {
               'major'
-          } elseif ($signals -match '(?i)\b(feat|feature|minor)\b') {
+          } elseif ($signals -match '(?i)\b(feat|feature|minor|refactor)\b') {
               'minor'
           } elseif ($signals -match '(?i)\b(fix|chore)\b') {
               'patch'
