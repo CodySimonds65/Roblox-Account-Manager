@@ -24,8 +24,14 @@ inside their frontend or platform projects.
 The macOS Clients panel keeps Roblox as a separate top-level window and uses Accessibility only for
 verified frame, minimized-state, and explicit-user-selection raise operations. A refresh must resolve
 every opted-in managed process before changing any window. Discovery or identity failures restore
-previously tracked state and must never minimize a newly discovered or unresolved client. Passive
-timer refreshes are coalesced, while an explicit tab selection is retained and runs next.
+previously tracked state and must never minimize a newly discovered or unresolved client. Accessibility
+setter success is not sufficient by itself: minimized and frame writes require settled readback, with
+transient minimized-window discovery gaps retried while the retained window identity remains valid.
+Passive timer refreshes are coalesced, while an explicit tab selection is retained and runs next.
+
+Navigation away from Clients remains blocked while the original Roblox window state is unverified. The
+Clients status row exposes a retry action, and permission-required is reported separately from transient
+readback or restoration failures.
 
 Accessibility probe and overlay state changes are written to the Activity log without titles or
 authentication data. Repeated identical timer results are deduplicated.

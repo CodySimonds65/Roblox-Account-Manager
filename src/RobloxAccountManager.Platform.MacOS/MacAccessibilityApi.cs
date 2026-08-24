@@ -114,7 +114,9 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
                 var selected = SelectWindow(enumeration.Candidates);
                 if (selected is null)
                 {
-                    var code = enumeration.TotalWindowCount == 0
+                    var code = enumeration.HasTransientCandidate
+                        ? "accessibility-window-not-settled"
+                        : enumeration.TotalWindowCount == 0
                         ? "accessibility-no-windows"
                         : enumeration.Candidates.Count == 0
                             ? "accessibility-no-eligible-window"
@@ -293,7 +295,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
 
         try
         {
-            if (TryReadWindowCandidate(element, process.Pid, fallback, out var candidate))
+            if (TryReadWindowCandidate(element, process.Pid, fallback, out var candidate, out var transient))
             {
                 lock (_windowsGate)
                 {
@@ -310,10 +312,16 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
                     eligibleWindowCount: 1);
                 return true;
             }
+            if (transient)
+            {
+                probe = MacAccessibilityWindowProbe.Failure(
+                    "accessibility-window-not-settled",
+                    totalWindowCount: 1);
+                return true;
+            }
         }
         finally { Release(element); }
 
-        ForgetWindow(process, identifier);
         probe = null!;
         return false;
     }
@@ -381,19 +389,29 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     private static WindowEnumeration EnumerateWindows(nint application)
     {
         var array = CopyAttribute(application, "AXWindows");
-        if (array == nint.Zero) return new WindowEnumeration(0, []);
+        if (array == nint.Zero) return new WindowEnumeration(0, [], false);
         try
         {
             var count = NativeMethods.CFArrayGetCount(array);
             var candidates = new List<WindowCandidate>();
+            var hasTransientCandidate = false;
             for (nint index = 0; index < count; index++)
             {
                 var window = NativeMethods.CFArrayGetValueAtIndex(array, index);
-                if (!TryReadWindowCandidate(window, expectedPid: null, fallback: null, out var candidate)) continue;
+                if (!TryReadWindowCandidate(
+                        window,
+                        expectedPid: null,
+                        fallback: null,
+                        out var candidate,
+                        out var transient))
+                {
+                    hasTransientCandidate |= transient;
+                    continue;
+                }
                 _ = NativeMethods.CFRetain(window);
                 candidates.Add(candidate);
             }
-            return new WindowEnumeration((int)count, candidates);
+            return new WindowEnumeration((int)count, candidates, hasTransientCandidate);
         }
         finally { Release(array); }
     }
@@ -402,9 +420,11 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         nint window,
         int? expectedPid,
         MacAccessibleWindow? fallback,
-        out WindowCandidate candidate)
+        out WindowCandidate candidate,
+        out bool transient)
     {
         candidate = null!;
+        transient = false;
         if (window == nint.Zero
             || NativeMethods.AXUIElementGetPid(window, out var actualPid) != 0
             || expectedPid is int pid && actualPid != pid) return false;
@@ -413,15 +433,19 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         if (!string.Equals(role, "AXWindow", StringComparison.Ordinal)
             || (!string.IsNullOrWhiteSpace(subrole)
                 && !string.Equals(subrole, "AXStandardWindow", StringComparison.Ordinal))) return false;
-        var minimized = CopyBooleanAttribute(window, "AXMinimized");
+        var hasMinimizedState = TryCopyBooleanAttribute(window, "AXMinimized", out var minimized);
+        if (!hasMinimizedState)
+        {
+            transient = true;
+            return false;
+        }
         if (!TryReadFrame(window, out var frame) || !frame.IsValid)
         {
-            // Apple only requires position and size for visible accessibility
-            // objects. A retained minimized window may temporarily omit them;
-            // keep its last verified frame so it can still be unminimized and
-            // restored instead of becoming permanently undiscoverable.
-            if (!minimized || fallback is null || !fallback.Frame.IsValid) return false;
-            frame = fallback.Frame;
+            // AX attributes can be temporarily unavailable while Roblox is
+            // replacing or settling a native window. Do not publish a stale
+            // retained frame as a fresh readback; the manager will retry.
+            transient = true;
+            return false;
         }
         candidate = new WindowCandidate(
             window,
@@ -481,13 +505,21 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         finally { Release(value); }
     }
 
-    private static bool CopyBooleanAttribute(nint element, string name)
+    private static bool TryCopyBooleanAttribute(nint element, string name, out bool value)
     {
-        var value = CopyAttribute(element, name);
-        if (value == nint.Zero) return false;
-        try { return NativeMethods.CFBooleanGetValue(value); }
-        finally { Release(value); }
+        value = false;
+        var nativeValue = CopyAttribute(element, name);
+        if (nativeValue == nint.Zero) return false;
+        try
+        {
+            value = NativeMethods.CFBooleanGetValue(nativeValue);
+            return true;
+        }
+        finally { Release(nativeValue); }
     }
+
+    private static bool CopyBooleanAttribute(nint element, string name) =>
+        TryCopyBooleanAttribute(element, name, out var value) && value;
 
     private static int SetAttribute(nint element, string name, nint value)
     {
@@ -566,7 +598,10 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     }
 
     private sealed record WindowCandidate(nint Element, MacAccessibleWindow Snapshot, bool IsMain);
-    private sealed record WindowEnumeration(int TotalWindowCount, IReadOnlyList<WindowCandidate> Candidates);
+    private sealed record WindowEnumeration(
+        int TotalWindowCount,
+        IReadOnlyList<WindowCandidate> Candidates,
+        bool HasTransientCandidate);
     private sealed record RetainedWindow(
         Contracts.RobloxProcessIdentity Process,
         nint Element,

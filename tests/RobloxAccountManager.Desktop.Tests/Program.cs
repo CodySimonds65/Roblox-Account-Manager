@@ -5,6 +5,7 @@ using RobloxAccountManager.Core.Models;
 using RobloxAccountManager.Core.Navigation;
 using RobloxAccountManager.Desktop;
 using RobloxAccountManager.Desktop.Services;
+using RobloxAccountManager.Platform.MacOS;
 using System.Text.Json;
 
 static void Require(bool condition, string message)
@@ -31,6 +32,25 @@ releaseFirstRefresh.TrySetResult();
 await passiveRefresh;
 Require(refreshKinds.SequenceEqual([false, true]),
     "An explicit client-tab selection was dropped while a passive overlay refresh was active.");
+
+var readbackFailureText = ClientOverlayFailureText.Describe(
+    "accessibility-minimized-readback-mismatch:restore-overlay-failed");
+Require(!readbackFailureText.Contains("Grant Accessibility permission", StringComparison.Ordinal)
+        && readbackFailureText.Contains("retry restoration", StringComparison.OrdinalIgnoreCase),
+    "A minimized-state restore failure was incorrectly described as a permission failure.");
+Require(ClientOverlayFailureText.Describe("restore-overlay-failed")
+            .Contains("retry restoration", StringComparison.OrdinalIgnoreCase),
+    "A blocked navigation restore did not expose a retry action in its recovery text.");
+Require(ClientOverlayFailureText.Describe("accessibility-permission-required")
+            .Contains("Grant Accessibility permission", StringComparison.Ordinal),
+    "An Accessibility permission failure lost its permission guidance.");
+Require(!ClientOverlayFailureText.IsRetryable(MacOverlayOperationResult.Failure(
+                "restore-overlay-failed",
+                clients: [new MacOverlayClientDiagnostic("account", 1, "accessibility-frame-invalid", false, 0, 0, "restore", false)]))
+        && ClientOverlayFailureText.IsRetryable(MacOverlayOperationResult.Failure(
+                "restore-overlay-failed",
+                clients: [new MacOverlayClientDiagnostic("account", 1, "accessibility-window-not-settled", false, 0, 0, "restore", true)])),
+    "Hard restore failures were retried automatically or transient restore failures were not retryable.");
 
 try
 {

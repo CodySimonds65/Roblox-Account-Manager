@@ -79,6 +79,7 @@ public sealed class MainWindow : Window
     private ListBox? _clientTabsControl;
     private Border? _clientViewport;
     private TextBlock? _clientOverlayStatus;
+    private Button? _clientOverlayRetry;
     private string? _selectedClientAccountId;
     private bool _clientViewVisible;
     private readonly ClientOverlayRefreshScheduler _clientRefreshScheduler;
@@ -828,15 +829,22 @@ public sealed class MainWindow : Window
         {
             var page = _viewModel.Pages.FirstOrDefault(candidate => string.Equals(candidate.Key, pageKey, StringComparison.Ordinal));
             if (page is null) return;
-            if (_clientViewVisible && !string.Equals(pageKey, "clients", StringComparison.Ordinal)
-                && !await DeactivateClientOverlayAsync())
+            if (_clientViewVisible && !string.Equals(pageKey, "clients", StringComparison.Ordinal))
             {
-                SetClientOverlayStatus(
-                    "Could not restore every Roblox window. Grant Accessibility permission, then try navigating again.",
-                    failure: true,
-                    activityKey: "overlay-navigation-restore-failed",
-                    activityDetail: "code=restore-overlay-failed; navigation=blocked");
-                return;
+                var restore = await DeactivateClientOverlayAsync();
+                if (!restore.Succeeded)
+                {
+                    var account = restore.AccountId is not null
+                        ? _viewModel.Accounts.FirstOrDefault(candidate => candidate.Id == restore.AccountId)?.Label
+                        : null;
+                    SetClientOverlayStatus(
+                        ClientOverlayFailureText.Describe(restore.DiagnosticCode),
+                        failure: true,
+                        activityKey: $"overlay-navigation-restore-failed:{restore.DiagnosticCode}:{restore.AccountId}:{restore.ProcessId}",
+                         activityDetail: $"code={restore.DiagnosticCode}; phase=restore; account={account ?? "none"}; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                    SetClientOverlayRecoveryAvailable(true);
+                    return;
+                }
             }
             _viewModel.SelectedPage = page;
             UpdatePresetRevealButton();
@@ -1429,11 +1437,46 @@ public sealed class MainWindow : Window
             Foreground = MutedTextBrush,
             TextWrapping = TextWrapping.Wrap
         };
+        _clientOverlayRetry = new Button
+        {
+            Content = "Retry restoration",
+            Padding = new Thickness(11, 6),
+            IsVisible = false
+        };
+        StyleButton(_clientOverlayRetry, secondary: true);
+        _clientOverlayRetry.Click += async (_, _) =>
+        {
+            if (_clientOverlayRetry is null) return;
+            _clientOverlayRetry.IsEnabled = false;
+            try
+            {
+                var restore = await DeactivateClientOverlayAsync();
+                if (restore.Succeeded)
+                {
+                    SetClientOverlayRecoveryAvailable(false);
+                    SetClientOverlayStatus(
+                        "Roblox windows restored. You can navigate away from Clients.",
+                        failure: false,
+                        activityKey: "overlay-restore-ready",
+                        activityDetail: "code=restore-overlay-ready; phase=restore; retryable=false");
+                }
+                else
+                {
+                    SetClientOverlayStatus(
+                        ClientOverlayFailureText.Describe(restore.DiagnosticCode),
+                        failure: true,
+                        activityKey: $"overlay-retry-failed:{restore.DiagnosticCode}:{restore.AccountId}:{restore.ProcessId}",
+                         activityDetail: $"code={restore.DiagnosticCode}; phase=restore; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                    SetClientOverlayRecoveryAvailable(true);
+                }
+            }
+            finally { _clientOverlayRetry.IsEnabled = true; }
+        };
         var controls = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             Spacing = 8,
-            Children = { _clientOverlayStatus }
+            Children = { _clientOverlayStatus, _clientOverlayRetry }
         };
         var layout = new Grid
         {
@@ -1534,9 +1577,11 @@ public sealed class MainWindow : Window
                 SetClientOverlayStatus(
                     restore.Succeeded
                         ? "No opted-in RAM-managed Roblox clients are running."
-                        : "No opted-in clients are running, but a prior window restoration will be retried.",
+                        : ClientOverlayFailureText.Describe(restore.DiagnosticCode),
                     failure: !restore.Succeeded,
-                    activityKey: restore.Succeeded ? "overlay-no-clients" : "overlay-no-clients-restore-failed");
+                    activityKey: restore.Succeeded ? "overlay-no-clients" : $"overlay-no-clients-restore-failed:{restore.DiagnosticCode}",
+                    activityDetail: $"code={restore.DiagnosticCode}; phase=restore; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                SetClientOverlayRecoveryAvailable(!restore.Succeeded);
                 return;
             }
             if (!TryGetClientViewport(out var viewport, out var viewportFailure))
@@ -1546,9 +1591,11 @@ public sealed class MainWindow : Window
                 SetClientOverlayStatus(
                     restore.Succeeded
                         ? viewportFailure
-                        : $"{viewportFailure} A prior window restoration will be retried.",
+                        : ClientOverlayFailureText.Describe(restore.DiagnosticCode),
                     failure: !restore.Succeeded,
-                    activityKey: $"overlay-viewport:{viewportFailure}:{restore.DiagnosticCode}");
+                    activityKey: $"overlay-viewport:{viewportFailure}:{restore.DiagnosticCode}",
+                    activityDetail: $"code={restore.DiagnosticCode}; phase=restore; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                SetClientOverlayRecoveryAvailable(!restore.Succeeded);
                 return;
             }
 
@@ -1575,6 +1622,10 @@ public sealed class MainWindow : Window
             var windowCounts = failedDiagnostic is null
                 ? "windows=unknown"
                 : $"windows={failedDiagnostic.EligibleWindowCount}/{failedDiagnostic.TotalWindowCount}";
+            var restoreDiagnostic = result.Clients.LastOrDefault(client =>
+                string.Equals(client.Phase, "restore", StringComparison.Ordinal));
+            var phase = DescribeOverlayPhase(result.DiagnosticCode);
+            var retryable = ClientOverlayFailureText.IsRetryable(result);
             SetClientOverlayStatus(
                 result.Succeeded
                     ? explicitUserSelection
@@ -1582,8 +1633,8 @@ public sealed class MainWindow : Window
                         : "Client placement is ready. Select a tab to bring Roblox in front of RAM."
                     : DescribeOverlayFailure(result.DiagnosticCode),
                 failure: !result.Succeeded,
-                activityKey: $"overlay:{result.DiagnosticCode}:{result.AccountId}:{readyCount}/{result.Clients.Count}:{windowCounts}",
-                activityDetail: $"code={result.DiagnosticCode}; account={failedAccount}; pid={result.ProcessId?.ToString() ?? "none"}; ready={readyCount}/{result.Clients.Count}; {windowCounts}");
+                activityKey: $"overlay:{result.DiagnosticCode}:{result.AccountId}:{readyCount}/{result.Clients.Count}:{windowCounts}:{restoreDiagnostic?.DiagnosticCode}",
+                activityDetail: $"code={result.DiagnosticCode}; phase={phase}; account={failedAccount}; pid={result.ProcessId?.ToString() ?? "none"}; ready={readyCount}/{result.Clients.Count}; {windowCounts}; restore={restoreDiagnostic?.DiagnosticCode ?? "none"}; retryable={retryable}");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1595,7 +1646,8 @@ public sealed class MainWindow : Window
             SetClientOverlayStatus(
                 $"Client overlay paused: {code}",
                 failure: true,
-                activityKey: $"overlay-exception:{code}");
+                activityKey: $"overlay-exception:{code}",
+                activityDetail: $"code={code}; phase=show; account=none; pid=none; ready=unknown; windows=unknown; restore=none; retryable=false");
             try { await _clientOverlay.RestoreAllAsync(); } catch { }
         }
     }
@@ -1628,24 +1680,35 @@ public sealed class MainWindow : Window
         return viewport.IsValid;
     }
 
-    private async Task<bool> DeactivateClientOverlayAsync()
+    private async Task<MacOverlayOperationResult> DeactivateClientOverlayAsync()
     {
         InvalidateClientOverlay();
-        if (_clientOverlay is null) return true;
-        for (var attempt = 0; attempt < 3; attempt++)
+        if (_clientOverlay is null) return MacOverlayOperationResult.Success();
+        MacOverlayOperationResult? lastResult = null;
+        for (var attempt = 0; attempt < 2; attempt++)
         {
             try
             {
                 var result = await _clientOverlay.RestoreAllAsync();
-                if (result.Succeeded) return true;
+                if (result.Succeeded)
+                {
+                    SetClientOverlayRecoveryAvailable(false);
+                    return result;
+                }
+                lastResult = result;
+                if (!ClientOverlayFailureText.IsRetryable(result)) break;
             }
-            catch
+            catch (Exception exception)
             {
+                lastResult = MacOverlayOperationResult.Failure(
+                    $"restore-exception-{LaunchDiagnostics.SanitiseCode(exception.Message)}");
+                break;
             }
-            if (attempt < 2) await Task.Delay(100);
+            if (attempt == 0) await Task.Delay(100);
         }
         _clientViewVisible = true;
-        return false;
+        SetClientOverlayRecoveryAvailable(true);
+        return lastResult ?? MacOverlayOperationResult.Failure("restore-overlay-failed");
     }
 
     private void InvalidateClientOverlay()
@@ -1710,6 +1773,7 @@ public sealed class MainWindow : Window
             "accessibility-permission-required" => "Permission required",
             "accessibility-no-windows" or "accessibility-application-unavailable" => "Waiting for game window",
             "accessibility-no-eligible-window" => $"Window not usable ({diagnostic.EligibleWindowCount}/{diagnostic.TotalWindowCount})",
+            "accessibility-window-not-settled" => "Window settling",
             "accessibility-window-ambiguous" => $"Multiple windows ({diagnostic.EligibleWindowCount})",
             "fullscreen-window-not-supported" => "Exit fullscreen",
             "stale-process-identity" => "Relaunch required",
@@ -1717,32 +1781,24 @@ public sealed class MainWindow : Window
             _ => LaunchDiagnostics.SanitiseCode(diagnostic.DiagnosticCode)
         };
 
-    private static string DescribeOverlayFailure(string code)
+    private static string DescribeOverlayFailure(string code) => ClientOverlayFailureText.Describe(code);
+
+    private static string DescribeOverlayPhase(string code)
     {
         var primary = code.Split(':', 2)[0];
-        return primary switch
-        {
-            "accessibility-permission-required" => "Grant Accessibility permission to place Roblox over the Clients viewport.",
-            "accessibility-no-windows" or "accessibility-application-unavailable" => "Waiting for Roblox to publish its game window to Accessibility…",
-            "accessibility-no-eligible-window" => "Roblox windows were found, but none can be safely placed yet.",
-            "accessibility-window-ambiguous" => "More than one Roblox game-window candidate was found; waiting for a stable main window…",
-            "accessible-window-changed" => "Roblox replaced its game window; validating the replacement before placement…",
-            "fullscreen-window-not-supported" => "Exit Roblox fullscreen mode before using the Clients panel.",
-            "stale-process-identity" => "A Roblox process identity changed; refresh or relaunch that account.",
-            "raise-selected-failed" => "The selected client was positioned but macOS could not bring it forward.",
-            "raise-cancelled" => "Client placement is ready. Select its tab again to bring Roblox forward.",
-            _ when primary.StartsWith("hide-unselected-", StringComparison.Ordinal) =>
-                "A client could not be minimized safely; every tracked window was restored.",
-            _ when primary.Contains("accessibility-frame-size-", StringComparison.Ordinal) =>
-                "macOS could not resize the selected Roblox window. See Activity for the Accessibility error.",
-            _ when primary.Contains("accessibility-frame-position-", StringComparison.Ordinal) =>
-                "macOS could not move the selected Roblox window. See Activity for the Accessibility error.",
-            _ when primary.Contains("accessibility-frame-readback-mismatch", StringComparison.Ordinal) =>
-                "Roblox constrained the requested Clients viewport size; the original window state was restored.",
-            _ when primary.StartsWith("show-selected-accessibility-minimized-", StringComparison.Ordinal) =>
-                "macOS could not restore the selected Roblox window from the Dock. See Activity for the Accessibility error.",
-            _ => $"Client overlay paused: {LaunchDiagnostics.SanitiseCode(code)}"
-        };
+        return primary.StartsWith("hide-unselected-", StringComparison.Ordinal)
+            ? "hide"
+            : primary.StartsWith("show-selected-", StringComparison.Ordinal)
+                ? "show"
+                : primary is "restore-overlay-failed"
+                    ? "restore"
+                    : "preflight";
+    }
+
+    private void SetClientOverlayRecoveryAvailable(bool available)
+    {
+        if (_clientOverlayRetry is not null)
+            _clientOverlayRetry.IsVisible = available;
     }
 
     private Control BuildActivityPage()
