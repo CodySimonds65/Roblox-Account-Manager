@@ -34,7 +34,11 @@ Clients status row exposes a retry action, and permission-required is reported s
 readback or restoration failures.
 
 Accessibility probe and overlay state changes are written to the Activity log without titles or
-authentication data. Repeated identical timer results are deduplicated.
+authentication data. Client counts are keyed by account and PID, so a preflight record followed by a
+restore record cannot appear as an extra client; the raw diagnostic-record count remains available for
+tracing the failure chain. Discovery diagnostics may include sanitized PID, executable basename, and
+bundle basename boundaries, but never full paths or window content. Repeated identical timer results
+are deduplicated.
 
 ## Pull-request release candidates
 

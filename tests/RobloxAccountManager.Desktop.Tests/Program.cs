@@ -98,6 +98,48 @@ Require(discovery.StableWindows.Count == 1
         && discovery.Duplicates[0].ProcessIds.SequenceEqual([101, 102])
         && discovery.UnboundProcessCount == 1,
     "Duplicate or unbound managed macOS client records were not isolated before overlay operations.");
+var duplicateOverlayEligibility = MacClientWindowReconciliation.SelectOverlayEligibility(
+    discovery,
+    accountId => accountId is "account-a" or "account-b");
+Require(duplicateOverlayEligibility.EligibleWindows.Count == 1
+        && duplicateOverlayEligibility.EligibleWindows[0].AccountId == "account-b"
+        && duplicateOverlayEligibility.BlockingDuplicates.Single().AccountId == "account-a"
+        && !duplicateOverlayEligibility.CanMutate,
+    "An opted-in duplicate account allowed a separate stable opted-in client to mutate the overlay.");
+
+var diagnosticSummary = MacOverlayDiagnosticSummary.Summarize([
+    new MacOverlayClientDiagnostic("account-a", 4585, "accessible-window-ready", true, 1, 1),
+    new MacOverlayClientDiagnostic("account-b", 4382, "accessible-window-ready", true, 1, 1),
+    new MacOverlayClientDiagnostic("account-b", 4382, "accessibility-no-eligible-window", false, 0, 0, "restore", true)
+]);
+Require(diagnosticSummary.ClientCount == 2
+        && diagnosticSummary.ReadyClientCount == 2
+        && diagnosticSummary.DiagnosticCount == 3,
+    "Preflight and restore diagnostics were counted as a third macOS client instead of two distinct processes.");
+
+var processBoundaryDetail = MacClientProcessBoundaryDiagnostics.Describe([
+    new RobloxWindowInfo(
+        duplicateProcessIdentity,
+        null,
+        "window-title",
+        AccountId: "account-a"),
+    new RobloxWindowInfo(
+        duplicateProcessIdentityTwo with
+        {
+            ExecutablePath = "/Users/Cody/Library/Application Support/Roblox/RobloxPlayer",
+            BundlePath = "/Users/Cody/Library/Application Support/Roblox/Roblox.app"
+        },
+        null,
+        null,
+        AccountId: "account-b")
+]);
+Require(processBoundaryDetail.Contains("pid=101", StringComparison.Ordinal)
+        && processBoundaryDetail.Contains("exe=RobloxPlayer", StringComparison.Ordinal)
+        && processBoundaryDetail.Contains("bundle=Roblox.app", StringComparison.Ordinal)
+        && !processBoundaryDetail.Contains("account=", StringComparison.Ordinal)
+        && !processBoundaryDetail.Contains("window-title", StringComparison.Ordinal)
+        && !processBoundaryDetail.Contains("/Users/Cody", StringComparison.Ordinal),
+    "Process-boundary diagnostics did not limit detail to sanitized process identifiers and basenames.");
 
 try
 {

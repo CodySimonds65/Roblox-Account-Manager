@@ -127,10 +127,10 @@ public sealed class MacClientOverlayManager
                     && (!tracked.Process.Matches(window.Process)
                         || !string.Equals(tracked.WindowIdentifier, accessible.Identifier, StringComparison.Ordinal)))
                 {
-                    if (tracked.Process.Matches(window.Process))
+                    if (tracked.Process.Matches(window.Process)
+                        && !IsTracked(window.Process, accessible.Identifier))
                     {
-                        _tracked.Remove(window.AccountId);
-                        _accessibility.ForgetWindow(tracked.Process, tracked.WindowIdentifier);
+                        _accessibility.ForgetWindow(window.Process, accessible.Identifier);
                     }
                     diagnostics.Add(Diagnostic(window, "accessible-window-changed", ready: false, probe));
                     continue;
@@ -404,17 +404,29 @@ public sealed class MacClientOverlayManager
             return OverlayStateResult.Success("process-exited");
         if (identityState != ProcessIdentityState.Current)
             return OverlayStateResult.Failure("stale-process-identity");
-        var currentResult = await WaitForWindowStateAsync(
-            tracked.Process,
-            tracked.WindowIdentifier,
-            static _ => true,
-            "accessibility-window-ready",
-            "accessibility-window-readback-mismatch",
-            "accessibility-window-readback-unavailable",
-            cancellationToken).ConfigureAwait(false);
-        if (!currentResult.Succeeded) return currentResult;
-        var current = _accessibility.ProbeMainWindow(tracked.Process).Window;
-        if (current is null) return OverlayStateResult.Failure("accessibility-window-readback-unavailable", true);
+        var currentProbe = _accessibility.ProbeMainWindow(tracked.Process);
+        var current = currentProbe.Window;
+        if (current is null)
+        {
+            if (!IsRetryableProbeCode(currentProbe.DiagnosticCode))
+                return OverlayStateResult.Failure(currentProbe.DiagnosticCode);
+
+            // A minimized window can disappear from AXWindows even though its
+            // retained AXUIElement remains valid. Restore visibility through
+            // the tracked identifier before requiring another enumeration.
+            var madeVisible = await TrySetMinimizedVerifiedAsync(
+                tracked.Process,
+                tracked.WindowIdentifier,
+                false,
+                cancellationToken).ConfigureAwait(false);
+            if (!madeVisible.Succeeded) return madeVisible;
+
+            current = _accessibility.ProbeMainWindow(tracked.Process).Window;
+            if (current is null)
+                return OverlayStateResult.Failure("accessibility-window-readback-unavailable", true);
+        }
+        if (!string.Equals(current.Identifier, tracked.WindowIdentifier, StringComparison.Ordinal))
+            return OverlayStateResult.Failure("accessible-window-changed");
         var frameRestored = FramesMatch(current.Frame, tracked.OriginalFrame);
         if (!frameRestored)
         {

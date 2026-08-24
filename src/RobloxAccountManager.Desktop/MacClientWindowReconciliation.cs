@@ -11,6 +11,13 @@ public sealed record MacClientWindowDiscovery(
     IReadOnlyList<MacClientWindowDuplicate> Duplicates,
     int UnboundProcessCount);
 
+public sealed record MacClientOverlayEligibility(
+    IReadOnlyList<RobloxWindowInfo> EligibleWindows,
+    IReadOnlyList<MacClientWindowDuplicate> BlockingDuplicates)
+{
+    public bool CanMutate => EligibleWindows.Count > 0 && BlockingDuplicates.Count == 0;
+}
+
 /// <summary>
 /// Converts the process-backed macOS client snapshot into one safe window per
 /// account. Overlay operations must not guess which of two live processes owns
@@ -51,5 +58,22 @@ public static class MacClientWindowReconciliation
         }
 
         return new MacClientWindowDiscovery(stableWindows, duplicates, unboundProcessCount);
+    }
+
+    public static MacClientOverlayEligibility SelectOverlayEligibility(
+        MacClientWindowDiscovery discovery,
+        Func<string, bool> isOptedIn)
+    {
+        ArgumentNullException.ThrowIfNull(discovery);
+        ArgumentNullException.ThrowIfNull(isOptedIn);
+
+        var eligibleWindows = discovery.StableWindows
+            .Where(window => !string.IsNullOrWhiteSpace(window.AccountId)
+                && isOptedIn(window.AccountId))
+            .ToArray();
+        var blockingDuplicates = discovery.Duplicates
+            .Where(duplicate => isOptedIn(duplicate.AccountId))
+            .ToArray();
+        return new MacClientOverlayEligibility(eligibleWindows, blockingDuplicates);
     }
 }

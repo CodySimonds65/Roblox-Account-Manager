@@ -912,7 +912,7 @@ public sealed class MainWindow : Window
                         ClientOverlayFailureText.Describe(restore.DiagnosticCode),
                         failure: true,
                         activityKey: $"overlay-navigation-restore-failed:{restore.DiagnosticCode}:{restore.AccountId}:{restore.ProcessId}",
-                         activityDetail: $"code={restore.DiagnosticCode}; phase=restore; account={account ?? "none"}; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                         activityDetail: $"code={restore.DiagnosticCode}; phase=restore; account={SanitiseActivityToken(account)}; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
                     SetClientOverlayRecoveryAvailable(true);
                     return;
                 }
@@ -921,9 +921,9 @@ public sealed class MainWindow : Window
             UpdatePresetRevealButton();
             RenderPage();
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            _viewModel.AppendActivity($"Navigation paused: {LaunchDiagnostics.SanitiseCode(exception.Message)}");
+            _viewModel.AppendActivity("Navigation paused: navigation-exception.");
         }
         finally { _pageNavigationGate.Release(); }
     }
@@ -1723,15 +1723,12 @@ public sealed class MainWindow : Window
                 .GroupBy(account => account.Id, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
             var discovery = MacClientWindowReconciliation.Reconcile(windows);
-            var discoveryDetail = DescribeClientDiscovery(discovery);
-            var eligible = discovery.StableWindows
-                .Where(window => !string.IsNullOrWhiteSpace(window.AccountId)
-                    && accountsById.TryGetValue(window.AccountId, out var account)
-                    && account.EmbedInClients)
-                .ToArray();
-            var blockingDuplicates = discovery.Duplicates
-                .Where(duplicate => accountsById.TryGetValue(duplicate.AccountId, out var account) && account.EmbedInClients)
-                .ToArray();
+            var discoveryDetail = DescribeClientDiscovery(discovery, windows);
+            var eligibility = MacClientWindowReconciliation.SelectOverlayEligibility(
+                discovery,
+                accountId => accountsById.TryGetValue(accountId, out var account) && account.EmbedInClients);
+            var eligible = eligibility.EligibleWindows;
+            var blockingDuplicates = eligibility.BlockingDuplicates;
 
             var nextIds = eligible.Select(window => window.AccountId!).ToHashSet(StringComparer.Ordinal);
             foreach (var removed in _clientTabs.Select(tab => tab.AccountId).Where(id => !nextIds.Contains(id)).ToArray())
@@ -1756,14 +1753,14 @@ public sealed class MainWindow : Window
             }
             finally { _suppressClientSelection = false; }
 
-            if (eligible.Length == 0 || _selectedClientAccountId is null)
+            if (blockingDuplicates.Count > 0 || eligible.Count == 0 || _selectedClientAccountId is null)
             {
                 var restore = await _clientOverlay.RestoreAllAsync(cancellationToken);
                 EnsureClientOverlayActive(generation, cancellationToken);
-                var duplicateMessage = blockingDuplicates.Length > 0
+                var duplicateMessage = blockingDuplicates.Count > 0
                     ? "Multiple managed Roblox processes were found for one account. Close the extra client or relaunch it."
                     : "No opted-in RAM-managed Roblox clients are running.";
-                var noClientCode = restore.Succeeded && blockingDuplicates.Length > 0
+                var noClientCode = restore.Succeeded && blockingDuplicates.Count > 0
                     ? "duplicate-managed-process"
                     : restore.DiagnosticCode;
                 SetClientOverlayStatus(
@@ -1772,7 +1769,7 @@ public sealed class MainWindow : Window
                         : ClientOverlayFailureText.Describe(restore.DiagnosticCode),
                     failure: !restore.Succeeded,
                     activityKey: $"overlay-no-clients:{noClientCode}:{discoveryDetail}",
-                    activityDetail: $"code={noClientCode}; phase={(blockingDuplicates.Length > 0 && restore.Succeeded ? "preflight" : "restore")}; account=none; pid=none; ready=0/{windows.Count}; windows=unknown; restore={(restore.Succeeded ? "none" : restore.DiagnosticCode)}; retryable={ClientOverlayFailureText.IsRetryable(restore)}; {discoveryDetail}");
+                    activityDetail: $"code={noClientCode}; phase={(blockingDuplicates.Count > 0 && restore.Succeeded ? "preflight" : "restore")}; account=none; pid=none; ready=0/{windows.Count}; windows=unknown; restore={(restore.Succeeded ? "none" : restore.DiagnosticCode)}; retryable={ClientOverlayFailureText.IsRetryable(restore)}; {discoveryDetail}");
                 SetClientOverlayRecoveryAvailable(!restore.Succeeded);
                 return;
             }
@@ -1786,7 +1783,7 @@ public sealed class MainWindow : Window
                         : ClientOverlayFailureText.Describe(restore.DiagnosticCode),
                     failure: !restore.Succeeded,
                     activityKey: $"overlay-viewport:{viewportFailure}:{restore.DiagnosticCode}:{discoveryDetail}",
-                    activityDetail: $"code={(restore.Succeeded ? "client-viewport-unavailable" : restore.DiagnosticCode)}; phase={(restore.Succeeded ? "preflight" : "restore")}; account=none; pid=none; ready=0/{eligible.Length}; windows=unknown; restore={(restore.Succeeded ? "none" : restore.DiagnosticCode)}; retryable={ClientOverlayFailureText.IsRetryable(restore)}; viewport=unavailable; {discoveryDetail}");
+                    activityDetail: $"code={(restore.Succeeded ? "client-viewport-unavailable" : restore.DiagnosticCode)}; phase={(restore.Succeeded ? "preflight" : "restore")}; account=none; pid=none; ready=0/{eligible.Count}; windows=unknown; restore={(restore.Succeeded ? "none" : restore.DiagnosticCode)}; retryable={ClientOverlayFailureText.IsRetryable(restore)}; viewport=unavailable; {discoveryDetail}");
                 SetClientOverlayRecoveryAvailable(!restore.Succeeded);
                 return;
             }
@@ -1803,7 +1800,7 @@ public sealed class MainWindow : Window
                 cancellationToken: cancellationToken);
             EnsureClientOverlayActive(generation, cancellationToken);
             ApplyClientDiagnostics(result.Clients);
-            var readyCount = result.Clients.Count(client => client.IsReady);
+            var diagnosticSummary = MacOverlayDiagnosticSummary.Summarize(result.Clients);
             var failedAccount = result.AccountId is not null
                 && accountsById.TryGetValue(result.AccountId, out var failedProfile)
                     ? failedProfile.Label
@@ -1826,16 +1823,16 @@ public sealed class MainWindow : Window
                         : "Client placement is ready. Select a tab to bring Roblox in front of RAM."
                     : DescribeOverlayFailure(result.DiagnosticCode),
                 failure: !result.Succeeded,
-                activityKey: $"overlay:{result.DiagnosticCode}:{result.AccountId}:{readyCount}/{result.Clients.Count}:{windowCounts}:{restoreDiagnostic?.DiagnosticCode}:{clientDetails}:{discoveryDetail}",
-                activityDetail: $"code={result.DiagnosticCode}; phase={phase}; account={SanitiseActivityToken(failedAccount)}; pid={result.ProcessId?.ToString() ?? "none"}; ready={readyCount}/{result.Clients.Count}; {windowCounts}; restore={restoreDiagnostic?.DiagnosticCode ?? "none"}; retryable={retryable}; viewport={FormatViewport(viewport)}; clients={clientDetails}; {discoveryDetail}");
+                activityKey: $"overlay:{result.DiagnosticCode}:{result.AccountId}:{diagnosticSummary.ReadyClientCount}/{diagnosticSummary.ClientCount}:diagnostics={diagnosticSummary.DiagnosticCount}:{windowCounts}:{restoreDiagnostic?.DiagnosticCode}:{clientDetails}:{discoveryDetail}",
+                activityDetail: $"code={result.DiagnosticCode}; phase={phase}; account={SanitiseActivityToken(failedAccount)}; pid={result.ProcessId?.ToString() ?? "none"}; ready={diagnosticSummary.ReadyClientCount}/{diagnosticSummary.ClientCount}; diagnostics={diagnosticSummary.DiagnosticCount}; {windowCounts}; restore={restoreDiagnostic?.DiagnosticCode ?? "none"}; retryable={retryable}; viewport={FormatViewport(viewport)}; records={clientDetails}; {discoveryDetail}");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Page teardown owns restoration after invalidating this refresh generation.
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            var code = LaunchDiagnostics.SanitiseCode(exception.Message);
+            const string code = "overlay-exception";
             SetClientOverlayStatus(
                 $"Client overlay paused: {code}",
                 failure: true,
@@ -1891,10 +1888,9 @@ public sealed class MainWindow : Window
                 lastResult = result;
                 if (!ClientOverlayFailureText.IsRetryable(result)) break;
             }
-            catch (Exception exception)
+            catch (Exception)
             {
-                lastResult = MacOverlayOperationResult.Failure(
-                    $"restore-exception-{LaunchDiagnostics.SanitiseCode(exception.Message)}");
+                lastResult = MacOverlayOperationResult.Failure("restore-exception");
                 break;
             }
             if (attempt == 0) await Task.Delay(100);
@@ -1961,13 +1957,15 @@ public sealed class MainWindow : Window
         _viewModel.AppendActivity($"Clients overlay: {activityDetail ?? message}");
     }
 
-    private static string DescribeClientDiscovery(MacClientWindowDiscovery discovery)
+    private static string DescribeClientDiscovery(
+        MacClientWindowDiscovery discovery,
+        IReadOnlyList<RobloxWindowInfo> windows)
     {
         var duplicates = discovery.Duplicates.Count == 0
             ? "none"
             : string.Join(",", discovery.Duplicates.Select(duplicate =>
                 $"{SanitiseActivityToken(duplicate.AccountId)}:{string.Join("/", duplicate.ProcessIds)}"));
-        return $"managed={discovery.StableWindows.Count + discovery.Duplicates.Sum(duplicate => duplicate.ProcessIds.Count)}; stable={discovery.StableWindows.Count}; duplicates={duplicates}; unbound={discovery.UnboundProcessCount}";
+        return $"managed={discovery.StableWindows.Count + discovery.Duplicates.Sum(duplicate => duplicate.ProcessIds.Count)}; stable={discovery.StableWindows.Count}; duplicates={duplicates}; unbound={discovery.UnboundProcessCount}; processes={MacClientProcessBoundaryDiagnostics.Describe(windows)}";
     }
 
     private static string DescribeClientDiagnostics(IReadOnlyList<MacOverlayClientDiagnostic> diagnostics) =>

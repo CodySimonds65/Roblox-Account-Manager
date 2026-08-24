@@ -70,6 +70,8 @@ public interface IMacAccessibilityApi
 /// </summary>
 public sealed class MacAccessibilityApi : IMacAccessibilityApi
 {
+    private const string StaleIdentityDiagnosticCode = "accessibility-stale-process-identity";
+    private const int StaleIdentityError = int.MinValue;
     private const string ApplicationServices = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
     private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
     private const uint Utf8Encoding = 0x08000100;
@@ -80,6 +82,7 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     private readonly IRobloxProcessLocator _processLocator;
     private readonly object _windowsGate = new();
     private readonly Dictionary<string, RetainedWindow> _retainedWindows = new(StringComparer.Ordinal);
+    private long _retainedWindowSequence;
 
     public MacAccessibilityApi(IRobloxProcessLocator? processLocator = null)
     {
@@ -153,6 +156,8 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     {
         if (!frame.IsValid || string.IsNullOrWhiteSpace(windowIdentifier))
             return MacAccessibilityOperationResult.Failure("accessibility-frame-request-invalid");
+        if (!IsCurrentManagedIdentity(process))
+            return MacAccessibilityOperationResult.Failure(StaleIdentityDiagnosticCode);
         var result = WithSelectedWindow(process, windowIdentifier, window =>
         {
             var position = new CGPoint(frame.Left, frame.Top);
@@ -170,11 +175,15 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
             {
                 // Resize before moving so an application-enforced size adjustment cannot
                 // recenter the final top-left position after it has already been written.
-                var sizeError = SetAttributeWithRetry(window, "AXSize", sizeValue);
+                var sizeError = SetAttributeWithRetry(process, window, "AXSize", sizeValue);
+                if (sizeError == StaleIdentityError)
+                    return MacAccessibilityOperationResult.Failure(StaleIdentityDiagnosticCode);
                 if (sizeError != 0)
                     return MacAccessibilityOperationResult.Failure(
                         $"accessibility-frame-size-{DescribeAxError(sizeError)}");
-                var positionError = SetAttributeWithRetry(window, "AXPosition", positionValue);
+                var positionError = SetAttributeWithRetry(process, window, "AXPosition", positionValue);
+                if (positionError == StaleIdentityError)
+                    return MacAccessibilityOperationResult.Failure(StaleIdentityDiagnosticCode);
                 return positionError == 0
                     ? MacAccessibilityOperationResult.Success()
                     : MacAccessibilityOperationResult.Failure(
@@ -198,10 +207,14 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     {
         if (string.IsNullOrWhiteSpace(windowIdentifier))
             return MacAccessibilityOperationResult.Failure("accessibility-minimized-request-invalid");
+        if (!IsCurrentManagedIdentity(process))
+            return MacAccessibilityOperationResult.Failure(StaleIdentityDiagnosticCode);
         var result = WithSelectedWindow(process, windowIdentifier,
             window =>
             {
-                var error = SetAttributeWithRetry(window, "AXMinimized", GetBoolean(minimized));
+                var error = SetAttributeWithRetry(process, window, "AXMinimized", GetBoolean(minimized));
+                if (error == StaleIdentityError)
+                    return MacAccessibilityOperationResult.Failure(StaleIdentityDiagnosticCode);
                 return error == 0
                     ? MacAccessibilityOperationResult.Success()
                     : MacAccessibilityOperationResult.Failure(
@@ -277,8 +290,10 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         MacAccessibleWindow? fallback = null;
         lock (_windowsGate)
         {
-            var existing = _retainedWindows.FirstOrDefault(pair =>
-                pair.Value.Process.Matches(process));
+            var existing = _retainedWindows
+                .Where(pair => pair.Value.Process.Matches(process))
+                .OrderByDescending(pair => pair.Value.Sequence)
+                .FirstOrDefault();
             if (!string.IsNullOrWhiteSpace(existing.Key))
             {
                 identifier = existing.Key;
@@ -333,17 +348,13 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     {
         lock (_windowsGate)
         {
-            foreach (var stale in _retainedWindows
-                         .Where(pair => pair.Value.Process.Matches(process))
-                         .ToArray())
-            {
-                _retainedWindows.Remove(stale.Key);
-                Release(stale.Value.Element);
-            }
-
             var identifier = $"ax-window-{Guid.NewGuid():N}";
             _ = NativeMethods.CFRetain(element);
-            _retainedWindows.Add(identifier, new RetainedWindow(process, element, snapshot));
+            _retainedWindows.Add(identifier, new RetainedWindow(
+                process,
+                element,
+                snapshot,
+                ++_retainedWindowSequence));
             return identifier;
         }
     }
@@ -533,13 +544,19 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
         finally { Release(attribute); }
     }
 
-    private static int SetAttributeWithRetry(nint element, string name, nint value)
+    private int SetAttributeWithRetry(
+        Contracts.RobloxProcessIdentity process,
+        nint element,
+        string name,
+        nint value)
     {
         const int cannotComplete = -25204;
+        if (!IsCurrentManagedIdentity(process)) return StaleIdentityError;
         var error = SetAttribute(element, name, value);
         for (var attempt = 1; attempt < 3 && error == cannotComplete; attempt++)
         {
             Thread.Sleep(25);
+            if (!IsCurrentManagedIdentity(process)) return StaleIdentityError;
             error = SetAttribute(element, name, value);
         }
         return error;
@@ -605,7 +622,8 @@ public sealed class MacAccessibilityApi : IMacAccessibilityApi
     private sealed record RetainedWindow(
         Contracts.RobloxProcessIdentity Process,
         nint Element,
-        MacAccessibleWindow Snapshot);
+        MacAccessibleWindow Snapshot,
+        long Sequence);
     [StructLayout(LayoutKind.Sequential)] private readonly record struct CGPoint(double X, double Y);
     [StructLayout(LayoutKind.Sequential)] private readonly record struct CGSize(double Width, double Height);
 
