@@ -926,6 +926,52 @@ Check(convertedOverlayFrame == new MacWindowFrame(960, 540, 800, 600)
       && convertedOverlayFrame.IsValid,
     "Avalonia screen pixels were not converted to the expected macOS point frame.");
 
+var settlingFixture = CreateOverlayFixture();
+var settlingHiddenPid = settlingFixture.Windows[1].Process.Pid;
+settlingFixture.Accessibility.DelayedMinimizedReadbacks = 2;
+settlingFixture.Accessibility.HideMakesWindowTemporarilyUnavailable.Add(settlingHiddenPid);
+var settlingManager = new MacClientOverlayManager(settlingFixture.Locator, settlingFixture.Accessibility);
+var settlingResult = await settlingManager.ShowOnlyAsync(
+    settlingFixture.Windows,
+    "account-a",
+    new MacWindowFrame(20, 30, 900, 700),
+    explicitUserSelection: false);
+Check(settlingResult.Succeeded
+      && settlingFixture.Accessibility.Windows.Values.Count(window => !window.IsMinimized) == 1
+      && settlingFixture.Accessibility.Operations.IndexOf($"minimized:{settlingHiddenPid}:True")
+          < settlingFixture.Accessibility.Operations.IndexOf("frame:4101"),
+    "The overlay did not converge after a transient AX minimized-state readback delay.");
+
+var rollbackFixture = CreateOverlayFixture();
+var rollbackHiddenPid = rollbackFixture.Windows[1].Process.Pid;
+rollbackFixture.Accessibility.DelayedMinimizedReadbacks = 1;
+rollbackFixture.Accessibility.HideMakesWindowTemporarilyUnavailable.Add(rollbackHiddenPid);
+rollbackFixture.Accessibility.RestoreReadbackFailures = 1;
+rollbackFixture.Accessibility.FailFrameWrites = true;
+var rollbackManager = new MacClientOverlayManager(rollbackFixture.Locator, rollbackFixture.Accessibility);
+var failedSettlingLayout = await rollbackManager.ShowOnlyAsync(
+    rollbackFixture.Windows,
+    "account-a",
+    new MacWindowFrame(20, 30, 900, 700),
+    explicitUserSelection: false);
+Check(!failedSettlingLayout.Succeeded
+      && failedSettlingLayout.DiagnosticCode.Contains("show-selected-accessibility-frame-size-cannot-complete", StringComparison.Ordinal)
+      && failedSettlingLayout.DiagnosticCode.Contains("restore-overlay-failed", StringComparison.Ordinal),
+    "A transient selected-client failure did not preserve its primary and rollback diagnostics.");
+rollbackFixture.Accessibility.DelayedMinimizedReadbacks = 0;
+rollbackFixture.Accessibility.HideMakesWindowTemporarilyUnavailable.Clear();
+rollbackFixture.Accessibility.RestoreReadbackFailures = 0;
+rollbackFixture.Accessibility.FailFrameWrites = false;
+var recoveredSettlingLayout = await rollbackManager.RestoreAllAsync();
+Check(recoveredSettlingLayout.Succeeded
+      && rollbackFixture.Accessibility.Windows[rollbackFixture.Windows[0].Process.Pid].Frame ==
+          new MacWindowFrame(100, 110, 1024, 768)
+      && !rollbackFixture.Accessibility.Windows[rollbackFixture.Windows[0].Process.Pid].IsMinimized
+      && rollbackFixture.Accessibility.Windows[rollbackFixture.Windows[1].Process.Pid].Frame ==
+          new MacWindowFrame(200, 210, 1024, 768)
+      && !rollbackFixture.Accessibility.Windows[rollbackFixture.Windows[1].Process.Pid].IsMinimized,
+    "A transient overlay rollback did not converge on a later retry.");
+
 var layoutFixture = CreateOverlayFixture();
 var layoutManager = new MacClientOverlayManager(layoutFixture.Locator, layoutFixture.Accessibility);
 var layoutResult = await layoutManager.ShowOnlyAsync(
@@ -955,6 +1001,22 @@ Check(selectionResult.Succeeded && selectionFixture.Accessibility.RaiseCalls == 
 Check(selectionFixture.Accessibility.Raised.Single() ==
       (selectionFixture.Windows[1].Process.Pid, selectionFixture.Windows[1].WindowIdentifier!),
     "The overlay raise targeted the wrong Roblox window.");
+
+var minimizedSelectionFixture = CreateOverlayFixture(secondMinimized: true);
+minimizedSelectionFixture.Accessibility.RejectFrameWhileMinimized = true;
+var minimizedSelectionManager = new MacClientOverlayManager(
+    minimizedSelectionFixture.Locator,
+    minimizedSelectionFixture.Accessibility);
+var minimizedSelectionResult = await minimizedSelectionManager.ShowOnlyAsync(
+    minimizedSelectionFixture.Windows,
+    "account-b",
+    new MacWindowFrame(40, 50, 900, 700),
+    explicitUserSelection: false);
+var minimizedSelectionPid = minimizedSelectionFixture.Windows[1].Process.Pid;
+Check(minimizedSelectionResult.Succeeded
+      && minimizedSelectionFixture.Accessibility.Operations.IndexOf($"minimized:{minimizedSelectionPid}:False")
+          < minimizedSelectionFixture.Accessibility.Operations.IndexOf($"frame:{minimizedSelectionPid}"),
+    "A Dock-minimized selected client was positioned before it was made visible to Accessibility.");
 
 var takeoverFixture = CreateOverlayFixture();
 var takeoverManager = new MacClientOverlayManager(takeoverFixture.Locator, takeoverFixture.Accessibility);
@@ -993,6 +1055,27 @@ Check(restorationFixture.Accessibility.Windows[restorationFixture.Windows[0].Pro
       && restorationFixture.Accessibility.Windows[restorationFixture.Windows[1].Process.Pid].IsMinimized,
     "The macOS overlay did not restore original frames and minimized states.");
 
+var retainedRestoreFixture = CreateOverlayFixture();
+var retainedRestorePid = retainedRestoreFixture.Windows[1].Process.Pid;
+retainedRestoreFixture.Accessibility.MinimizedWindowsAbsentAfterReadback.Add(retainedRestorePid);
+var retainedRestoreManager = new MacClientOverlayManager(
+    retainedRestoreFixture.Locator,
+    retainedRestoreFixture.Accessibility);
+var retainedRestoreLayout = await retainedRestoreManager.ShowOnlyAsync(
+    retainedRestoreFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+var retainedRestoreResult = await retainedRestoreManager.RestoreAllAsync();
+Check(retainedRestoreLayout.Succeeded
+      && retainedRestoreResult.Succeeded
+      && retainedRestoreFixture.Accessibility.Windows[retainedRestorePid].Frame ==
+          new MacWindowFrame(200, 210, 1024, 768)
+      && !retainedRestoreFixture.Accessibility.Windows[retainedRestorePid].IsMinimized
+      && retainedRestoreFixture.Accessibility.MinimizeRequests.Any(request =>
+          request.ProcessId == retainedRestorePid && !request.Minimized),
+    "RestoreAllAsync did not use the retained AX window reference to restore a minimized window absent from enumeration.");
+
 var retryFixture = CreateOverlayFixture();
 var retryManager = new MacClientOverlayManager(retryFixture.Locator, retryFixture.Accessibility);
 var retryLayout = await retryManager.ShowOnlyAsync(
@@ -1010,6 +1093,67 @@ Check(retryLayout.Succeeded
       && retryFixture.Accessibility.Windows[retryFixture.Windows[0].Process.Pid].Frame ==
           new MacWindowFrame(100, 110, 1024, 768),
     "A transient restore failure discarded the original macOS window snapshot.");
+
+var replacedIdentifierFixture = CreateOverlayFixture();
+var replacedIdentifierPid = replacedIdentifierFixture.Windows[0].Process.Pid;
+var originalTrackedIdentifier = replacedIdentifierFixture.Windows[0].WindowIdentifier!;
+var replacedIdentifierManager = new MacClientOverlayManager(
+    replacedIdentifierFixture.Locator,
+    replacedIdentifierFixture.Accessibility);
+var replacedIdentifierLayout = await replacedIdentifierManager.ShowOnlyAsync(
+    [replacedIdentifierFixture.Windows[0]],
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+replacedIdentifierFixture.Accessibility.Windows[replacedIdentifierPid] =
+    replacedIdentifierFixture.Accessibility.Windows[replacedIdentifierPid] with
+    {
+        Identifier = "ax-replaced-account-a"
+    };
+var replacedIdentifierResult = await replacedIdentifierManager.ShowOnlyAsync(
+    [replacedIdentifierFixture.Windows[0]],
+    "account-a",
+    new MacWindowFrame(30, 40, 800, 600),
+    explicitUserSelection: false);
+Check(replacedIdentifierLayout.Succeeded
+      && !replacedIdentifierResult.Succeeded
+      && replacedIdentifierResult.DiagnosticCode == "accessible-window-changed:restore-overlay-failed"
+      && !replacedIdentifierFixture.Accessibility.ForgottenWindowIdentifiers.Contains(originalTrackedIdentifier)
+      && replacedIdentifierFixture.Accessibility.ForgottenWindowIdentifiers.Contains("ax-replaced-account-a"),
+    "Replacing a tracked same-process AX window did not retain the original snapshot while releasing the untracked replacement.");
+
+var staleMutationFixture = CreateOverlayFixture();
+var staleMutationApi = new MacAccessibilityApi(new EmptyRobloxProcessLocator());
+var staleFrameMutation = staleMutationApi.TrySetFrame(
+    staleMutationFixture.Windows[0].Process,
+    "unavailable-window",
+    new MacWindowFrame(10, 20, 800, 600));
+var staleMinimizedMutation = staleMutationApi.TrySetMinimized(
+    staleMutationFixture.Windows[0].Process,
+    "unavailable-window",
+    true);
+Check(!staleFrameMutation.Succeeded
+      && staleFrameMutation.DiagnosticCode == "accessibility-stale-process-identity"
+      && !staleMinimizedMutation.Succeeded
+      && staleMinimizedMutation.DiagnosticCode == "accessibility-stale-process-identity",
+    "Accessibility mutations did not reject a stale process identity before native AX access.");
+
+var frameDiagnosticFixture = CreateOverlayFixture();
+frameDiagnosticFixture.Accessibility.FailFrameWrites = true;
+var frameDiagnosticManager = new MacClientOverlayManager(
+    frameDiagnosticFixture.Locator,
+    frameDiagnosticFixture.Accessibility);
+var frameDiagnosticResult = await frameDiagnosticManager.ShowOnlyAsync(
+    frameDiagnosticFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(!frameDiagnosticResult.Succeeded
+      && frameDiagnosticResult.DiagnosticCode.StartsWith(
+          "show-selected-accessibility-frame-size-cannot-complete",
+          StringComparison.Ordinal)
+      && !frameDiagnosticResult.DiagnosticCode.Contains("restore-overlay-failed", StringComparison.Ordinal),
+    "A rejected no-op frame write either lost its native diagnostic or falsely blocked restoration.");
 
 var permissionFixture = CreateOverlayFixture();
 permissionFixture.Accessibility.Capability = MacCapabilityResult.PermissionRequired(
@@ -1029,6 +1173,81 @@ Check(!permissionResult.Succeeded
       && permissionFixture.Accessibility.MinimizeCalls == 0
       && permissionFixture.Accessibility.RaiseCalls == 0,
     "Accessibility permission denial mutated or inspected client windows.");
+permissionFixture.Accessibility.Capability = MacCapabilityResult.Supported();
+var permissionRecovery = await permissionManager.ShowOnlyAsync(
+    permissionFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(permissionRecovery.Succeeded,
+    "The overlay did not recover after Accessibility permission became available.");
+
+var fullscreenFixture = CreateOverlayFixture();
+var fullscreenPid = fullscreenFixture.Windows[1].Process.Pid;
+fullscreenFixture.Accessibility.Windows[fullscreenPid] =
+    fullscreenFixture.Accessibility.Windows[fullscreenPid] with { IsFullScreen = true };
+var fullscreenManager = new MacClientOverlayManager(
+    fullscreenFixture.Locator,
+    fullscreenFixture.Accessibility);
+var fullscreenResult = await fullscreenManager.ShowOnlyAsync(
+    fullscreenFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(!fullscreenResult.Succeeded
+      && fullscreenResult.DiagnosticCode == "fullscreen-window-not-supported"
+      && fullscreenResult.AccountId == "account-b"
+      && fullscreenFixture.Accessibility.FrameCalls == 0
+      && fullscreenFixture.Accessibility.MinimizeCalls == 0
+      && fullscreenFixture.Accessibility.RaiseCalls == 0,
+    "A fullscreen opted-in client allowed another Roblox window to mutate before preflight completed.");
+
+var partialReadinessFixture = CreateOverlayFixture();
+partialReadinessFixture.Accessibility.UnavailableProcessIds.Add(
+    partialReadinessFixture.Windows[1].Process.Pid);
+var partialReadinessManager = new MacClientOverlayManager(
+    partialReadinessFixture.Locator,
+    partialReadinessFixture.Accessibility);
+var partialReadinessResult = await partialReadinessManager.ShowOnlyAsync(
+    partialReadinessFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(!partialReadinessResult.Succeeded
+      && partialReadinessResult.DiagnosticCode == "accessibility-no-windows"
+      && partialReadinessResult.AccountId == "account-b"
+      && partialReadinessResult.Clients.Count == 2
+      && partialReadinessResult.Clients.Count(client => client.IsReady) == 1
+      && partialReadinessFixture.Accessibility.FrameCalls == 0
+      && partialReadinessFixture.Accessibility.MinimizeCalls == 0
+      && partialReadinessFixture.Accessibility.RaiseCalls == 0
+      && partialReadinessFixture.Accessibility.Windows.Values.All(window => !window.IsMinimized),
+    "An unresolved opted-in client mutated or minimized another Roblox window during preflight.");
+partialReadinessFixture.Accessibility.UnavailableProcessIds.Clear();
+var recoveredReadinessResult = await partialReadinessManager.ShowOnlyAsync(
+    partialReadinessFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(recoveredReadinessResult.Succeeded
+      && partialReadinessFixture.Accessibility.Windows.Values.Count(window => !window.IsMinimized) == 1,
+    "The overlay did not recover after every opted-in client published a usable window.");
+var dockActivatedPid = partialReadinessFixture.Windows[1].Process.Pid;
+partialReadinessFixture.Accessibility.Windows[dockActivatedPid] =
+    partialReadinessFixture.Accessibility.Windows[dockActivatedPid] with { IsMinimized = false };
+partialReadinessFixture.Accessibility.UnavailableProcessIds.Add(dockActivatedPid);
+var minimizeRequestBaseline = partialReadinessFixture.Accessibility.MinimizeRequests.Count;
+var dockActivationRefresh = await partialReadinessManager.ShowOnlyAsync(
+    partialReadinessFixture.Windows,
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+Check(!dockActivationRefresh.Succeeded
+      && !partialReadinessFixture.Accessibility.Windows[dockActivatedPid].IsMinimized
+      && !partialReadinessFixture.Accessibility.MinimizeRequests
+          .Skip(minimizeRequestBaseline)
+          .Any(request => request.ProcessId == dockActivatedPid && request.Minimized),
+    "A passive refresh immediately re-minimized a Dock-activated client whose AX window was unavailable.");
 
 var staleFixture = CreateOverlayFixture();
 var staleManager = new MacClientOverlayManager(staleFixture.Locator, staleFixture.Accessibility);
@@ -1055,12 +1274,42 @@ var staleResult = await staleManager.ShowOnlyAsync(
     explicitUserSelection: true);
 Check(staleLayout.Succeeded
       && !staleResult.Succeeded
-      && staleResult.DiagnosticCode == "stale-process-identity"
+      && staleResult.DiagnosticCode.StartsWith("stale-process-identity", StringComparison.Ordinal)
       && staleFixture.Accessibility.FindCalls == staleFindCount
       && staleFixture.Accessibility.FrameCalls
           + staleFixture.Accessibility.MinimizeCalls
           + staleFixture.Accessibility.RaiseCalls == staleMutationCount,
     "A stale macOS process identity was accepted or caused overlay mutation.");
+
+var staleRestoreFixture = CreateOverlayFixture();
+var staleRestoreManager = new MacClientOverlayManager(
+    staleRestoreFixture.Locator,
+    staleRestoreFixture.Accessibility);
+var staleRestoreLayout = await staleRestoreManager.ShowOnlyAsync(
+    [staleRestoreFixture.Windows[0]],
+    "account-a",
+    new MacWindowFrame(10, 20, 800, 600),
+    explicitUserSelection: false);
+var staleRestoreMutationCount = staleRestoreFixture.Accessibility.FrameCalls
+    + staleRestoreFixture.Accessibility.MinimizeCalls
+    + staleRestoreFixture.Accessibility.RaiseCalls;
+staleRestoreFixture.Locator.Replace(staleRestoreFixture.Processes[0] with
+{
+    Identity = staleRestoreFixture.Processes[0].Identity with
+    {
+        StartTime = staleRestoreFixture.Processes[0].Identity.StartTime.AddMinutes(1)
+    }
+});
+var staleRestoreResult = await staleRestoreManager.RestoreAllAsync();
+Check(staleRestoreLayout.Succeeded
+      && !staleRestoreResult.Succeeded
+      && staleRestoreResult.DiagnosticCode == "restore-overlay-failed"
+      && staleRestoreResult.Clients.Any(client =>
+          client.DiagnosticCode == "stale-process-identity")
+      && staleRestoreFixture.Accessibility.FrameCalls
+          + staleRestoreFixture.Accessibility.MinimizeCalls
+          + staleRestoreFixture.Accessibility.RaiseCalls == staleRestoreMutationCount,
+    "A stale PID reuse was treated as a successful overlay restoration or caused mutation.");
 
 Console.WriteLine($"macOS platform safety tests passed: {passed}; skipped: {skipped}.");
 
@@ -1466,6 +1715,7 @@ sealed class OverlayAccessibilityFake : IMacAccessibilityApi
     public OverlayAccessibilityFake(IEnumerable<MacAccessibleWindow> windows)
     {
         Windows = windows.ToDictionary(window => ParseProcessId(window.Identifier));
+        _reportedWindows = Windows.ToDictionary(pair => pair.Key, pair => pair.Value);
     }
 
     public Dictionary<int, MacAccessibleWindow> Windows { get; }
@@ -1475,31 +1725,112 @@ sealed class OverlayAccessibilityFake : IMacAccessibilityApi
     public int MinimizeCalls { get; private set; }
     public int RaiseCalls { get; private set; }
     public bool FailFrameWrites { get; set; }
+    public bool RejectFrameWhileMinimized { get; set; }
+    public int DelayedMinimizedReadbacks { get; set; }
+    public HashSet<int> HideMakesWindowTemporarilyUnavailable { get; } = [];
+    public HashSet<int> MinimizedWindowsAbsentAfterReadback { get; } = [];
+    public int RestoreReadbackFailures { get; set; }
+    public HashSet<int> UnavailableProcessIds { get; } = [];
+    public List<(int ProcessId, bool Minimized)> MinimizeRequests { get; } = [];
     public List<(int ProcessId, string WindowIdentifier)> Raised { get; } = [];
+    public List<string> ForgottenWindowIdentifiers { get; } = [];
+    public List<string> Operations { get; } = [];
+    private readonly Dictionary<int, MacAccessibleWindow> _reportedWindows;
+    private readonly Dictionary<int, int> _delayedMinimizedReadbacks = [];
+    private readonly Dictionary<int, int> _temporaryUnavailableProbes = [];
+    private readonly Dictionary<int, int> _minimizedReadbacksBeforeUnavailable = [];
 
     public MacCapabilityResult GetCapability() => Capability;
 
-    public MacAccessibleWindow? FindMainWindow(Contracts.RobloxProcessIdentity process)
+    public MacAccessibilityWindowProbe ProbeMainWindow(Contracts.RobloxProcessIdentity process)
     {
         FindCalls++;
-        return Windows.TryGetValue(process.Pid, out var window) ? window : null;
+        if (UnavailableProcessIds.Contains(process.Pid)
+            || !Windows.TryGetValue(process.Pid, out var window))
+            return MacAccessibilityWindowProbe.Failure("accessibility-no-windows");
+        if (_temporaryUnavailableProbes.TryGetValue(process.Pid, out var unavailable)
+            && unavailable > 0)
+        {
+            _temporaryUnavailableProbes[process.Pid] = unavailable - 1;
+            return MacAccessibilityWindowProbe.Failure("accessibility-no-eligible-window", 1, 0);
+        }
+        if (_delayedMinimizedReadbacks.TryGetValue(process.Pid, out var delayed)
+            && delayed > 0)
+        {
+            _delayedMinimizedReadbacks[process.Pid] = delayed - 1;
+            return MacAccessibilityWindowProbe.Ready(_reportedWindows[process.Pid], 1, 1);
+        }
+        if (_minimizedReadbacksBeforeUnavailable.TryGetValue(process.Pid, out var readbacks)
+            && window.IsMinimized)
+        {
+            if (readbacks > 0)
+            {
+                _minimizedReadbacksBeforeUnavailable[process.Pid] = readbacks - 1;
+            }
+            else
+            {
+                return MacAccessibilityWindowProbe.Failure("accessibility-no-windows");
+            }
+        }
+        _reportedWindows[process.Pid] = window;
+        return MacAccessibilityWindowProbe.Ready(window, 1, 1);
     }
 
-    public bool TrySetFrame(Contracts.RobloxProcessIdentity process, string windowIdentifier, MacWindowFrame frame)
+    public MacAccessibilityOperationResult TrySetFrame(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        MacWindowFrame frame)
     {
         FrameCalls++;
-        if (FailFrameWrites) return false;
-        if (!TryGetWindow(process.Pid, windowIdentifier, out var window)) return false;
+        Operations.Add($"frame:{process.Pid}");
+        if (FailFrameWrites)
+            return MacAccessibilityOperationResult.Failure("accessibility-frame-size-cannot-complete");
+        if (RestoreReadbackFailures > 0)
+        {
+            RestoreReadbackFailures--;
+            return MacAccessibilityOperationResult.Failure("accessibility-frame-size-cannot-complete");
+        }
+        if (!TryGetWindow(process.Pid, windowIdentifier, out var window))
+            return MacAccessibilityOperationResult.Failure("accessibility-window-reference-unavailable");
+        if (RejectFrameWhileMinimized && window.IsMinimized)
+            return MacAccessibilityOperationResult.Failure("accessibility-frame-size-no-value");
         Windows[process.Pid] = window with { Frame = frame };
-        return true;
+        return MacAccessibilityOperationResult.Success();
     }
 
-    public bool TrySetMinimized(Contracts.RobloxProcessIdentity process, string windowIdentifier, bool minimized)
+    public MacAccessibilityOperationResult TrySetMinimized(
+        Contracts.RobloxProcessIdentity process,
+        string windowIdentifier,
+        bool minimized)
     {
         MinimizeCalls++;
-        if (!TryGetWindow(process.Pid, windowIdentifier, out var window)) return false;
-        Windows[process.Pid] = window with { IsMinimized = minimized };
-        return true;
+        MinimizeRequests.Add((process.Pid, minimized));
+        Operations.Add($"minimized:{process.Pid}:{minimized}");
+        if (!minimized && RestoreReadbackFailures > 0)
+        {
+            RestoreReadbackFailures--;
+            return MacAccessibilityOperationResult.Failure("accessibility-minimized-cannot-complete");
+        }
+        if (!TryGetWindow(process.Pid, windowIdentifier, out var window))
+            return MacAccessibilityOperationResult.Failure("accessibility-window-reference-unavailable");
+        var updated = window with { IsMinimized = minimized };
+        Windows[process.Pid] = updated;
+        _reportedWindows[process.Pid] = minimized ? window : updated;
+        if (minimized)
+        {
+            _delayedMinimizedReadbacks[process.Pid] = DelayedMinimizedReadbacks;
+            if (HideMakesWindowTemporarilyUnavailable.Contains(process.Pid))
+                _temporaryUnavailableProbes[process.Pid] = DelayedMinimizedReadbacks;
+            if (MinimizedWindowsAbsentAfterReadback.Contains(process.Pid))
+                _minimizedReadbacksBeforeUnavailable[process.Pid] = 1;
+        }
+        else
+        {
+            _delayedMinimizedReadbacks.Remove(process.Pid);
+            _temporaryUnavailableProbes.Remove(process.Pid);
+            _minimizedReadbacksBeforeUnavailable.Remove(process.Pid);
+        }
+        return MacAccessibilityOperationResult.Success();
     }
 
     public bool TryRaise(
@@ -1516,6 +1847,7 @@ sealed class OverlayAccessibilityFake : IMacAccessibilityApi
 
     public void ForgetWindow(Contracts.RobloxProcessIdentity process, string windowIdentifier)
     {
+        ForgottenWindowIdentifiers.Add(windowIdentifier);
     }
 
     private bool TryGetWindow(int processId, string windowIdentifier, out MacAccessibleWindow window)
