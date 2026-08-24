@@ -60,13 +60,6 @@ public interface IPluginTransport : IAsyncDisposable
     ValueTask<ReadOnlyMemory<byte>> ReceiveAsync(CancellationToken cancellationToken = default);
 }
 
-public interface IPluginProcessSupervisor : IAsyncDisposable
-{
-    ValueTask StartAsync(PluginManifest manifest, CancellationToken cancellationToken = default);
-    ValueTask StopAsync(string pluginId, CancellationToken cancellationToken = default);
-    ValueTask<IReadOnlyList<string>> GetRunningPluginIdsAsync(CancellationToken cancellationToken = default);
-}
-
 public interface IPlatformCapabilities
 {
     RobloxPlatform Platform { get; }

@@ -37,8 +37,11 @@ var absent = MacSemaphoreMapping.Map(-1, 2);
 Check(absent.Status == SingletonReleaseStatus.AlreadyAbsent && absent.ErrorName == "ENOENT",
     "ENOENT was not mapped to AlreadyAbsent.");
 var denied = MacSemaphoreMapping.Map(-1, 13);
-Check(denied.Status == SingletonReleaseStatus.Failed && denied.ErrorName == "EACCES" && denied.NativeError == 13,
-    "A non-ENOENT errno was not retained as a failure.");
+Check(denied.Status == SingletonReleaseStatus.PermissionDenied && denied.ErrorName == "EACCES" && denied.NativeError == 13,
+    "EACCES was not retained as an actionable permission failure.");
+var operationNotPermitted = MacSemaphoreMapping.Map(-1, 1);
+Check(operationNotPermitted.Status == SingletonReleaseStatus.PermissionDenied && operationNotPermitted.ErrorName == "EPERM",
+    "EPERM was not retained as an actionable permission failure.");
 
 var hello = new MacPluginHello(
     "auth-ticket-token",
@@ -612,12 +615,19 @@ try
     var pluginDirectory = Path.Combine(pluginRoot, "sample.plugin");
     Directory.CreateDirectory(pluginDirectory);
     await File.WriteAllTextAsync(Path.Combine(pluginDirectory, "plugin.json"),
-        "{\"schemaVersion\":2,\"id\":\"sample.plugin\",\"capabilities\":[\"host.accounts.read\"],\"entryPoints\":{\"osx-arm64\":\"plugin\",\"osx-x64\":\"plugin\"}}");
+        "{\"schemaVersion\":2,\"id\":\"sample.plugin\",\"name\":\"Sample\",\"version\":\"1.0.0\",\"contractVersion\":\"1.0\",\"publisher\":\"Tests\",\"description\":\"Fixture\",\"capabilities\":[\"host.accounts.read\"],\"entryPoints\":{\"osx-arm64\":\"plugin\",\"osx-x64\":\"plugin\"}}");
     await File.WriteAllBytesAsync(Path.Combine(pluginDirectory, "plugin"), [1, 2, 3]);
+    var incompletePluginDirectory = Path.Combine(pluginRoot, "incomplete.plugin");
+    Directory.CreateDirectory(incompletePluginDirectory);
+    await File.WriteAllTextAsync(Path.Combine(incompletePluginDirectory, "plugin.json"),
+        "{\"schemaVersion\":2,\"id\":\"incomplete.plugin\",\"entryPoints\":{\"osx-arm64\":\"plugin\",\"osx-x64\":\"plugin\"}}");
+    await File.WriteAllBytesAsync(Path.Combine(incompletePluginDirectory, "plugin"), [1, 2, 3]);
     var pluginHost = new MacPluginHostFacade(pluginRoot);
     var pluginIds = await pluginHost.GetInstalledPluginIdsAsync();
     Check(pluginIds.Contains("sample.plugin", StringComparer.Ordinal),
         "A macOS RID-matched plugin was not discovered.");
+    Check(!pluginIds.Contains("incomplete.plugin", StringComparer.Ordinal),
+        "The macOS plugin host accepted a manifest that the shared strict parser rejects.");
     var transport = new MacUnixPluginTransport();
     Check(System.Text.Encoding.UTF8.GetByteCount(transport.SocketPath) <= 104,
         "The macOS plugin socket path exceeded the sockaddr_un limit.");

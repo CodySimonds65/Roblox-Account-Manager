@@ -77,6 +77,8 @@ public sealed class SerializedLaunchCoordinator
                         BundlePath: preparedRequest.RobloxBundlePath,
                         SingletonStatus: release.Status,
                         NativeError: release.NativeError));
+                    if (release.Status is SingletonReleaseStatus.PermissionDenied or SingletonReleaseStatus.NotSupported)
+                        return new LaunchResult(false, null, attempts, LaunchFailureKind.LauncherRejected);
                     continue;
                 }
 

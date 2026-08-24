@@ -112,6 +112,7 @@ public sealed class LauncherSettings
     public string LastGameName { get; set; } = string.Empty;
     public List<string> RecentGameNames { get; set; } = [];
     public bool ClearBrowserDataOnNextStart { get; set; }
+    public bool MasterVolumeMigrationCompleted { get; set; }
     public bool RobloxSettingsConsentGranted { get; set; }
     public bool UnsignedUpdatesConsentGranted { get; set; }
     public GameSettings GameSettings { get; set; } = new();
@@ -134,6 +135,7 @@ public sealed class GameSettings
     public int? MasterVolumeLevel { get; set; }
     public string? AdvancedFlagsJson { get; set; }
 
+    [System.Text.Json.Serialization.JsonIgnore]
     public bool HasOverrides =>
         MsaaSamples.HasValue || PreserveRenderingQuality.HasValue || GraphicsQuality.HasValue ||
         TextureQuality.HasValue || FpsLimit.HasValue || MasterVolumeLevel.HasValue || HasAdvancedOverrides();
@@ -149,13 +151,46 @@ public sealed class GameSettings
         AdvancedFlagsJson = AdvancedFlagsJson
     };
 
+    public static GameSettings Merge(GameSettings global, GameSettings? overrideSettings) =>
+        Resolve(global, overrideSettings, null);
+
+    public static bool TryResolve(
+        GameSettings global,
+        GameSettings? game,
+        GameSettings? profile,
+        out GameSettings resolved,
+        out string error)
+    {
+        foreach (var (scope, settings) in new[]
+                 {
+                     ("Global", global),
+                     ("Game", game),
+                     ("Profile", profile)
+                 })
+        {
+            if (settings is not null && !TryValidate(settings, out var validationError))
+            {
+                resolved = new GameSettings();
+                error = $"{scope} settings are invalid: {validationError}";
+                return false;
+            }
+        }
+
+        resolved = ResolveUnchecked(global, game, profile);
+        error = string.Empty;
+        return true;
+    }
+
     public static GameSettings Resolve(GameSettings global, GameSettings? game, GameSettings? profile)
     {
         ArgumentNullException.ThrowIfNull(global);
-        Validate(global, "Global");
-        if (game is not null) Validate(game, "Game");
-        if (profile is not null) Validate(profile, "Profile");
+        if (!TryResolve(global, game, profile, out var resolved, out var error))
+            throw new ArgumentException(error, nameof(global));
+        return resolved;
+    }
 
+    private static GameSettings ResolveUnchecked(GameSettings global, GameSettings? game, GameSettings? profile)
+    {
         var merged = global.Clone();
         Apply(merged, game);
         Apply(merged, profile);
@@ -243,10 +278,14 @@ public sealed class GameSettings
                 else values[pair.Key] = pair.Value;
             }
         }
-        return values.Count == 0 ? null : JsonSerializer.Serialize(values, new JsonSerializerOptions { WriteIndented = true });
+        if (values.Count == 0)
+            return layers.Any(layer => !string.IsNullOrWhiteSpace(layer)) ? "{}" : null;
+        return JsonSerializer.Serialize(values, new JsonSerializerOptions { WriteIndented = true });
     }
 
-    private bool HasAdvancedOverrides() => TryParseAdvancedFlags(AdvancedFlagsJson, out var flags, out _) && flags.Count > 0;
+    private bool HasAdvancedOverrides() =>
+        !string.IsNullOrWhiteSpace(AdvancedFlagsJson) &&
+        (!TryParseAdvancedFlags(AdvancedFlagsJson, out var flags, out _) || flags.Count > 0);
 }
 
 public enum LaunchQueueState { Waiting, Preparing, Launching, Running, Failed, Canceled }

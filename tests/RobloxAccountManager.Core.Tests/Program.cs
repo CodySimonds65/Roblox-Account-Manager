@@ -94,6 +94,28 @@ Require(!rejected.Succeeded
         && rejectedLocator.SnapshotCount == 0,
     "A non-retryable preparation failure reached snapshot or ticket acquisition.");
 
+var deniedTicketCalls = 0;
+var deniedLauncher = new RecordingLauncher();
+var permissionDenied = await new SerializedLaunchCoordinator(
+        new RetryLocator(),
+        new PermissionDeniedStrategy(),
+        deniedLauncher)
+    .LaunchAsync(new RobloxLaunchRequest(
+        "account",
+        _ =>
+        {
+            deniedTicketCalls++;
+            return ValueTask.FromResult(ticketUri);
+        },
+        MaxAttempts: 3));
+Require(!permissionDenied.Succeeded
+        && permissionDenied.FailureKind == LaunchFailureKind.LauncherRejected
+        && permissionDenied.Attempts.Count == 1
+        && permissionDenied.Attempts[0].SingletonStatus == SingletonReleaseStatus.PermissionDenied
+        && deniedTicketCalls == 0
+        && deniedLauncher.LaunchCount == 0,
+    "A permanent singleton permission failure was retried or reached ticket acquisition.");
+
 Require(GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/games/123/example", out var normalized)
         && normalized.Contains("/games/123/", StringComparison.Ordinal),
     "A valid Roblox game URL was not normalized.");
@@ -120,6 +142,44 @@ var resolvedSettings = GameSettings.Resolve(
     new GameSettings { MasterVolumeLevel = 4 });
 Require(resolvedSettings.GraphicsQuality == 6 && resolvedSettings.FpsLimit == 60 && resolvedSettings.MasterVolumeLevel == 4,
     "Scoped Roblox settings did not resolve profile over game over global values.");
+var launchSettings = new LauncherSettings
+{
+    GameSettings = new GameSettings { GraphicsQuality = 3, FpsLimit = 60 },
+    GameOverrides = new Dictionary<string, GameSettings>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["https://www.roblox.com/games/123/example"] = new() { GraphicsQuality = 7, MasterVolumeLevel = 2 }
+    }
+};
+var launchPreset = new GamePreset("Example", "https://roblox.com/games/123/example")
+{
+    Settings = new GameSettings { GraphicsQuality = 5, TextureQuality = 4 }
+};
+var launchAccount = new AccountProfile
+{
+    GameSettings = new GameSettings { MasterVolumeLevel = 8 }
+};
+Require(LaunchSettingsResolver.TryResolve(
+        launchSettings,
+        launchPreset,
+        launchPreset.Url,
+        launchAccount,
+        out var launchScopedSettings,
+        out var launchSettingsError)
+    && launchSettingsError.Length == 0
+    && launchScopedSettings.GraphicsQuality == 7
+    && launchScopedSettings.TextureQuality == 4
+    && launchScopedSettings.FpsLimit == 60
+    && launchScopedSettings.MasterVolumeLevel == 8,
+    "Shared launch settings did not resolve account over URL over preset over global values.");
+Require(!LaunchSettingsResolver.TryResolve(
+        launchSettings,
+        launchPreset,
+        "https://example.com/games/123",
+        launchAccount,
+        out _,
+        out var invalidLaunchUrlError)
+    && invalidLaunchUrlError.Contains("valid Roblox", StringComparison.Ordinal),
+    "Shared launch settings accepted a non-Roblox launch URL.");
 
 var storeRoot = Path.Combine(Path.GetTempPath(), "ram-core-store-" + Guid.NewGuid().ToString("N"));
 try
@@ -288,6 +348,22 @@ sealed class RejectingStrategy : IRobloxMultiInstanceStrategy
             "preparation-policy-rejected"));
     public ValueTask<SingletonReleaseResult> ReleaseSingletonAsync(CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Singleton release must not run after preparation rejection.");
+    public ValueTask<MacLaunchLevel?> GetActiveMacLevelAsync(CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult<MacLaunchLevel?>(MacLaunchLevel.ManagedSlots);
+}
+
+sealed class PermissionDeniedStrategy : IRobloxMultiInstanceStrategy
+{
+    public RobloxPlatform Platform => RobloxPlatform.MacOS;
+    public ValueTask<RobloxLaunchPreparation> PrepareAsync(
+        RobloxLaunchRequest request,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(RobloxLaunchPreparation.Success(request));
+    public ValueTask<SingletonReleaseResult> ReleaseSingletonAsync(CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(new SingletonReleaseResult(
+            SingletonReleaseStatus.PermissionDenied,
+            NativeError: 13,
+            DiagnosticCode: "EACCES"));
     public ValueTask<MacLaunchLevel?> GetActiveMacLevelAsync(CancellationToken cancellationToken = default) =>
         ValueTask.FromResult<MacLaunchLevel?>(MacLaunchLevel.ManagedSlots);
 }

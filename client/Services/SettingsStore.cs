@@ -1,31 +1,17 @@
-using System.IO;
-using System.Text.Json;
-using RobloxAltClient.Models;
-
 namespace RobloxAltClient.Services;
 
 public sealed class SettingsStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
-    private readonly string _settingsFile;
+    private readonly RobloxAccountManager.Core.Data.SettingsStore _inner;
 
     public SettingsStore(string? appDataDirectory = null)
     {
-        appDataDirectory ??= Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "RobloxAltClient");
-        _settingsFile = Path.Combine(appDataDirectory, "settings.json");
+        _inner = appDataDirectory is null
+            ? new RobloxAccountManager.Core.Data.SettingsStore()
+            : new RobloxAccountManager.Core.Data.SettingsStore(appDataDirectory);
     }
 
-    public async Task<LauncherSettings> LoadAsync()
-    {
-        var directory = Path.GetDirectoryName(_settingsFile)!;
-        Directory.CreateDirectory(directory);
-        return await JsonFileStore.LoadAsync(_settingsFile, new LauncherSettings(), JsonOptions);
-    }
+    public Task<LauncherSettings> LoadAsync() => _inner.LoadAsync();
 
-    public async Task SaveAsync(LauncherSettings settings)
-    {
-        await JsonFileStore.SaveAsync(_settingsFile, settings, JsonOptions);
-    }
+    public Task SaveAsync(LauncherSettings settings) => _inner.SaveAsync(settings);
 }

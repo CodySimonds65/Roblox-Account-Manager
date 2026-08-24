@@ -1,9 +1,9 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using RobloxAccountManager.Core.Capabilities;
 using RobloxAccountManager.Core.Contracts;
+using RobloxAccountManager.PluginSdk;
 
 namespace RobloxAccountManager.Platform.MacOS;
 
@@ -14,8 +14,6 @@ namespace RobloxAccountManager.Platform.MacOS;
 /// </summary>
 public sealed class MacPluginHostFacade : IPluginHostFacade, IAsyncDisposable
 {
-    private static readonly Regex IdPattern = new("^[a-z0-9]+(\\.[a-z0-9-]+)+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
-    private static readonly Regex CapabilityPattern = new("^[a-z0-9]+(\\.[a-z0-9-]+)+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly HashSet<string> SupportedCapabilities =
     [
         "host.accounts.read",
@@ -77,7 +75,7 @@ public sealed class MacPluginHostFacade : IPluginHostFacade, IAsyncDisposable
     public ValueTask<IReadOnlyList<string>> GetRequestedCapabilitiesAsync(string pluginId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IdPattern.IsMatch(pluginId)) return ValueTask.FromResult<IReadOnlyList<string>>([]);
+        if (!PluginManifestParser.IsValidPluginId(pluginId)) return ValueTask.FromResult<IReadOnlyList<string>>([]);
         var directory = PathSafety.RequireContainedPath(_root, Path.Combine(_root, pluginId));
         var descriptor = TryReadDescriptor(directory, out _);
         return ValueTask.FromResult<IReadOnlyList<string>>(descriptor?.RequestedCapabilities ?? []);
@@ -140,7 +138,7 @@ public sealed class MacPluginHostFacade : IPluginHostFacade, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         if (!IsAvailable) return PluginLifecycleResult.Rejected("platform-not-supported");
-        if (!IdPattern.IsMatch(pluginId)) return PluginLifecycleResult.Rejected("plugin-id-invalid");
+        if (!PluginManifestParser.IsValidPluginId(pluginId)) return PluginLifecycleResult.Rejected("plugin-id-invalid");
         if (!userConfirmed) return PluginLifecycleResult.Rejected("capability-consent-required");
         if (_running.ContainsKey(pluginId)) return PluginLifecycleResult.Rejected("plugin-already-running");
 
@@ -341,23 +339,6 @@ public sealed class MacPluginHostFacade : IPluginHostFacade, IAsyncDisposable
         catch { return Array.Empty<PluginAccountSnapshot>(); }
     }
 
-    private static string RequiredString(JsonElement root, string name) =>
-        root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString())
-            ? value.GetString()!
-            : throw new InvalidDataException($"plugin-{name}-missing");
-
-    private static int RequiredInt(JsonElement root, string name) =>
-        root.TryGetProperty(name, out var value) && value.TryGetInt32(out var result)
-            ? result
-            : throw new InvalidDataException($"plugin-{name}-missing");
-
-    private static void ValidateRelativePath(string path)
-    {
-        if (string.IsNullOrWhiteSpace(path) || Path.IsPathRooted(path) || path.Contains(':') || path.Contains('\\')
-            || path.Split('/').Any(part => part is "" or "." or ".."))
-            throw new InvalidDataException("plugin-entrypoint-path-invalid");
-    }
-
     private sealed record MacPluginDescriptor(
         string Id,
         string EntryPointPath,
@@ -438,32 +419,20 @@ public sealed class MacPluginHostFacade : IPluginHostFacade, IAsyncDisposable
             PathSafety.RejectSymlinkComponents(manifestPath);
             PathSafety.RejectSymlink(manifestPath);
             var bytes = File.ReadAllBytes(manifestPath);
-            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 16, CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false });
-            var root = document.RootElement;
-            var schema = RequiredInt(root, "schemaVersion");
-            if (schema is not (1 or 2)) throw new InvalidDataException("plugin-schema-unsupported");
-            var id = RequiredString(root, "id");
-            if (!IdPattern.IsMatch(id)) throw new InvalidDataException("plugin-id-invalid");
-            var capabilities = root.TryGetProperty("capabilities", out var capabilityElement) && capabilityElement.ValueKind == JsonValueKind.Array
-                ? capabilityElement.EnumerateArray().Select(element => element.GetString() ?? string.Empty).Distinct(StringComparer.Ordinal).ToArray()
-                : throw new InvalidDataException("plugin-capabilities-missing");
-            if (capabilities.Any(capability => capability.Length > 128 || !CapabilityPattern.IsMatch(capability)))
-                throw new InvalidDataException("plugin-capability-invalid");
-
-            if (schema == 1) throw new InvalidDataException("plugin-rid-not-available");
             var rid = MacPkgUpdateInstaller.GetCurrentRid();
-            var relativeEntryPoint = root.TryGetProperty("entryPoints", out var entryPoints)
-                    && entryPoints.ValueKind == JsonValueKind.Object
-                    && entryPoints.TryGetProperty(rid, out var ridEntry)
-                    && ridEntry.ValueKind == JsonValueKind.String
-                    ? ridEntry.GetString()!
-                    : throw new InvalidDataException("plugin-rid-not-available");
-            ValidateRelativePath(relativeEntryPoint);
+            var manifest = PluginManifestParser.Parse(System.Text.Encoding.UTF8.GetString(bytes), rid);
+            if (!manifest.IsAvailableOnCurrentPlatform)
+                throw new InvalidDataException("plugin-rid-not-available");
+            var relativeEntryPoint = manifest.EntryPoint;
             var entryPath = PathSafety.RequireContainedPath(directory, Path.Combine(directory, relativeEntryPoint));
             PathSafety.RejectSymlinkComponents(entryPath);
             PathSafety.RejectSymlink(entryPath);
             if (!File.Exists(entryPath)) throw new FileNotFoundException("plugin-entrypoint-missing");
-            return new MacPluginDescriptor(id, entryPath, Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(), capabilities);
+            return new MacPluginDescriptor(
+                manifest.Id,
+                entryPath,
+                Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+                manifest.Capabilities);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or JsonException or InvalidOperationException or KeyNotFoundException)
         {

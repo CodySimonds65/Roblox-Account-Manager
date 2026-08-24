@@ -17,10 +17,14 @@ public sealed class LauncherDataPaths
     public string Browser => Path.Combine(Root, "WebView2");
 }
 
-public sealed class AccountStore(LauncherDataPaths? paths = null)
+public sealed class AccountStore
 {
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
-    public LauncherDataPaths Paths { get; } = paths ?? new LauncherDataPaths();
+    public AccountStore(LauncherDataPaths? paths = null) => Paths = paths ?? new LauncherDataPaths();
+    public AccountStore(string root) : this(new LauncherDataPaths(root)) { }
+    public LauncherDataPaths Paths { get; }
+    public string AppDataDirectory => Paths.Root;
+    public string WebViewDataDirectory => Paths.Browser;
 
     public async Task<List<AccountProfile>> LoadAsync(CancellationToken cancellationToken = default)
     {
@@ -35,10 +39,12 @@ public sealed class AccountStore(LauncherDataPaths? paths = null)
         .OrderByDescending(x => x.IsFavorite).ThenBy(x => x.SortOrder).ThenBy(x => x.CreatedUtc).ToList();
 }
 
-public sealed class GamePresetStore(LauncherDataPaths? paths = null)
+public sealed class GamePresetStore
 {
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
-    public LauncherDataPaths Paths { get; } = paths ?? new LauncherDataPaths();
+    public GamePresetStore(LauncherDataPaths? paths = null) => Paths = paths ?? new LauncherDataPaths();
+    public GamePresetStore(string root) : this(new LauncherDataPaths(root)) { }
+    public LauncherDataPaths Paths { get; }
     public Task<List<GamePreset>> LoadAsync(CancellationToken cancellationToken = default) =>
         JsonFileStore.LoadAsync(Paths.Presets, new List<GamePreset>(), Options, cancellationToken);
     public Task SaveAsync(IEnumerable<GamePreset> presets, CancellationToken cancellationToken = default) =>
@@ -72,10 +78,12 @@ public sealed class GamePresetStore(LauncherDataPaths? paths = null)
     }
 }
 
-public sealed class SettingsStore(LauncherDataPaths? paths = null)
+public sealed class SettingsStore
 {
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
-    public LauncherDataPaths Paths { get; } = paths ?? new LauncherDataPaths();
+    public SettingsStore(LauncherDataPaths? paths = null) => Paths = paths ?? new LauncherDataPaths();
+    public SettingsStore(string root) : this(new LauncherDataPaths(root)) { }
+    public LauncherDataPaths Paths { get; }
     public Task<LauncherSettings> LoadAsync(CancellationToken cancellationToken = default) =>
         JsonFileStore.LoadAsync(Paths.Settings, new LauncherSettings(), Options, cancellationToken);
     public Task SaveAsync(LauncherSettings settings, CancellationToken cancellationToken = default) =>
@@ -108,7 +116,7 @@ public static class PresetTransferService
             if (result.Any(x => string.Equals(x.Name, preset.Name.Trim(), StringComparison.OrdinalIgnoreCase) ||
                                 string.Equals(x.Url, url, StringComparison.OrdinalIgnoreCase))) continue;
             if (preset.Settings is not null && !GameSettings.TryValidate(preset.Settings, out var error))
-                throw new InvalidOperationException($"The preset file contains invalid settings: {error}");
+                throw new InvalidOperationException($"The preset file contains invalid engine settings: {error}");
             result.Add(new GamePreset(preset.Name.Trim(), url) { Settings = preset.Settings?.Clone() });
         }
         return result;

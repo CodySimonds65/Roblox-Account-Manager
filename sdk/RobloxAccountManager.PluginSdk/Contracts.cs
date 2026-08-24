@@ -12,7 +12,7 @@ public static class PluginProtocol
 public sealed record ManagedAccountSnapshot(string AccountId, string Label, int ProcessId, long ProcessStartTimeUtcTicks,
     nint WindowHandle, int ClientX, int ClientY, int ClientWidth, int ClientHeight, uint Dpi,
     bool IsMinimized, DateTime LastActivityUtc, bool IsRunning, nint RootWindowHandle = 0,
-    string? Platform = null, string? WindowIdentifier = null);
+    string? Platform = null, string? WindowIdentifier = null, int? ExitCode = null);
 
 public sealed record ThemePalette(string Background, string Surface, string Elevated, string Hover, string Border,
     string Text, string MutedText, string Accent, string AccentHover, string AccentPressed, string Danger,
@@ -28,4 +28,28 @@ public sealed record ActionDescriptor(string ActionId, string DisplayName, strin
 public sealed record ActionInvocation(string ActionId, string RequestId, IReadOnlyList<string> AccountIds,
     JsonElement Arguments, DateTime RequestedUtc);
 
-public sealed record ActionResult(bool Accepted, string Code, string Message, JsonElement? Data = null);
+public sealed record ActionResult(bool Accepted, string Code, string Message, JsonElement? Data = null)
+{
+    public static ActionResult Ok(string message = "Accepted") => new(true, "ok", message);
+    public static ActionResult Fail(string code, string message) => new(false, code, message);
+}
+
+public sealed record PluginManifest(
+    int SchemaVersion,
+    string Id,
+    string Name,
+    string Version,
+    string ContractVersion,
+    string Publisher,
+    string Description,
+    IReadOnlyList<string> Capabilities,
+    string EntryPoint,
+    string? Icon = null,
+    string? UpdateFeed = null,
+    string? MinHostVersion = null,
+    bool AutostartDefault = false,
+    IReadOnlyDictionary<string, string>? EntryPoints = null,
+    string? SelectedRuntimeIdentifier = null)
+{
+    public bool IsAvailableOnCurrentPlatform => !string.IsNullOrWhiteSpace(EntryPoint);
+}

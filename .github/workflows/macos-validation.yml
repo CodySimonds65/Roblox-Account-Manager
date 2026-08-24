@@ -31,11 +31,11 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Test shared launch and security contracts
-        run: dotnet run --project tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release
+        run: dotnet test tests/RobloxAccountManager.Core.Tests/RobloxAccountManager.Core.Tests.csproj -c Release --nologo --verbosity minimal
       - name: Test macOS platform safety contracts
-        run: dotnet run --project tests/RobloxAccountManager.Platform.MacOS.Tests/RobloxAccountManager.Platform.MacOS.Tests.csproj -c Release
+        run: dotnet test tests/RobloxAccountManager.Platform.MacOS.Tests/RobloxAccountManager.Platform.MacOS.Tests.csproj -c Release --nologo --verbosity minimal
       - name: Test desktop startup policy
-        run: dotnet run --project tests/RobloxAccountManager.Desktop.Tests/RobloxAccountManager.Desktop.Tests.csproj -c Release
+        run: dotnet test tests/RobloxAccountManager.Desktop.Tests/RobloxAccountManager.Desktop.Tests.csproj -c Release --nologo --verbosity minimal
       - name: Build macOS platform adapter
         run: dotnet build src/RobloxAccountManager.Platform.MacOS/RobloxAccountManager.Platform.MacOS.csproj -c Release
       - name: Publish Avalonia desktop

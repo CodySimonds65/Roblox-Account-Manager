@@ -38,6 +38,8 @@ public sealed partial class MacSemaphore
 public static class MacSemaphoreMapping
 {
     private const int ErrnoNoEntry = 2;
+    private const int ErrnoOperationNotPermitted = 1;
+    private const int ErrnoPermissionDenied = 13;
     public static SingletonReleaseResult Map(int returnCode, int nativeError)
     {
         if (returnCode == 0)
@@ -48,6 +50,11 @@ public static class MacSemaphoreMapping
         if (nativeError == ErrnoNoEntry)
         {
             return new SingletonReleaseResult(SingletonReleaseStatus.AlreadyAbsent, nativeError, "ENOENT");
+        }
+
+        if (nativeError is ErrnoOperationNotPermitted or ErrnoPermissionDenied)
+        {
+            return new SingletonReleaseResult(SingletonReleaseStatus.PermissionDenied, nativeError, DescribeErrno(nativeError));
         }
 
         return new SingletonReleaseResult(SingletonReleaseStatus.Failed, nativeError, DescribeErrno(nativeError));

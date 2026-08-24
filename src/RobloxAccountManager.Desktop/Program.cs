@@ -12,19 +12,25 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        if (!OperatingSystem.IsMacOS())
+        {
+            Console.Error.WriteLine(
+                "desktop-platform-not-supported: the Avalonia desktop is macOS-only; use the WPF client under client/ on Windows.");
+            Environment.ExitCode = 2;
+            return;
+        }
+
         var validationMode = DesktopStartupPlan.ParseValidationMode(args);
         if (args.Contains("--validate-composition", StringComparer.Ordinal))
         {
             var app = new App();
             app.Initialize();
-            var platform = OperatingSystem.IsMacOS() ? RobloxPlatform.MacOS :
-                OperatingSystem.IsWindows() ? RobloxPlatform.Windows : RobloxPlatform.Unknown;
             var composition = DesktopComposition.Create(
-                platform,
+                RobloxPlatform.MacOS,
                 TrustedRobloxIdentityConfiguration.LoadInstallerIdentity());
-            if (platform == RobloxPlatform.MacOS && composition.Clients is null)
+            if (composition.Clients is null)
                 throw new InvalidOperationException("The macOS client services were not composed.");
-            if (platform == RobloxPlatform.MacOS && composition.Launches is null)
+            if (composition.Launches is null)
                 throw new InvalidOperationException("The macOS launch services were not composed.");
             var browserSessions = composition.BrowserSessions;
             var accountId = Guid.NewGuid().ToString("N");

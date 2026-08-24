@@ -243,16 +243,6 @@ public sealed record PlatformCapabilitySnapshot(
         ?? new CapabilityDescriptor(name, CapabilityStatus.Unsupported, "This capability was not registered.", "platform-not-supported");
 }
 
-public sealed record PluginRidEntryPoint(string Rid, string EntryPoint);
-
-public sealed record PluginManifest(
-    string Id,
-    string Name,
-    int SchemaVersion,
-    string? LegacyEntryPoint,
-    IReadOnlyList<PluginRidEntryPoint> EntryPoints,
-    IReadOnlySet<string> RequestedCapabilities);
-
 public sealed record PluginAccountSnapshot(
     string AccountId,
     string DisplayName,

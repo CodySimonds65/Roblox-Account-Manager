@@ -9,5 +9,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\RobloxAccountManager.Core\RobloxAccountManager.Core.csproj" />
+    <ProjectReference Include="..\..\sdk\RobloxAccountManager.PluginSdk\RobloxAccountManager.PluginSdk.csproj" />
   </ItemGroup>
 </Project>

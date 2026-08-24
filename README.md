@@ -30,7 +30,9 @@ Requires the .NET 8 SDK or newer. Windows builds also require the Microsoft WebV
 
 - **Windows:** Run `build-client.cmd`; the output is `release\RobloxAccountManager.exe`.
 - **macOS:** Publish for `osx-arm64` or `osx-x64`, then package the app with `build/macos/package-app.sh`.
-- **Source:** Windows code is under `client\`; cross-platform code is under `src\`.
+- **Source:** The supported Windows/WPF application is under `client\`. The Avalonia desktop under
+  `src\RobloxAccountManager.Desktop` is the macOS frontend and intentionally does not run on Windows.
+  Shared contracts and platform services remain under `src\`.
 
 macOS support is experimental; use the Windows release for normal use. All source is licensed under Apache 2.0.
 

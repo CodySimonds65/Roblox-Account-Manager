@@ -92,7 +92,7 @@ jobs:
         run: |
           $testProject = '.\tests\RobloxAltClient.SmokeTests\RobloxAltClient.SmokeTests.csproj'
           if (Test-Path -LiteralPath $testProject) {
-              dotnet run --project $testProject -c Release
+              dotnet test $testProject -c Release --nologo --verbosity minimal
           } else {
               Write-Host 'No smoke-test project is present in this revision.'
           }

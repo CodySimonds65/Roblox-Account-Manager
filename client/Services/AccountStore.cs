@@ -1,41 +1,24 @@
-using System.Text.Json;
-using System.IO;
-using RobloxAltClient.Models;
-
 namespace RobloxAltClient.Services;
 
 public sealed class AccountStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    private readonly RobloxAccountManager.Core.Data.AccountStore _inner;
 
-    public string AppDataDirectory { get; }
+    public string AppDataDirectory => _inner.AppDataDirectory;
 
-    public string WebViewDataDirectory => Path.Combine(AppDataDirectory, "WebView2");
-    private string AccountFile => Path.Combine(AppDataDirectory, "accounts.json");
+    public string WebViewDataDirectory => _inner.WebViewDataDirectory;
 
     public AccountStore(string? appDataDirectory = null)
     {
-        AppDataDirectory = appDataDirectory ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "RobloxAltClient");
+        _inner = appDataDirectory is null
+            ? new RobloxAccountManager.Core.Data.AccountStore()
+            : new RobloxAccountManager.Core.Data.AccountStore(appDataDirectory);
     }
 
-    public async Task<List<AccountProfile>> LoadAsync()
-    {
-        Directory.CreateDirectory(AppDataDirectory);
-        var accounts = await JsonFileStore.LoadAsync(AccountFile, new List<AccountProfile>(), JsonOptions);
-        return OrderForDisplay(accounts);
-    }
+    public Task<List<AccountProfile>> LoadAsync() => _inner.LoadAsync();
 
     public static List<AccountProfile> OrderForDisplay(IEnumerable<AccountProfile> accounts) =>
-        accounts
-            .OrderByDescending(account => account.IsFavorite)
-            .ThenBy(account => account.SortOrder)
-            .ThenBy(account => account.CreatedUtc)
-            .ToList();
+        RobloxAccountManager.Core.Data.AccountStore.OrderForDisplay(accounts);
 
-    public async Task SaveAsync(IEnumerable<AccountProfile> accounts)
-    {
-        await JsonFileStore.SaveAsync(AccountFile, accounts.ToList(), JsonOptions);
-    }
+    public Task SaveAsync(IEnumerable<AccountProfile> accounts) => _inner.SaveAsync(accounts);
 }

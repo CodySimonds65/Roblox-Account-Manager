@@ -220,6 +220,7 @@ public sealed class MacCoreMultiInstanceStrategy : Contracts.IRobloxMultiInstanc
         {
             SingletonReleaseStatus.Removed => Contracts.SingletonReleaseStatus.Released,
             SingletonReleaseStatus.AlreadyAbsent => Contracts.SingletonReleaseStatus.AlreadyAbsent,
+            SingletonReleaseStatus.PermissionDenied => Contracts.SingletonReleaseStatus.PermissionDenied,
             SingletonReleaseStatus.NotMacOS => Contracts.SingletonReleaseStatus.NotSupported,
             _ => Contracts.SingletonReleaseStatus.Failed
         };

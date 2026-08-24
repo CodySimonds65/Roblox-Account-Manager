@@ -39,6 +39,7 @@ public static class JsonFileStore
             {
                 await JsonSerializer.SerializeAsync(stream, value, options, cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                stream.Flush(flushToDisk: true);
             }
             if (File.Exists(path)) File.Replace(temporary, path, backup, true);
             else { File.Move(temporary, path); File.Copy(path, backup, true); }

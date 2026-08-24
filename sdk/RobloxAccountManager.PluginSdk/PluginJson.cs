@@ -46,7 +46,8 @@ public sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<ManagedA
             value.TryGetProperty("platform", out var platform) && platform.ValueKind == JsonValueKind.String ? platform.GetString() : null,
             value.TryGetProperty("windowIdentifier", out var windowIdentifier) && windowIdentifier.ValueKind == JsonValueKind.String
                 ? windowIdentifier.GetString()
-                : null);
+                : null,
+            value.TryGetProperty("exitCode", out var exitCode) && exitCode.ValueKind != JsonValueKind.Null ? exitCode.GetInt32() : null);
     }
 
     public override void Write(Utf8JsonWriter writer, ManagedAccountSnapshot value, JsonSerializerOptions options)
@@ -66,6 +67,7 @@ public sealed class ManagedAccountSnapshotJsonConverter : JsonConverter<ManagedA
         writer.WriteString("lastActivityUtc", value.LastActivityUtc);
         writer.WriteBoolean("isRunning", value.IsRunning);
         writer.WriteNumber("rootWindowHandle", value.RootWindowHandle.ToInt64());
+        if (value.ExitCode is int exitCode) writer.WriteNumber("exitCode", exitCode);
         if (value.Platform is not null) writer.WriteString("platform", value.Platform);
         if (value.WindowIdentifier is not null) writer.WriteString("windowIdentifier", value.WindowIdentifier);
         writer.WriteEndObject();
