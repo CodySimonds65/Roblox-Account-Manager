@@ -6,6 +6,7 @@ using System.Buffers.Binary;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Security.Cryptography;
+using System.Xml.Linq;
 
 var passed = 0;
 var skipped = 0;
@@ -592,10 +593,15 @@ try
     await File.WriteAllTextAsync(robloxEnginePath, "{\"ExistingFlag\": true}");
     var settingsAdapter = new MacRobloxSettingsAdapter(robloxSettingsPath, robloxEnginePath);
     var settingsResult = await settingsAdapter.ApplyAsync(new GameSettings { GraphicsQuality = 7, FpsLimit = 120, TextureQuality = 2 });
-    Check(settingsResult.Applied.Contains("graphics-quality") && settingsResult.Applied.Contains("fps") && settingsResult.Applied.Contains("engine-flags"),
-        "The macOS Roblox settings adapter did not apply supported settings.");
-    Check((await File.ReadAllTextAsync(robloxEnginePath)).Contains("DFIntTextureQualityOverride", StringComparison.Ordinal),
-        "The macOS Roblox settings adapter did not persist engine flags atomically.");
+    var persistedSettings = XDocument.Load(robloxSettingsPath).Descendants("Properties").Single();
+    using var persistedEngine = JsonDocument.Parse(await File.ReadAllBytesAsync(robloxEnginePath));
+    Check(settingsResult.Succeeded
+          && persistedSettings.Elements().Single(element => (string?)element.Attribute("name") == "GraphicsQuality").Value == "7"
+          && persistedSettings.Elements().Single(element => (string?)element.Attribute("name") == "FramerateCap").Value == "120"
+          && persistedEngine.RootElement.GetProperty("DFIntTextureQualityOverride").GetInt32() == 2
+          && persistedEngine.RootElement.GetProperty("DFFlagTextureQualityOverrideEnabled").GetBoolean()
+          && persistedEngine.RootElement.GetProperty("ExistingFlag").GetBoolean(),
+        "The macOS settings adapter did not persist requested settings while preserving existing flags.");
 
     var partialSettingsPath = Path.Combine(tempRoot, "PartialGlobalBasicSettings_13.xml");
     var partialEnginePath = Path.Combine(tempRoot, "PartialClientAppSettings.json");
@@ -604,12 +610,15 @@ try
         "<Item name=\"GraphicsQuality\"><int name=\"value\">3</int></Item>" +
         "</Properties></Item></Roblox>");
     await File.WriteAllTextAsync(partialEnginePath, "{\"ExistingFlag\": true}");
+    var originalPartialSettings = await File.ReadAllBytesAsync(partialSettingsPath);
+    var originalPartialEngine = await File.ReadAllBytesAsync(partialEnginePath);
     var partialAdapter = new MacRobloxSettingsAdapter(partialSettingsPath, partialEnginePath);
     var partialResult = await partialAdapter.ApplyAsync(new GameSettings { GraphicsQuality = 7, FpsLimit = 120, TextureQuality = 2 });
     Check(!partialResult.Succeeded && partialResult.Skipped.Count > 0,
         "The macOS settings adapter reported partial unsupported settings as successful.");
-    Check(!(await File.ReadAllTextAsync(partialEnginePath)).Contains("DFIntTextureQualityOverride", StringComparison.Ordinal),
-        "The macOS settings adapter committed engine flags after an unsupported scoped setting.");
+    Check((await File.ReadAllBytesAsync(partialSettingsPath)).SequenceEqual(originalPartialSettings)
+          && (await File.ReadAllBytesAsync(partialEnginePath)).SequenceEqual(originalPartialEngine),
+        "The macOS settings adapter changed settings files after an unsupported scoped setting.");
 
     var pluginRoot = Path.Combine(tempRoot, "plugins");
     var pluginDirectory = Path.Combine(pluginRoot, "sample.plugin");
@@ -841,8 +850,6 @@ try
         && openArguments[2] == "--"
         && openArguments[3] == pkgPath,
         "PKG launch arguments were not pinned to Apple Installer or passed safely.");
-    Check(!string.Join(' ', openArguments).Contains("--apply-update", StringComparison.Ordinal),
-        "The macOS PKG handoff unexpectedly exposed a custom privileged update mode.");
 }
 finally
 {

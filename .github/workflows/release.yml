@@ -93,8 +93,21 @@ jobs:
           $testProject = '.\tests\RobloxAltClient.SmokeTests\RobloxAltClient.SmokeTests.csproj'
           if (Test-Path -LiteralPath $testProject) {
               dotnet test $testProject -c Release --nologo --verbosity minimal
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Smoke tests failed with exit code $LASTEXITCODE."
+              }
           } else {
               Write-Host 'No smoke-test project is present in this revision.'
+          }
+
+          $coreTestProject = '.\tests\RobloxAccountManager.Core.Tests\RobloxAccountManager.Core.Tests.csproj'
+          if (-not (Test-Path -LiteralPath $coreTestProject)) {
+              throw "Core test project was not found at $coreTestProject."
+          }
+
+          dotnet test $coreTestProject -c Release --nologo --verbosity minimal
+          if ($LASTEXITCODE -ne 0) {
+              throw "Core tests failed with exit code $LASTEXITCODE."
           }
 
       - name: Publish standalone client

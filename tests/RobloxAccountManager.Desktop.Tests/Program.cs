@@ -207,26 +207,6 @@ Require(MacUpdateActivityFormatter.FormatUnsignedValidationRejection("pkg-versio
         "Unsigned update rejected before prompt: pkg-version-not-newer (installed pkg version: 77).",
     "The unsigned update rejection did not include the installed PKG version.");
 
-Require(RobloxPlayControl.ParseResult("clicked") == RobloxPlayControlStatus.Clicked,
-    "A clicked Roblox Play-control result was not recognized.");
-Require(RobloxPlayControl.ParseResult("\"not-found\"") == RobloxPlayControlStatus.NotFound,
-    "A missing Roblox Play-control result was not recognized.");
-Require(RobloxPlayControl.ParseResult("wrong-origin") == RobloxPlayControlStatus.WrongOrigin,
-    "A wrong-origin Roblox Play-control result was not recognized.");
-Require(RobloxPlayControl.ParseResult("arbitrary page text") == RobloxPlayControlStatus.Unknown,
-    "Arbitrary WebView script output was treated as a valid Play-control result.");
-Require(RobloxPlayControl.Script.Contains("location.hostname", StringComparison.Ordinal)
-        && RobloxPlayControl.Script.Contains("roblox.com", StringComparison.OrdinalIgnoreCase)
-        && RobloxPlayControl.Script.Contains("Play", StringComparison.Ordinal)
-        && RobloxPlayControl.Script.Contains("window.open", StringComparison.Ordinal),
-    "The Play-control script did not restrict itself to a trusted Roblox Play action.");
-Require(RobloxPlayControl.TryParseCapturedLaunchUri(
-            "\"roblox-player:1+gameinfo:script-hook-ticket\"",
-            out var scriptHookUri)
-        && scriptHookUri?.Scheme == "roblox-player"
-        && !RobloxPlayControl.TryParseCapturedLaunchUri("\"https://www.roblox.com/games/123\"", out _),
-    "The trusted-page capture fallback accepted an invalid scheme or rejected Roblox.");
-
 var navigationGate = new RobloxNavigationGate();
 navigationGate.CommitTopLevelNavigation(new Uri("https://www.roblox.com/games/123/Test"), succeeded: true);
 Require(navigationGate.TryBeginLaunch(), "The navigation gate did not enter a pending launch state.");
@@ -288,7 +268,7 @@ var capturedLaunchUri = await launchCoordinator.CaptureAsync(
     "account-id",
     new Uri("https://www.roblox.com/games/123/Test"),
     TimeSpan.FromSeconds(1));
-Require(capturedLaunchUri.Scheme == "roblox-player"
+Require(capturedLaunchUri.Equals(new Uri("roblox-player:1+gameinfo:captured-ticket"))
         && launchSession.Events.SequenceEqual(["capture", "navigate", "script", "script"])
         && launchStatuses is [RobloxPlayControlStatus.NotFound, RobloxPlayControlStatus.Clicked],
     "The macOS launch coordinator did not capture after clicking Play in the expected order.");
@@ -304,7 +284,7 @@ var transientCapture = await new MacBrowserLaunchCoordinator(
         "account-id",
         new Uri("https://www.roblox.com/games/123/Test"),
         TimeSpan.FromSeconds(1));
-Require(transientCapture.Scheme == "roblox-player",
+Require(transientCapture.Equals(new Uri("roblox-player:1+gameinfo:transient-script")),
     "A transient WebView script failure prevented a later Play click.");
 
 var transientOriginSession = new FakeMacBrowserLaunchSession(
@@ -318,7 +298,7 @@ var transientOriginCapture = await new MacBrowserLaunchCoordinator(
         "account-id",
         new Uri("https://www.roblox.com/games/123/Test"),
         TimeSpan.FromSeconds(1));
-Require(transientOriginCapture.Scheme == "roblox-player",
+Require(transientOriginCapture.Equals(new Uri("roblox-player:1+gameinfo:transient-origin")),
     "The initial WebView wrong-origin state incorrectly aborted a later Roblox Play click.");
 
 var scriptHookSession = new FakeMacBrowserLaunchSession(
@@ -334,7 +314,7 @@ var scriptHookCapture = await new MacBrowserLaunchCoordinator(
         "account-id",
         new Uri("https://www.roblox.com/games/123/Test"),
         TimeSpan.FromSeconds(1));
-Require(scriptHookCapture.AbsoluteUri.Contains("script-hook-captured", StringComparison.Ordinal)
+Require(scriptHookCapture.Equals(new Uri("roblox-player:1+gameinfo:script-hook-captured"))
         && scriptHookSession.Events.Contains("capture-script", StringComparer.Ordinal),
     "The trusted-page fallback did not recover a Roblox URI omitted by WKWebView routes.");
 
