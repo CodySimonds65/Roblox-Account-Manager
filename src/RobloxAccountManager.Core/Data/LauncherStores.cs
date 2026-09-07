@@ -29,11 +29,32 @@ public sealed class AccountStore
     public async Task<List<AccountProfile>> LoadAsync(CancellationToken cancellationToken = default)
     {
         var accounts = await JsonFileStore.LoadAsync(Paths.Accounts, new List<AccountProfile>(), Options, cancellationToken);
-        return OrderForDisplay(accounts);
+        var ordered = OrderForDisplay(accounts);
+        if (EnsureUniqueIds(ordered) > 0)
+            await SaveAsync(ordered, cancellationToken).ConfigureAwait(false);
+        return ordered;
     }
 
     public Task SaveAsync(IEnumerable<AccountProfile> accounts, CancellationToken cancellationToken = default) =>
         JsonFileStore.SaveAsync(Paths.Accounts, accounts.ToList(), Options, cancellationToken);
+
+    public static int EnsureUniqueIds(IList<AccountProfile> accounts)
+    {
+        ArgumentNullException.ThrowIfNull(accounts);
+        var usedIds = new HashSet<string>(StringComparer.Ordinal);
+        var repairedCount = 0;
+        foreach (var account in accounts)
+        {
+            if (!string.IsNullOrWhiteSpace(account.Id) && usedIds.Add(account.Id)) continue;
+
+            string replacement;
+            do replacement = Guid.NewGuid().ToString("N");
+            while (!usedIds.Add(replacement));
+            account.Id = replacement;
+            repairedCount++;
+        }
+        return repairedCount;
+    }
 
     public static List<AccountProfile> OrderForDisplay(IEnumerable<AccountProfile> accounts) => accounts
         .OrderByDescending(x => x.IsFavorite).ThenBy(x => x.SortOrder).ThenBy(x => x.CreatedUtc).ToList();

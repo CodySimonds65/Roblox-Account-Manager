@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
@@ -79,13 +80,18 @@ public sealed class MainWindow : Window
     private ListBox? _clientTabsControl;
     private Border? _clientViewport;
     private TextBlock? _clientOverlayStatus;
+    private Button? _clientOverlayRetry;
     private string? _selectedClientAccountId;
     private bool _clientViewVisible;
-    private bool _clientRefreshInProgress;
+    private readonly ClientOverlayRefreshScheduler _clientRefreshScheduler;
+    private string? _lastClientOverlayActivityKey;
     private bool _suppressClientSelection;
     private CancellationTokenSource? _clientOverlayActivation;
     private long _clientOverlayGeneration;
     private volatile bool _launcherIsActive;
+    private bool _isClampingPanelLayout;
+    private GridLength? _activityHeightBeforeClamp;
+    private double _activityClampMaximumHeight;
     private readonly SemaphoreSlim _pageNavigationGate = new(1, 1);
 
     public MainWindow(
@@ -102,6 +108,7 @@ public sealed class MainWindow : Window
         _launches = launches;
         _clients = clients;
         _clientOverlay = clientOverlay;
+        _clientRefreshScheduler = new ClientOverlayRefreshScheduler(RefreshClientOverlayCoreAsync);
         _updateSource = updateSource;
         _validationMode = validationMode;
         _browserSessions.NavigationDiagnostic += AppendNavigationDiagnostic;
@@ -109,7 +116,7 @@ public sealed class MainWindow : Window
         Width = 1380;
         Height = 860;
         MinWidth = 1080;
-        MinHeight = 700;
+        MinHeight = DesktopPanelLayoutPolicy.WindowMinimumHeight;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Background = AppBackgroundBrush;
         Foreground = TextBrush;
@@ -119,7 +126,7 @@ public sealed class MainWindow : Window
             _clientOverlayTimer = new Avalonia.Threading.DispatcherTimer(
                 TimeSpan.FromMilliseconds(500),
                 Avalonia.Threading.DispatcherPriority.Background,
-                async (_, _) => await RefreshClientOverlayAsync());
+                async (_, _) => await RequestClientOverlayRefreshAsync());
         }
 
         _pageTitle.FontSize = 28;
@@ -144,14 +151,22 @@ public sealed class MainWindow : Window
 
         var header = BuildWorkspaceHeader();
 
+        var contentRow = new RowDefinition(1.2, GridUnitType.Star)
+        {
+            MinHeight = DesktopPanelLayoutPolicy.ContentMinimumHeight
+        };
+        var activityRow = new RowDefinition(1, GridUnitType.Star)
+        {
+            MinHeight = DesktopPanelLayoutPolicy.ActivityMinimumHeight
+        };
         var page = new Grid
         {
             RowDefinitions = new RowDefinitions
             {
                 new RowDefinition(GridLength.Auto),
-                new RowDefinition(1.2, GridUnitType.Star) { MinHeight = 160 },
+                contentRow,
                 new RowDefinition(6, GridUnitType.Pixel),
-                new RowDefinition(1, GridUnitType.Star) { MinHeight = 130 }
+                activityRow
             },
             RowSpacing = 14,
             Margin = new Thickness(0, 2, 0, 0),
@@ -173,11 +188,14 @@ public sealed class MainWindow : Window
             ShowsPreview = false,
             Cursor = new Cursor(StandardCursorType.SizeNorthSouth)
         };
+        ToolTip.SetTip(activitySplitter, "Drag to resize the workspace and Activity panel");
+        AutomationProperties.SetName(activitySplitter, "Resize activity log");
         Grid.SetRow(activitySplitter, 2);
         page.Children.Add(activitySplitter);
         var activityCard = BuildActivityCard();
         Grid.SetRow(activityCard, 3);
         page.Children.Add(activityCard);
+        page.LayoutUpdated += (_, _) => ClampPanelLayout(page, contentRow, activityRow, activitySplitter);
 
         var workspace = new Border
         {
@@ -227,6 +245,54 @@ public sealed class MainWindow : Window
         Deactivated += (_, _) => _launcherIsActive = false;
     }
 
+    private void ClampPanelLayout(
+        Grid page,
+        RowDefinition contentRow,
+        RowDefinition activityRow,
+        GridSplitter activitySplitter)
+    {
+        if (_isClampingPanelLayout || page.Bounds.Height <= 0 || page.Children.Count == 0)
+            return;
+
+        var fixedHeight = page.Children[0].Bounds.Height
+            + activitySplitter.Bounds.Height
+            + page.RowSpacing * 3;
+        var maximumActivityHeight = DesktopPanelLayoutPolicy.GetMaximumActivityHeight(
+            page.Bounds.Height,
+            fixedHeight);
+
+        if (_activityHeightBeforeClamp is { } previousHeight
+            && maximumActivityHeight > _activityClampMaximumHeight + 1)
+        {
+            if (previousHeight.GridUnitType != GridUnitType.Pixel
+                || previousHeight.Value <= maximumActivityHeight + 0.5)
+            {
+                _isClampingPanelLayout = true;
+                try { activityRow.Height = previousHeight; }
+                finally { _isClampingPanelLayout = false; }
+                _activityHeightBeforeClamp = null;
+                _activityClampMaximumHeight = 0;
+                return;
+            }
+        }
+
+        if (activityRow.ActualHeight <= maximumActivityHeight + 0.5)
+            return;
+
+        _isClampingPanelLayout = true;
+        try
+        {
+            _activityHeightBeforeClamp ??= activityRow.Height;
+            _activityClampMaximumHeight = maximumActivityHeight;
+            activityRow.Height = new GridLength(maximumActivityHeight, GridUnitType.Pixel);
+            contentRow.MinHeight = DesktopPanelLayoutPolicy.ContentMinimumHeight;
+        }
+        finally
+        {
+            _isClampingPanelLayout = false;
+        }
+    }
+
     private Control BuildWorkspaceHeader()
     {
         var header = new Grid
@@ -248,7 +314,7 @@ public sealed class MainWindow : Window
         {
             _viewModel.Settings.ShowGamePresetPanel = true;
             await SaveAsync();
-            SelectPage("accounts");
+            await SelectPageAsync("accounts");
         };
         actions.Children.Add(_showPresets);
         AddHeaderAction(actions, "Plugins", "plugins");
@@ -680,8 +746,16 @@ public sealed class MainWindow : Window
         var title = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         title.Children.Add(new TextBlock { Text = "Activity", FontSize = 13, FontWeight = FontWeight.SemiBold });
         title.Children.Add(new TextBlock { Text = "Live diagnostics", FontSize = 11, Foreground = MutedTextBrush, VerticalAlignment = VerticalAlignment.Center });
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, HorizontalAlignment = HorizontalAlignment.Right };
-        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, HorizontalAlignment = HorizontalAlignment.Left };
+        var controlsScroll = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Content = controls
+        };
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 8 };
         header.Children.Add(title);
 
         _activityTimeout.ItemsSource = new[] { "30s", "45s", "60s", "90s" };
@@ -728,8 +802,8 @@ public sealed class MainWindow : Window
             _viewModel.AppendActivity("Activity log copied to the clipboard.");
         };
         controls.Children.Add(_copyActivity);
-        Grid.SetColumn(controls, 1);
-        header.Children.Add(controls);
+        Grid.SetColumn(controlsScroll, 1);
+        header.Children.Add(controlsScroll);
         layout.Children.Add(header);
 
         _queueSummary.Margin = new Thickness(0, 0, 0, 0);
@@ -826,21 +900,30 @@ public sealed class MainWindow : Window
         {
             var page = _viewModel.Pages.FirstOrDefault(candidate => string.Equals(candidate.Key, pageKey, StringComparison.Ordinal));
             if (page is null) return;
-            if (_clientViewVisible && !string.Equals(pageKey, "clients", StringComparison.Ordinal)
-                && !await DeactivateClientOverlayAsync())
+            if (_clientViewVisible && !string.Equals(pageKey, "clients", StringComparison.Ordinal))
             {
-                SetClientOverlayStatus(
-                    "Could not restore every Roblox window. Grant Accessibility permission, then try navigating again.",
-                    failure: true);
-                return;
+                var restore = await DeactivateClientOverlayAsync();
+                if (!restore.Succeeded)
+                {
+                    var account = restore.AccountId is not null
+                        ? _viewModel.Accounts.FirstOrDefault(candidate => candidate.Id == restore.AccountId)?.Label
+                        : null;
+                    SetClientOverlayStatus(
+                        ClientOverlayFailureText.Describe(restore.DiagnosticCode),
+                        failure: true,
+                        activityKey: $"overlay-navigation-restore-failed:{restore.DiagnosticCode}:{restore.AccountId}:{restore.ProcessId}",
+                         activityDetail: $"code={restore.DiagnosticCode}; phase=restore; account={SanitiseActivityToken(account)}; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                    SetClientOverlayRecoveryAvailable(true);
+                    return;
+                }
             }
             _viewModel.SelectedPage = page;
             UpdatePresetRevealButton();
             RenderPage();
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            _viewModel.AppendActivity($"Navigation paused: {LaunchDiagnostics.SanitiseCode(exception.Message)}");
+            _viewModel.AppendActivity("Navigation paused: navigation-exception.");
         }
         finally { _pageNavigationGate.Release(); }
     }
@@ -973,7 +1056,8 @@ public sealed class MainWindow : Window
         {
             ItemsSource = _viewModel.Presets,
             SelectedItem = selectedPreset,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Width = 260,
             MinWidth = 260,
             Background = InputBrush,
             Foreground = TextBrush,
@@ -994,7 +1078,8 @@ public sealed class MainWindow : Window
                 presetPicker.SelectedItem = filteredPresets.FirstOrDefault();
             }
         };
-        var presetActions = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 5 };
+        var presetActions = new WrapPanel { Orientation = Orientation.Horizontal };
+        presetPicker.Margin = new Thickness(0, 0, 5, 5);
         presetActions.Children.Add(presetPicker);
         var presetActionNames = new[]
         {
@@ -1013,6 +1098,7 @@ public sealed class MainWindow : Window
                 Width = 34,
                 Height = 34,
                 Padding = new Thickness(0),
+                Margin = new Thickness(0, 0, 5, 5),
                 IsEnabled = presetActionNames[i].Key is "add" or "import" or "export"
                     || presetActionNames[i].Key is "duplicate" && selectedPreset?.Url is not null && selectedPreset.Url.Length > 0
                     || presetActionNames[i].Key is "remove" or "edit" && selectedPreset is { IsBuiltIn: false }
@@ -1021,7 +1107,6 @@ public sealed class MainWindow : Window
             StyleButton(action, secondary: true);
             var actionKey = presetActionNames[i].Key;
             action.Click += async (_, _) => await HandlePresetActionAsync(actionKey);
-            Grid.SetColumn(action, i + 1);
             presetActions.Children.Add(action);
         }
 
@@ -1049,15 +1134,15 @@ public sealed class MainWindow : Window
             customUrl.Text = DesktopPresetPolicy.GetUrlEditorValue(preset);
             customUrl.IsReadOnly = !DesktopPresetPolicy.IsCustomUrlPreset(preset);
         };
-        var customUrlPanel = new StackPanel { Spacing = 5, Margin = new Thickness(12, 0, 0, 0) };
+        var customUrlPanel = new StackPanel { Spacing = 5, Margin = new Thickness(0, 0, 12, 5) };
         customUrlPanel.Children.Add(new TextBlock { Text = "CUSTOM ROBLOX URL", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = MutedTextBrush });
         customUrlPanel.Children.Add(customUrl);
 
-        var login = new Button { Content = "Login / Home", Margin = new Thickness(12, 16, 8, 0), VerticalAlignment = VerticalAlignment.Top };
+        var login = new Button { Content = "Login / Home", Margin = new Thickness(0, 0, 8, 5), VerticalAlignment = VerticalAlignment.Top };
         StyleButton(login, secondary: true);
         login.Click += async (_, _) => await ShowLoginAsync();
         var accounts = _viewModel.Accounts.Where(account => _queueSelectedAccounts.Contains(account.Id)).ToList();
-        var launch = new Button { Content = "▶  Auto-launch selected", IsEnabled = _launches is not null && _launchCancellation is null, Margin = new Thickness(0, 16, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+        var launch = new Button { Content = "▶  Auto-launch selected", IsEnabled = _launches is not null && _launchCancellation is null, Margin = new Thickness(0, 0, 0, 5), VerticalAlignment = VerticalAlignment.Top };
         _launchSelected = launch;
         StyleButton(launch);
         launch.Click += async (_, _) =>
@@ -1068,6 +1153,26 @@ public sealed class MainWindow : Window
             await RunLaunchQueueAsync(presetPicker.SelectedItem as GamePreset, accounts, customUrl.Text);
         };
 
+        var presetBarLayout = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("*"),
+            RowSpacing = 8,
+            ColumnSpacing = 12,
+            ClipToBounds = true
+        };
+        presetBarLayout.Children.Add(presetControls);
+        presetBarLayout.Children.Add(customUrlPanel);
+        presetBarLayout.Children.Add(login);
+        presetBarLayout.Children.Add(launch);
+        presetBarLayout.SizeChanged += (_, _) => ApplyPresetBarLayout(
+            presetBarLayout,
+            presetControls,
+            customUrlPanel,
+            login,
+            launch);
+        ApplyPresetBarLayout(presetBarLayout, presetControls, customUrlPanel, login, launch);
+
         var presetBar = new Border
         {
             Background = SurfaceBrush,
@@ -1075,26 +1180,19 @@ public sealed class MainWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(14),
             Padding = new Thickness(15),
-            Margin = new Thickness(0, 0, 0, 0),
-            Child = new Grid
-            {
-                ColumnDefinitions = new ColumnDefinitions("500,*,Auto,Auto"),
-                ColumnSpacing = 0,
-                Children = { presetControls, customUrlPanel, login, launch }
-            }
+            Margin = new Thickness(0),
+            Child = presetBarLayout
         };
-        Grid.SetColumn(customUrlPanel, 1);
-        Grid.SetColumn(login, 2);
-        Grid.SetColumn(launch, 3);
 
         var sessionHeader = BuildSessionNavigationBar();
 
-        _browserHost.MinHeight = 160;
+        _browserHost.MinHeight = DesktopPanelLayoutPolicy.BrowserMinimumHeight;
         _browserHost.HorizontalAlignment = HorizontalAlignment.Stretch;
         _browserHost.VerticalAlignment = VerticalAlignment.Stretch;
         _browserHost.HorizontalContentAlignment = HorizontalAlignment.Stretch;
         _browserHost.VerticalContentAlignment = VerticalAlignment.Stretch;
         _browserHost.Margin = new Thickness(0);
+        _browserHost.ClipToBounds = true;
         if (_viewModel.SelectedAccount is null)
         {
             _browserHost.Content = new StackPanel
@@ -1125,23 +1223,105 @@ public sealed class MainWindow : Window
         browserBody.Children.Add(progress);
         Grid.SetRow(_browserHost, 2);
         browserBody.Children.Add(_browserHost);
-        var browserCard = new Border { Background = SurfaceBrush, BorderBrush = ControlBorderBrush, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14), ClipToBounds = true, Child = browserBody };
+        var browserHint = new TextBlock
+        {
+            Text = "Sessions stay isolated and local to this PC. Browser data is never included in exports.",
+            FontSize = 11,
+            Foreground = MutedTextBrush,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(3, 8, 3, 0)
+        };
+        var browserCardLayout = new Grid
+        {
+            RowDefinitions = new RowDefinitions("*,Auto"),
+            RowSpacing = 0,
+            ClipToBounds = true,
+            Children = { browserBody, browserHint }
+        };
+        Grid.SetRow(browserHint, 1);
+        var browserCard = new Border
+        {
+            Background = SurfaceBrush,
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            ClipToBounds = true,
+            Child = browserCardLayout
+        };
 
         var showPresetPanel = _viewModel.Settings.ShowGamePresetPanel;
         var workspace = new Grid
         {
-            RowDefinitions = new RowDefinitions(showPresetPanel ? "Auto,*,Auto" : "*,Auto"),
+            RowDefinitions = new RowDefinitions(showPresetPanel ? "Auto,*" : "*"),
             RowSpacing = 14,
             ClipToBounds = true
         };
         if (showPresetPanel) workspace.Children.Add(presetBar);
-        Grid.SetRow(browserCard, 1);
-        if (!showPresetPanel) Grid.SetRow(browserCard, 0);
+        Grid.SetRow(browserCard, showPresetPanel ? 1 : 0);
         workspace.Children.Add(browserCard);
-        var hint = new TextBlock { Text = "Sessions stay isolated and local to this PC. Browser data is never included in exports.", FontSize = 11, Foreground = MutedTextBrush, Margin = new Thickness(3, 0, 3, 0) };
-        Grid.SetRow(hint, showPresetPanel ? 2 : 1);
-        workspace.Children.Add(hint);
         return workspace;
+    }
+
+    private static void ApplyPresetBarLayout(
+        Grid layout,
+        StackPanel presetControls,
+        StackPanel customUrlPanel,
+        Button login,
+        Button launch)
+    {
+        var width = layout.Bounds.Width;
+        if (DesktopPanelLayoutPolicy.UseCompactPresetBar(width))
+        {
+            layout.RowDefinitions = new RowDefinitions("Auto");
+            layout.ColumnDefinitions = new ColumnDefinitions("500,*,Auto,Auto");
+            Grid.SetRow(presetControls, 0);
+            Grid.SetColumn(presetControls, 0);
+            Grid.SetColumnSpan(presetControls, 1);
+            Grid.SetRow(customUrlPanel, 0);
+            Grid.SetColumn(customUrlPanel, 1);
+            Grid.SetRow(login, 0);
+            Grid.SetColumn(login, 2);
+            Grid.SetRow(launch, 0);
+            Grid.SetColumn(launch, 3);
+            customUrlPanel.Margin = new Thickness(0, 0, 0, 0);
+            login.Margin = new Thickness(0);
+            launch.Margin = new Thickness(0);
+            return;
+        }
+
+        if (width >= 900)
+        {
+            layout.RowDefinitions = new RowDefinitions("Auto,Auto");
+            layout.ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto");
+            Grid.SetRow(presetControls, 0);
+            Grid.SetColumn(presetControls, 0);
+            Grid.SetColumnSpan(presetControls, 3);
+            Grid.SetRow(customUrlPanel, 1);
+            Grid.SetColumn(customUrlPanel, 0);
+            Grid.SetRow(login, 1);
+            Grid.SetColumn(login, 1);
+            Grid.SetRow(launch, 1);
+            Grid.SetColumn(launch, 2);
+            customUrlPanel.Margin = new Thickness(0);
+            login.Margin = new Thickness(0, 0, 8, 0);
+            launch.Margin = new Thickness(0);
+            return;
+        }
+
+        layout.RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto");
+        layout.ColumnDefinitions = new ColumnDefinitions("*");
+        Grid.SetRow(presetControls, 0);
+        Grid.SetColumn(presetControls, 0);
+        Grid.SetColumnSpan(presetControls, 1);
+        Grid.SetRow(customUrlPanel, 1);
+        Grid.SetColumn(customUrlPanel, 0);
+        Grid.SetRow(login, 2);
+        Grid.SetColumn(login, 0);
+        Grid.SetRow(launch, 3);
+        Grid.SetColumn(launch, 0);
+        customUrlPanel.Margin = new Thickness(0);
+        login.Margin = new Thickness(0);
+        launch.Margin = new Thickness(0);
     }
 
     private static Control BuildPresetActionIcon(string action)
@@ -1192,8 +1372,16 @@ public sealed class MainWindow : Window
         clients.Click += (_, _) => SelectPage("clients");
         sessionActions.Children.Add(browse);
         sessionActions.Children.Add(clients);
-        Grid.SetColumn(sessionActions, 1);
-        sessionHeader.Children.Add(sessionActions);
+        var sessionActionsScroll = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalContentAlignment = HorizontalAlignment.Right,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Content = sessionActions
+        };
+        Grid.SetColumn(sessionActionsScroll, 1);
+        sessionHeader.Children.Add(sessionActionsScroll);
         return sessionHeader;
     }
 
@@ -1382,6 +1570,7 @@ public sealed class MainWindow : Window
         _clientOverlayActivation?.Dispose();
         _clientOverlayActivation = new CancellationTokenSource();
         Interlocked.Increment(ref _clientOverlayGeneration);
+        _lastClientOverlayActivityKey = null;
         _clientViewVisible = true;
         _clientOverlayTimer?.Start();
 
@@ -1391,14 +1580,17 @@ public sealed class MainWindow : Window
             SelectionMode = SelectionMode.Single,
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(0),
+            MinHeight = 54,
             ItemsPanel = new FuncTemplate<Panel?>(() => new StackPanel { Orientation = Orientation.Horizontal }),
             ItemTemplate = new FuncDataTemplate<ClientTabItem>((item, _) => item is null ? null : BuildClientTab(item))
         };
+        ScrollViewer.SetHorizontalScrollBarVisibility(_clientTabsControl, ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(_clientTabsControl, ScrollBarVisibility.Disabled);
         _clientTabsControl.SelectionChanged += async (_, _) =>
         {
             if (_suppressClientSelection || _clientTabsControl.SelectedItem is not ClientTabItem selected) return;
             _selectedClientAccountId = selected.AccountId;
-            await RefreshClientOverlayAsync(explicitUserSelection: true);
+            await RequestClientOverlayRefreshAsync(explicitUserSelection: true);
         };
 
         _clientViewport = new Border
@@ -1415,8 +1607,8 @@ public sealed class MainWindow : Window
                 VerticalAlignment = VerticalAlignment.Center
             }
         };
-        _clientViewport.SizeChanged += async (_, _) => await RefreshClientOverlayAsync();
-        _clientViewport.AttachedToVisualTree += async (_, _) => await RefreshClientOverlayAsync();
+        _clientViewport.SizeChanged += async (_, _) => await RequestClientOverlayRefreshAsync();
+        _clientViewport.AttachedToVisualTree += async (_, _) => await RequestClientOverlayRefreshAsync();
 
         _clientOverlayStatus = new TextBlock
         {
@@ -1424,11 +1616,46 @@ public sealed class MainWindow : Window
             Foreground = MutedTextBrush,
             TextWrapping = TextWrapping.Wrap
         };
+        _clientOverlayRetry = new Button
+        {
+            Content = "Retry restoration",
+            Padding = new Thickness(11, 6),
+            IsVisible = false
+        };
+        StyleButton(_clientOverlayRetry, secondary: true);
+        _clientOverlayRetry.Click += async (_, _) =>
+        {
+            if (_clientOverlayRetry is null) return;
+            _clientOverlayRetry.IsEnabled = false;
+            try
+            {
+                var restore = await DeactivateClientOverlayAsync();
+                if (restore.Succeeded)
+                {
+                    SetClientOverlayRecoveryAvailable(false);
+                    SetClientOverlayStatus(
+                        "Roblox windows restored. You can navigate away from Clients.",
+                        failure: false,
+                        activityKey: "overlay-restore-ready",
+                        activityDetail: "code=restore-overlay-ready; phase=restore; retryable=false");
+                }
+                else
+                {
+                    SetClientOverlayStatus(
+                        ClientOverlayFailureText.Describe(restore.DiagnosticCode),
+                        failure: true,
+                        activityKey: $"overlay-retry-failed:{restore.DiagnosticCode}:{restore.AccountId}:{restore.ProcessId}",
+                         activityDetail: $"code={restore.DiagnosticCode}; phase=restore; pid={restore.ProcessId?.ToString() ?? "none"}; retryable={ClientOverlayFailureText.IsRetryable(restore)}");
+                    SetClientOverlayRecoveryAvailable(true);
+                }
+            }
+            finally { _clientOverlayRetry.IsEnabled = true; }
+        };
         var controls = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             Spacing = 8,
-            Children = { _clientOverlayStatus }
+            Children = { _clientOverlayStatus, _clientOverlayRetry }
         };
         var layout = new Grid
         {
@@ -1438,7 +1665,7 @@ public sealed class MainWindow : Window
         };
         Grid.SetRow(_clientViewport, 1);
         Grid.SetRow(controls, 2);
-        _ = RefreshClientOverlayAsync();
+        _ = RequestClientOverlayRefreshAsync();
         return Card(layout);
     }
 
@@ -1451,6 +1678,14 @@ public sealed class MainWindow : Window
             TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center
         };
+        var status = new TextBlock
+        {
+            Text = item.Status,
+            FontSize = 10,
+            Foreground = item.IsReady ? SuccessBrush : MutedTextBrush,
+            MaxWidth = 180,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
         var tab = new Border
         {
             Background = ElevatedBrush,
@@ -1459,35 +1694,41 @@ public sealed class MainWindow : Window
             CornerRadius = new CornerRadius(8),
             Padding = new Thickness(12, 6),
             Margin = new Thickness(0, 0, 6, 0),
-            Child = label
+            Child = new StackPanel { Spacing = 1, Children = { label, status } }
         };
         tab.PointerPressed += async (_, _) =>
         {
             _selectedClientAccountId = item.AccountId;
-            await RefreshClientOverlayAsync(explicitUserSelection: true);
+            await RequestClientOverlayRefreshAsync(explicitUserSelection: true);
         };
         return tab;
     }
 
-    private async Task RefreshClientOverlayAsync(bool explicitUserSelection = false)
+    private Task RequestClientOverlayRefreshAsync(bool explicitUserSelection = false) =>
+        _clientRefreshScheduler.RequestAsync(explicitUserSelection);
+
+    private async Task RefreshClientOverlayCoreAsync(bool explicitUserSelection)
     {
-        if (!_clientViewVisible || _clientOverlay is null || _clients is null || _clientRefreshInProgress) return;
+        if (!_clientViewVisible || _clientOverlay is null || _clients is null) return;
         var activation = _clientOverlayActivation;
         if (activation is null) return;
         var cancellationToken = activation.Token;
         var generation = Interlocked.Read(ref _clientOverlayGeneration);
-        _clientRefreshInProgress = true;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             var windows = await _clients.GetWindowsAsync(cancellationToken);
             EnsureClientOverlayActive(generation, cancellationToken);
-            var accountsById = _viewModel.Accounts.ToDictionary(account => account.Id, StringComparer.Ordinal);
-            var eligible = windows
-                .Where(window => !string.IsNullOrWhiteSpace(window.AccountId)
-                    && accountsById.TryGetValue(window.AccountId, out var account)
-                    && account.EmbedInClients)
-                .ToArray();
+            var accountsById = _viewModel.Accounts
+                .GroupBy(account => account.Id, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+            var discovery = MacClientWindowReconciliation.Reconcile(windows);
+            var discoveryDetail = DescribeClientDiscovery(discovery, windows);
+            var eligibility = MacClientWindowReconciliation.SelectOverlayEligibility(
+                discovery,
+                accountId => accountsById.TryGetValue(accountId, out var account) && account.EmbedInClients);
+            var eligible = eligibility.EligibleWindows;
+            var blockingDuplicates = eligibility.BlockingDuplicates;
 
             var nextIds = eligible.Select(window => window.AccountId!).ToHashSet(StringComparer.Ordinal);
             foreach (var removed in _clientTabs.Select(tab => tab.AccountId).Where(id => !nextIds.Contains(id)).ToArray())
@@ -1503,7 +1744,7 @@ public sealed class MainWindow : Window
                 foreach (var window in eligible)
                 {
                     var account = accountsById[window.AccountId!];
-                    _clientTabs.Add(new ClientTabItem(account.Id, account.Label, window));
+                    _clientTabs.Add(new ClientTabItem(account.Id, account.Label, window, "Waiting for Accessibility…", false));
                 }
                 if (_selectedClientAccountId is null || !nextIds.Contains(_selectedClientAccountId))
                     _selectedClientAccountId = _clientTabs.FirstOrDefault()?.AccountId;
@@ -1512,15 +1753,24 @@ public sealed class MainWindow : Window
             }
             finally { _suppressClientSelection = false; }
 
-            if (eligible.Length == 0 || _selectedClientAccountId is null)
+            if (blockingDuplicates.Count > 0 || eligible.Count == 0 || _selectedClientAccountId is null)
             {
                 var restore = await _clientOverlay.RestoreAllAsync(cancellationToken);
                 EnsureClientOverlayActive(generation, cancellationToken);
+                var duplicateMessage = blockingDuplicates.Count > 0
+                    ? "Multiple managed Roblox processes were found for one account. Close the extra client or relaunch it."
+                    : "No opted-in RAM-managed Roblox clients are running.";
+                var noClientCode = restore.Succeeded && blockingDuplicates.Count > 0
+                    ? "duplicate-managed-process"
+                    : restore.DiagnosticCode;
                 SetClientOverlayStatus(
                     restore.Succeeded
-                        ? "No opted-in RAM-managed Roblox clients are running."
-                        : "No opted-in clients are running, but a prior window restoration will be retried.",
-                    failure: !restore.Succeeded);
+                        ? duplicateMessage
+                        : ClientOverlayFailureText.Describe(restore.DiagnosticCode),
+                    failure: !restore.Succeeded,
+                    activityKey: $"overlay-no-clients:{noClientCode}:{discoveryDetail}",
+                    activityDetail: $"code={noClientCode}; phase={(blockingDuplicates.Count > 0 && restore.Succeeded ? "preflight" : "restore")}; account=none; pid=none; ready=0/{windows.Count}; windows=unknown; restore={(restore.Succeeded ? "none" : restore.DiagnosticCode)}; retryable={ClientOverlayFailureText.IsRetryable(restore)}; {discoveryDetail}");
+                SetClientOverlayRecoveryAvailable(!restore.Succeeded);
                 return;
             }
             if (!TryGetClientViewport(out var viewport, out var viewportFailure))
@@ -1530,8 +1780,11 @@ public sealed class MainWindow : Window
                 SetClientOverlayStatus(
                     restore.Succeeded
                         ? viewportFailure
-                        : $"{viewportFailure} A prior window restoration will be retried.",
-                    failure: !restore.Succeeded);
+                        : ClientOverlayFailureText.Describe(restore.DiagnosticCode),
+                    failure: !restore.Succeeded,
+                    activityKey: $"overlay-viewport:{viewportFailure}:{restore.DiagnosticCode}:{discoveryDetail}",
+                    activityDetail: $"code={(restore.Succeeded ? "client-viewport-unavailable" : restore.DiagnosticCode)}; phase={(restore.Succeeded ? "preflight" : "restore")}; account=none; pid=none; ready=0/{eligible.Count}; windows=unknown; restore={(restore.Succeeded ? "none" : restore.DiagnosticCode)}; retryable={ClientOverlayFailureText.IsRetryable(restore)}; viewport=unavailable; {discoveryDetail}");
+                SetClientOverlayRecoveryAvailable(!restore.Succeeded);
                 return;
             }
 
@@ -1546,24 +1799,47 @@ public sealed class MainWindow : Window
                     && Interlocked.Read(ref _clientOverlayGeneration) == generation,
                 cancellationToken: cancellationToken);
             EnsureClientOverlayActive(generation, cancellationToken);
+            ApplyClientDiagnostics(result.Clients);
+            var diagnosticSummary = MacOverlayDiagnosticSummary.Summarize(result.Clients);
+            var failedAccount = result.AccountId is not null
+                && accountsById.TryGetValue(result.AccountId, out var failedProfile)
+                    ? failedProfile.Label
+                    : result.AccountId ?? "none";
+            var failedDiagnostic = result.Clients.FirstOrDefault(client =>
+                string.Equals(client.AccountId, result.AccountId, StringComparison.Ordinal))
+                ?? result.Clients.FirstOrDefault(client => !client.IsReady);
+            var windowCounts = failedDiagnostic is null
+                ? "windows=unknown"
+                : $"windows={failedDiagnostic.EligibleWindowCount}/{failedDiagnostic.TotalWindowCount}";
+            var restoreDiagnostic = result.Clients.LastOrDefault(client =>
+                string.Equals(client.Phase, "restore", StringComparison.Ordinal));
+            var phase = DescribeOverlayPhase(result.DiagnosticCode);
+            var retryable = ClientOverlayFailureText.IsRetryable(result);
+            var clientDetails = DescribeClientDiagnostics(result.Clients);
             SetClientOverlayStatus(
                 result.Succeeded
                     ? explicitUserSelection
                         ? "Roblox remains an external top-level window over this viewport. Input is routed directly by macOS."
                         : "Client placement is ready. Select a tab to bring Roblox in front of RAM."
                     : DescribeOverlayFailure(result.DiagnosticCode),
-                failure: !result.Succeeded);
+                failure: !result.Succeeded,
+                activityKey: $"overlay:{result.DiagnosticCode}:{result.AccountId}:{diagnosticSummary.ReadyClientCount}/{diagnosticSummary.ClientCount}:diagnostics={diagnosticSummary.DiagnosticCount}:{windowCounts}:{restoreDiagnostic?.DiagnosticCode}:{clientDetails}:{discoveryDetail}",
+                activityDetail: $"code={result.DiagnosticCode}; phase={phase}; account={SanitiseActivityToken(failedAccount)}; pid={result.ProcessId?.ToString() ?? "none"}; ready={diagnosticSummary.ReadyClientCount}/{diagnosticSummary.ClientCount}; diagnostics={diagnosticSummary.DiagnosticCount}; {windowCounts}; restore={restoreDiagnostic?.DiagnosticCode ?? "none"}; retryable={retryable}; viewport={FormatViewport(viewport)}; records={clientDetails}; {discoveryDetail}");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Page teardown owns restoration after invalidating this refresh generation.
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            SetClientOverlayStatus($"Client overlay paused: {LaunchDiagnostics.SanitiseCode(exception.Message)}", failure: true);
+            const string code = "overlay-exception";
+            SetClientOverlayStatus(
+                $"Client overlay paused: {code}",
+                failure: true,
+                activityKey: $"overlay-exception:{code}",
+                activityDetail: $"code={code}; phase=show; account=none; pid=none; ready=unknown; windows=unknown; restore=none; retryable=false");
             try { await _clientOverlay.RestoreAllAsync(); } catch { }
         }
-        finally { _clientRefreshInProgress = false; }
     }
 
     private bool TryGetClientViewport(out MacWindowFrame viewport, out string failure)
@@ -1594,30 +1870,41 @@ public sealed class MainWindow : Window
         return viewport.IsValid;
     }
 
-    private async Task<bool> DeactivateClientOverlayAsync()
+    private async Task<MacOverlayOperationResult> DeactivateClientOverlayAsync()
     {
         InvalidateClientOverlay();
-        if (_clientOverlay is null) return true;
-        for (var attempt = 0; attempt < 3; attempt++)
+        if (_clientOverlay is null) return MacOverlayOperationResult.Success();
+        MacOverlayOperationResult? lastResult = null;
+        for (var attempt = 0; attempt < 2; attempt++)
         {
             try
             {
                 var result = await _clientOverlay.RestoreAllAsync();
-                if (result.Succeeded) return true;
+                if (result.Succeeded)
+                {
+                    SetClientOverlayRecoveryAvailable(false);
+                    return result;
+                }
+                lastResult = result;
+                if (!ClientOverlayFailureText.IsRetryable(result)) break;
             }
-            catch
+            catch (Exception)
             {
+                lastResult = MacOverlayOperationResult.Failure("restore-exception");
+                break;
             }
-            if (attempt < 2) await Task.Delay(100);
+            if (attempt == 0) await Task.Delay(100);
         }
         _clientViewVisible = true;
-        return false;
+        SetClientOverlayRecoveryAvailable(true);
+        return lastResult ?? MacOverlayOperationResult.Failure("restore-overlay-failed");
     }
 
     private void InvalidateClientOverlay()
     {
         _clientViewVisible = false;
         _clientOverlayTimer?.Stop();
+        _clientRefreshScheduler.ClearPending();
         Interlocked.Increment(ref _clientOverlayGeneration);
         _clientOverlayActivation?.Cancel();
     }
@@ -1629,22 +1916,115 @@ public sealed class MainWindow : Window
             throw new OperationCanceledException(cancellationToken);
     }
 
-    private void SetClientOverlayStatus(string message, bool failure)
+    private void ApplyClientDiagnostics(IReadOnlyList<MacOverlayClientDiagnostic> diagnostics)
     {
-        if (_clientOverlayStatus is null) return;
-        _clientOverlayStatus.Text = message;
-        _clientOverlayStatus.Foreground = failure ? DangerTextBrush : MutedTextBrush;
+        if (diagnostics.Count == 0 || _clientTabs.Count == 0) return;
+        var byAccount = diagnostics
+            .GroupBy(diagnostic => diagnostic.AccountId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
+        _suppressClientSelection = true;
+        try
+        {
+            for (var index = 0; index < _clientTabs.Count; index++)
+            {
+                var tab = _clientTabs[index];
+                if (!byAccount.TryGetValue(tab.AccountId, out var diagnostic)) continue;
+                _clientTabs[index] = tab with
+                {
+                    Status = DescribeClientDiagnostic(diagnostic),
+                    IsReady = diagnostic.IsReady
+                };
+            }
+            if (_clientTabsControl is not null)
+                _clientTabsControl.SelectedItem = _clientTabs.FirstOrDefault(tab => tab.AccountId == _selectedClientAccountId);
+        }
+        finally { _suppressClientSelection = false; }
     }
 
-    private static string DescribeOverlayFailure(string code) => code switch
+    private void SetClientOverlayStatus(
+        string message,
+        bool failure,
+        string? activityKey = null,
+        string? activityDetail = null)
     {
-        "accessibility-permission-required" => "Grant Accessibility permission to place Roblox over the Clients viewport.",
-        "accessible-window-not-ready" or "accessible-window-changed" => "Waiting for a stable Roblox game window…",
-        "fullscreen-window-not-supported" => "Exit Roblox fullscreen mode before using the Clients panel.",
-        "stale-process-identity" => "A Roblox process identity changed; refresh or relaunch that account.",
-        "raise-cancelled" => "Client placement is ready. Select its tab again to bring Roblox forward.",
-        _ => $"Client overlay paused: {LaunchDiagnostics.SanitiseCode(code)}"
-    };
+        if (_clientOverlayStatus is not null)
+        {
+            _clientOverlayStatus.Text = message;
+            _clientOverlayStatus.Foreground = failure ? DangerTextBrush : MutedTextBrush;
+        }
+        if (activityKey is null || string.Equals(activityKey, _lastClientOverlayActivityKey, StringComparison.Ordinal)) return;
+        _lastClientOverlayActivityKey = activityKey;
+        _viewModel.AppendActivity($"Clients overlay: {activityDetail ?? message}");
+    }
+
+    private static string DescribeClientDiscovery(
+        MacClientWindowDiscovery discovery,
+        IReadOnlyList<RobloxWindowInfo> windows)
+    {
+        var duplicates = discovery.Duplicates.Count == 0
+            ? "none"
+            : string.Join(",", discovery.Duplicates.Select(duplicate =>
+                $"{SanitiseActivityToken(duplicate.AccountId)}:{string.Join("/", duplicate.ProcessIds)}"));
+        return $"managed={discovery.StableWindows.Count + discovery.Duplicates.Sum(duplicate => duplicate.ProcessIds.Count)}; stable={discovery.StableWindows.Count}; duplicates={duplicates}; unbound={discovery.UnboundProcessCount}; processes={MacClientProcessBoundaryDiagnostics.Describe(windows)}";
+    }
+
+    private static string DescribeClientDiagnostics(IReadOnlyList<MacOverlayClientDiagnostic> diagnostics) =>
+        diagnostics.Count == 0
+            ? "none"
+            : string.Join(",", diagnostics.Select(diagnostic =>
+                $"{SanitiseActivityToken(diagnostic.AccountId)}:pid={diagnostic.ProcessId}:code={LaunchDiagnostics.SanitiseCode(diagnostic.DiagnosticCode)}:ready={diagnostic.IsReady}:windows={diagnostic.EligibleWindowCount}/{diagnostic.TotalWindowCount}"));
+
+    private static string FormatViewport(MacWindowFrame viewport) =>
+        viewport.IsValid
+            ? $"{viewport.Left:0},{viewport.Top:0},{viewport.Width:0}x{viewport.Height:0}"
+            : "unavailable";
+
+    private static string SanitiseActivityToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "none";
+        var characters = value
+            .Trim()
+            .Select(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.' ? character : '_')
+            .ToArray();
+        return new string(characters).Trim('_') is { Length: > 0 } sanitized
+            ? sanitized[..Math.Min(sanitized.Length, 64)]
+            : "none";
+    }
+
+    private static string DescribeClientDiagnostic(MacOverlayClientDiagnostic diagnostic) =>
+        diagnostic.DiagnosticCode.Split(':', 2)[0] switch
+        {
+            "accessible-window-ready" => "Ready",
+            "accessibility-permission-required" => "Permission required",
+            "accessibility-no-windows" or "accessibility-application-unavailable" => "Waiting for game window",
+            "accessibility-no-eligible-window" => $"Window not usable ({diagnostic.EligibleWindowCount}/{diagnostic.TotalWindowCount})",
+            "accessibility-window-not-settled" => "Window settling",
+            "accessibility-window-ambiguous" => $"Multiple windows ({diagnostic.EligibleWindowCount})",
+            "fullscreen-window-not-supported" => "Exit fullscreen",
+            "stale-process-identity" => "Relaunch required",
+            "accessible-window-changed" => "Window changed; retrying",
+            _ => LaunchDiagnostics.SanitiseCode(diagnostic.DiagnosticCode)
+        };
+
+    private static string DescribeOverlayFailure(string code) => ClientOverlayFailureText.Describe(code);
+
+    private static string DescribeOverlayPhase(string code)
+    {
+        var primary = code.Split(':', 2)[0];
+        return primary.StartsWith("hide-unselected-", StringComparison.Ordinal)
+            ? "hide"
+            : primary.StartsWith("show-selected-", StringComparison.Ordinal)
+                ? "show"
+                : primary is "restore-overlay-failed"
+                    ? "restore"
+                    : "preflight";
+    }
+
+    private void SetClientOverlayRecoveryAvailable(bool available)
+    {
+        if (_clientOverlayRetry is not null)
+            _clientOverlayRetry.IsVisible = available;
+    }
 
     private Control BuildActivityPage()
     {
@@ -2519,7 +2899,12 @@ public sealed class MainWindow : Window
         return await result.Task;
     }
 
-    private sealed record ClientTabItem(string AccountId, string Label, RobloxWindowInfo Window);
+    private sealed record ClientTabItem(
+        string AccountId,
+        string Label,
+        RobloxWindowInfo Window,
+        string Status,
+        bool IsReady);
 
     private async Task<bool> ConfirmAsync(string message)
     {
