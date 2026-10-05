@@ -1557,6 +1557,72 @@ finally
 
 Console.WriteLine("Roblox log autopsy smoke tests passed.");
 
+var singleWorkArea = new LayoutRect(0, 0, 1920, 1040);
+var singleGrid = GridLayout.Compute([singleWorkArea], 4);
+Require(singleGrid.SequenceEqual([new LayoutRect(0, 0, 960, 520), new LayoutRect(960, 0, 960, 520),
+        new LayoutRect(0, 520, 960, 520), new LayoutRect(960, 520, 960, 520)]),
+    "GRID on one work area must keep the square tiling.");
+Require(GridLayout.Compute([singleWorkArea], 0).Count == 0, "GRID with no clients must produce no cells.");
+
+var rightMonitor = new LayoutRect(1920, 0, 1920, 1040);
+var leftMonitor = new LayoutRect(-1920, 0, 1920, 1040);
+var spanned = GridLayout.Compute([rightMonitor, leftMonitor], 4);
+Require(spanned.Count == 4 && spanned.Take(2).All(cell => cell.Left < 0) && spanned.Skip(2).All(cell => cell.Left >= 1920),
+    "GRID must split clients evenly across equal monitors in left-to-right order.");
+Require(spanned.All(cell => cell.Width == 960 && cell.Height == 1040),
+    "GRID must tile each monitor's share inside that monitor's work area.");
+Require(GridLayout.Distribute([new LayoutRect(0, 0, 1920, 1080), new LayoutRect(1920, 0, 3840, 2160)], 5).SequenceEqual([1, 4]),
+    "GRID must give a larger monitor proportionally more clients.");
+Require(GridLayout.Distribute([new LayoutRect(0, 0, 1920, 1080), new LayoutRect(1920, 0, 2560, 1440)], 1).SequenceEqual([0, 1]),
+    "GRID must place a lone client on the larger monitor.");
+Require(GridLayout.Compute([new LayoutRect(0, 0, 1920, 1040), new LayoutRect(1920, 0, 1280, 1024)], 9).Count == 9,
+    "GRID must place every client when monitors differ in size.");
+Require(GridLayout.Compute([new LayoutRect(0, 0, 200, 100)], 4).All(cell =>
+        cell.Width >= GridLayout.MinimumCellWidth && cell.Height >= GridLayout.MinimumCellHeight),
+    "GRID cells must respect the minimum client size.");
+
+var arrangementStartTicks = Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks;
+using (var normalClient = NativeEmbeddingTestWindow.CreateRoot(100, 100, 400, 300))
+using (var minimizedClient = NativeEmbeddingTestWindow.CreateRoot(140, 140, 420, 320))
+using (var maximizedClient = NativeEmbeddingTestWindow.CreateRoot(180, 180, 440, 340))
+{
+    minimizedClient.Minimize();
+    maximizedClient.Maximize();
+    Require(minimizedClient.Minimized && maximizedClient.Maximized, "The arrangement test windows did not enter their starting states.");
+    var normalBefore = normalClient.Bounds;
+    var maximizedBefore = maximizedClient.Bounds;
+    var foregroundBefore = NativeEmbeddingTestWindow.Foreground;
+    ManagedAccountSnapshot ArrangementSnapshot(string id, nint handle) => new(id, id, Environment.ProcessId, arrangementStartTicks,
+        handle, 0, 0, 0, 0, 96, false, DateTime.UtcNow, true);
+    ManagedAccountSnapshot[] arrangementClients =
+    [
+        ArrangementSnapshot("normal", normalClient.Handle),
+        ArrangementSnapshot("minimized", minimizedClient.Handle),
+        ArrangementSnapshot("maximized", maximizedClient.Handle),
+    ];
+    var arrangement = new WindowArrangementService();
+
+    var gridErrors = arrangement.Grid(arrangementClients);
+    Require(gridErrors.Count == 0, $"GRID failed: {string.Join("; ", gridErrors)}");
+    Require(!minimizedClient.Minimized && !maximizedClient.Maximized,
+        "GRID must arrange minimized and maximized clients as normal windows.");
+
+    var resetErrors = arrangement.Reset(arrangementClients);
+    Require(resetErrors.Count == 0, $"RESET failed: {string.Join("; ", resetErrors)}");
+    Require(normalClient.Bounds == normalBefore, "RESET did not restore a normal client's bounds.");
+    Require(minimizedClient.Minimized, "RESET did not restore a minimized client.");
+    Require(maximizedClient.Maximized && maximizedClient.Bounds == maximizedBefore, "RESET did not restore a maximized client.");
+    Require(NativeEmbeddingTestWindow.Foreground == foregroundBefore, "Window arrangement changed the foreground window.");
+
+    var stackErrors = arrangement.Stack(arrangementClients);
+    Require(stackErrors.Count == 0 && !minimizedClient.Minimized && !maximizedClient.Maximized,
+        "STACK must arrange minimized and maximized clients as normal windows.");
+    Require(arrangement.Reset(arrangementClients).Count == 0 && minimizedClient.Minimized && maximizedClient.Maximized,
+        "RESET after STACK did not restore minimized and maximized clients.");
+}
+
+Console.WriteLine("Window arrangement smoke tests passed.");
+
 static SecurityIdentifier? GetMandatoryLabelSid(GenericAce ace)
 {
     var binary = new byte[ace.BinaryLength];

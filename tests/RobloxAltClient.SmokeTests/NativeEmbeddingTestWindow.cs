@@ -39,7 +39,13 @@ internal sealed class NativeEmbeddingTestWindow : IDisposable
     public bool HasChildStyle => (Style & WsChild) != 0;
     public bool HasPopupStyle => (Style & WsPopup) != 0;
 
+    public bool Minimized => IsIconic(Handle);
+    public bool Maximized => IsZoomed(Handle);
+    public static nint Foreground => GetForegroundWindow();
+
     public void Show() => ShowWindow(Handle, 5);
+    public void Minimize() => ShowWindow(Handle, 7);
+    public void Maximize() => ShowWindow(Handle, 3);
     public void SetOwner(nint owner) => SetWindowLongPtr(Handle, -8, owner);
     public void SetBounds(int x, int y, int width, int height) =>
         SetWindowPos(Handle, nint.Zero, x, y, width, height, SwpNoZOrder | SwpNoActivate);
@@ -101,6 +107,9 @@ internal sealed class NativeEmbeddingTestWindow : IDisposable
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint window, int command);
+    [DllImport("user32.dll")] private static extern bool IsIconic(nint window);
+    [DllImport("user32.dll")] private static extern bool IsZoomed(nint window);
+    [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool GetWindowRect(nint window, out RECT rect);
 
