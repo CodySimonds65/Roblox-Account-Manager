@@ -288,8 +288,16 @@ public partial class ClientsPanel : UserControl
     private void Relayout()
     {
         if (NativeClientHost.NativeHandle == nint.Zero || !IsLoaded || Visibility != Visibility.Visible) return;
-        _relayoutPending = true;
-        if (!_relayoutTimer.IsEnabled) _relayoutTimer.Start();
+        if (_relayoutTimer.IsEnabled)
+        {
+            _relayoutPending = true;
+            return;
+        }
+        // Dock the first change of a burst immediately so the client tracks the
+        // window edge; the timer then coalesces the rest of the drag to one
+        // layout per frame.
+        _runtime?.ClientEmbeddings.Layout();
+        _relayoutTimer.Start();
     }
 
     private void RelayoutTimer_Tick(object? sender, EventArgs e)

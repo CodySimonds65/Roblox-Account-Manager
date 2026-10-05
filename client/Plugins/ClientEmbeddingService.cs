@@ -58,6 +58,7 @@ public sealed class ClientEmbeddingService
     private const int SwpNoZOrder = 0x0004;
     private const int SwpNoActivate = 0x0010;
     private const int SwpFrameChanged = 0x0020;
+    private const int SwpAsyncWindowPos = 0x4000;
     private const int GwlStyle = -16;
     private const long FrameStyles = WsPopup | WsCaption | WsThickFrame | WsMinimizeBox |
                                       WsMaximizeBox | WsSysMenu | WsDlgFrame | WsBorder;
@@ -293,6 +294,23 @@ public sealed class ClientEmbeddingService
             var target = new RECT(origin.X, origin.Y, origin.X + width, origin.Y + height);
             if (window.HasAppliedDockBounds && window.LastAppliedDockBounds.Equals(target) && IsWindowVisible(window.Root))
                 continue;
+            // A cross-process SetWindowPos waits for Roblox to handle the move,
+            // including its swap-chain resize, so every step of a live resize
+            // stalled RAM's UI thread. Once the client is visible, post the
+            // geometry change instead. The async request omits SWP_SHOWWINDOW
+            // so a late delivery can never re-show a client hidden since.
+            if (IsWindowVisible(window.Root))
+            {
+                if (!SetWindowPos(window.Root, nint.Zero, target.Left, target.Top, width, height,
+                        SwpNoActivate | SwpNoZOrder | SwpAsyncWindowPos))
+                {
+                    Diagnostics?.Invoke($"Dock layout failed for {window.AccountId} (Win32 {Marshal.GetLastWin32Error()}).");
+                    continue;
+                }
+                window.LastAppliedDockBounds = target;
+                window.HasAppliedDockBounds = true;
+                continue;
+            }
             if (!SetWindowPos(window.Root, nint.Zero, target.Left, target.Top, width, height,
                     SwpNoActivate | SwpNoZOrder | SwpShowWindow))
             {
