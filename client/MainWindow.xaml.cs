@@ -106,10 +106,17 @@ public partial class MainWindow : Window
             return;
         }
 
-        var rows = WorkspaceGrid.RowDefinitions;
-        var fixedHeight = rows[0].ActualHeight + rows[1].ActualHeight + rows[3].ActualHeight;
-        var maxActivityHeight = WorkspaceGrid.ActualHeight - fixedHeight - BrowserRow.MinHeight;
-        if (maxActivityHeight < ActivityRow.MinHeight || ActivityRow.ActualHeight <= maxActivityHeight + 0.5)
+        // GridSplitter resizes only the pixel-sized activity row, so it ignores
+        // BrowserRow.MinHeight and lets the rows overflow the workspace. An
+        // overflowing Grid squeezes the arranged activity row below its measured
+        // height and the log stops rendering. Cap the row itself so both the
+        // splitter and window resizes stop where the browser keeps its minimum.
+        // Use desired sizes: an overflowing Grid also squeezes the Auto rows.
+        var fixedHeight = WorkspaceHeader.DesiredSize.Height + PresetPanel.DesiredSize.Height
+            + WorkspaceGrid.RowDefinitions[3].ActualHeight;
+        var maxActivityHeight = Math.Max(ActivityRow.MinHeight,
+            Math.Floor(WorkspaceGrid.ActualHeight - fixedHeight - BrowserRow.MinHeight));
+        if (Math.Abs(ActivityRow.MaxHeight - maxActivityHeight) < 0.5)
         {
             return;
         }
@@ -117,7 +124,11 @@ public partial class MainWindow : Window
         _isClampingActivityLayout = true;
         try
         {
-            ActivityRow.Height = new GridLength(maxActivityHeight);
+            ActivityRow.MaxHeight = maxActivityHeight;
+            if (ActivityRow.Height.IsAbsolute && ActivityRow.Height.Value > maxActivityHeight)
+            {
+                ActivityRow.Height = new GridLength(maxActivityHeight);
+            }
         }
         finally
         {

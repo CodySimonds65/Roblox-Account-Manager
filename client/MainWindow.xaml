@@ -13,7 +13,7 @@
         </Grid.ColumnDefinitions>
 
         <Border Grid.Column="0" Background="{StaticResource SurfaceBrush}"
-                BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0" CornerRadius="0" Padding="12">
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -139,7 +139,7 @@
                 <RowDefinition x:Name="ActivityRow" Height="190" MinHeight="150" />
             </Grid.RowDefinitions>
 
-            <Grid Margin="0,2,0,16">
+            <Grid x:Name="WorkspaceHeader" Margin="0,2,0,16">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
@@ -157,7 +157,7 @@
                 </StackPanel>
             </Grid>
 
-            <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+            <Border x:Name="PresetPanel" Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
                     BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,12">
                 <Grid>
                     <Grid.RowDefinitions>
