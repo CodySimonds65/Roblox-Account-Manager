@@ -23,6 +23,7 @@ public sealed class PluginRuntime : IAsyncDisposable
     private readonly GlobalHotkeyMonitor _hotkeyMonitor = new();
     private readonly InputSendInjector _sendInjector = new();
     public ClientEmbeddingService ClientEmbeddings { get; } = new();
+    public WindowArrangementService WindowArrangement { get; } = new();
     private readonly ForegroundAutomationCoordinator _foregroundAutomation;
     private int _queuedAccountUpdates;
     private const int MaxQueuedAccountUpdates = 64;

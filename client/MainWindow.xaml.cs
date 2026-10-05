@@ -81,6 +81,32 @@ public partial class MainWindow : Window
 
     private void ClientsView_Click(object sender, RoutedEventArgs e) => ShowClientsView();
 
+    private void ArrangeWindows_Click(object sender, RoutedEventArgs e)
+    {
+        var runtime = ((App)Application.Current).PluginRuntime;
+        var action = (sender as FrameworkElement)?.Tag as string ?? "reset";
+        // Docked clients are positioned by the Clients view; arranging them
+        // here would fight the dock.
+        var clients = runtime.Accounts.Snapshot()
+            .Where(account => account.IsRunning && !runtime.ClientEmbeddings.IsEmbedded(account.AccountId))
+            .ToArray();
+        if (clients.Length == 0)
+        {
+            Log("No undocked Roblox windows to arrange.");
+            return;
+        }
+        var errors = action switch
+        {
+            "stack" => runtime.WindowArrangement.Stack(clients),
+            "grid" => runtime.WindowArrangement.Grid(clients),
+            _ => runtime.WindowArrangement.Reset(clients)
+        };
+        var verb = action switch { "stack" => "Stacked", "grid" => "Tiled", _ => "Reset" };
+        Log(errors.Count == 0
+            ? $"{verb} {clients.Length} Roblox window(s)."
+            : $"{verb} with {errors.Count} problem(s): {string.Join("; ", errors)}");
+    }
+
     private void ShowClientsView()
     {
         BrowseViewButton.IsEnabled = true;

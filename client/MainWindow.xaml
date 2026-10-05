@@ -238,6 +238,13 @@
                                        Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0">
+                            <Button Content="Stack" Tag="stack" Click="ArrangeWindows_Click" Style="{StaticResource SecondaryButton}"
+                                    Padding="10,5" ToolTip="Stack undocked Roblox windows on one monitor without focusing them"/>
+                            <Button Content="Grid" Tag="grid" Click="ArrangeWindows_Click" Style="{StaticResource SecondaryButton}"
+                                    Padding="10,5" Margin="6,0,0,0" ToolTip="Tile undocked Roblox windows across all monitors without focusing them"/>
+                            <Button Content="Reset" Tag="reset" Click="ArrangeWindows_Click" Style="{StaticResource SecondaryButton}"
+                                    Padding="10,5" Margin="6,0,0,0" ToolTip="Put arranged Roblox windows back where they were, including minimized or maximized"/>
+                            <Border Width="1" Height="18" Margin="12,0" Background="{StaticResource BorderBrush}"/>
                             <Button x:Name="BrowseViewButton" Content="Browse" Click="BrowseView_Click" Style="{StaticResource SecondaryButton}"
                                     Padding="14,5" IsEnabled="False" ToolTip="Roblox session browser"/>
                             <Button x:Name="ClientsViewButton" Content="Clients" Click="ClientsView_Click" Style="{StaticResource SecondaryButton}"
