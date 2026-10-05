@@ -135,7 +135,7 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition x:Name="BrowserRow" Height="*" MinHeight="180" />
-                <RowDefinition Height="6" />
+                <RowDefinition Height="12" />
                 <RowDefinition x:Name="ActivityRow" Height="190" MinHeight="150" />
             </Grid.RowDefinitions>
 
@@ -258,13 +258,24 @@
                 </Grid>
             </Border>
 
-            <GridSplitter Grid.Row="3" Height="6" HorizontalAlignment="Stretch" VerticalAlignment="Center"
-                          Background="{StaticResource BorderBrush}" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
+            <!-- The whole 12px gap between the panels is the grab target; only a
+                 thin line in the middle is drawn. -->
+            <GridSplitter Grid.Row="3" Height="12" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                          Background="Transparent" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
                           ShowsPreview="False" Cursor="SizeNS" ToolTip="Drag to resize the activity log"
-                          AutomationProperties.Name="Resize activity log" />
+                          AutomationProperties.Name="Resize activity log">
+                <GridSplitter.Template>
+                    <ControlTemplate TargetType="GridSplitter">
+                        <Border Background="{TemplateBinding Background}">
+                            <Border Height="2" VerticalAlignment="Center" CornerRadius="1"
+                                    Background="{StaticResource BorderBrush}" />
+                        </Border>
+                    </ControlTemplate>
+                </GridSplitter.Template>
+            </GridSplitter>
 
             <Border Grid.Row="4" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
-                    BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,6,0,0">
+                    BorderThickness="1" CornerRadius="6" Padding="10">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

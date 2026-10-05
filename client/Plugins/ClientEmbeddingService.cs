@@ -259,7 +259,12 @@ public sealed class ClientEmbeddingService
         foreach (var id in ids) TryUnembed(id);
     }
 
-    public void Layout()
+    // deferResize keeps the visible client at its current size while the user
+    // is dragging a window edge or splitter: it only follows the viewport's
+    // origin and is clipped to it. Roblox rebuilds its swap chain on every
+    // resize, so resizing it per drag step is what made the drag feel slow.
+    // The final size is applied once the drag ends.
+    public void Layout(bool deferResize = false)
     {
         nint hostWindow;
         EmbeddedWindow[] embedded;
@@ -288,12 +293,18 @@ public sealed class ClientEmbeddingService
             if (!selected)
             {
                 if (IsWindowVisible(window.Root)) HideWindow(window.Root);
+                ClearClip(window);
                 window.HasAppliedDockBounds = false;
                 continue;
             }
             var target = new RECT(origin.X, origin.Y, origin.X + width, origin.Y + height);
-            if (window.HasAppliedDockBounds && window.LastAppliedDockBounds.Equals(target) && IsWindowVisible(window.Root))
+            if (window.HasAppliedDockBounds && window.LastAppliedDockBounds.Equals(target) && !window.HasClipRegion &&
+                IsWindowVisible(window.Root))
                 continue;
+            if (deferResize && window.HasAppliedDockBounds && IsWindowVisible(window.Root) &&
+                TryFollowWithoutResize(window, origin, width, height))
+                continue;
+            ClearClip(window);
             // A cross-process SetWindowPos waits for Roblox to handle the move,
             // including its swap-chain resize, so every step of a live resize
             // stalled RAM's UI thread. Once the client is visible, post the
@@ -327,6 +338,50 @@ public sealed class ClientEmbeddingService
                                     $"actual {actual.Left},{actual.Top},{actual.Right - actual.Left},{actual.Bottom - actual.Top}.");
             }
         }
+    }
+
+    private bool TryFollowWithoutResize(EmbeddedWindow window, POINT origin, int width, int height)
+    {
+        var applied = window.LastAppliedDockBounds;
+        var keptWidth = applied.Right - applied.Left;
+        var keptHeight = applied.Bottom - applied.Top;
+        var clipWidth = Math.Min(width, keptWidth);
+        var clipHeight = Math.Min(height, keptHeight);
+        if (clipWidth == keptWidth && clipHeight == keptHeight)
+        {
+            ClearClip(window);
+        }
+        else if (!window.HasClipRegion || window.ClipWidth != clipWidth || window.ClipHeight != clipHeight)
+        {
+            // Without the clip a shrinking viewport would leave the owned
+            // client drawn over RAM's sidebar and activity panel mid-drag.
+            var region = CreateRectRgn(0, 0, clipWidth, clipHeight);
+            if (region == nint.Zero) return false;
+            if (SetWindowRgn(window.Root, region, true) == 0)
+            {
+                DeleteObject(region);
+                return false;
+            }
+            window.HasClipRegion = true;
+            window.ClipWidth = clipWidth;
+            window.ClipHeight = clipHeight;
+        }
+
+        if (applied.Left != origin.X || applied.Top != origin.Y)
+        {
+            if (!SetWindowPos(window.Root, nint.Zero, origin.X, origin.Y, 0, 0,
+                    SwpNoSize | SwpNoActivate | SwpNoZOrder | SwpAsyncWindowPos))
+                return false;
+            window.LastAppliedDockBounds = new RECT(origin.X, origin.Y, origin.X + keptWidth, origin.Y + keptHeight);
+        }
+        return true;
+    }
+
+    private static void ClearClip(EmbeddedWindow window)
+    {
+        if (!window.HasClipRegion) return;
+        _ = SetWindowRgn(window.Root, nint.Zero, true);
+        window.HasClipRegion = false;
     }
 
     public void ShowOnly(string accountId)
@@ -477,6 +532,7 @@ public sealed class ClientEmbeddingService
         if (!HasImmutableIdentity(embedded)) return;
 
         HideWindow(embedded.Root);
+        ClearClip(embedded);
         _ = SetWindowLongPtr(embedded.Root, GwlpHwndParent, nint.Zero);
         TrySetStyle(embedded.Root, embedded.OriginalStyle);
         TrySetExStyle(embedded.Root, embedded.OriginalExStyle);
@@ -573,10 +629,16 @@ public sealed class ClientEmbeddingService
         public bool IdentityValid { get; set; }
         public bool HasAppliedDockBounds { get; set; }
         public RECT LastAppliedDockBounds { get; set; }
+        public bool HasClipRegion { get; set; }
+        public int ClipWidth { get; set; }
+        public int ClipHeight { get; set; }
     }
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)] private static extern nint GetWindowLongPtr(nint window, int index);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)] private static extern nint SetWindowLongPtr(nint window, int index, nint value);
+    [DllImport("user32.dll")] private static extern int SetWindowRgn(nint window, nint region, bool redraw);
+    [DllImport("gdi32.dll")] private static extern nint CreateRectRgn(int left, int top, int right, int bottom);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint handle);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint window, int command);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);

@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using RobloxAltClient.Plugins;
 
@@ -22,6 +24,8 @@ public partial class ClientsPanel : UserControl
     private bool _attached;
     private bool _viewVisible;
     private bool _relayoutPending;
+    private bool _liveResize;
+    private HwndSource? _ownerSource;
 
     public ClientsPanel()
     {
@@ -58,6 +62,10 @@ public partial class ClientsPanel : UserControl
         ownerWindow.LocationChanged += OwnerWindow_LocationChanged;
         ownerWindow.StateChanged += OwnerWindow_StateChanged;
         ownerWindow.IsVisibleChanged += OwnerWindow_IsVisibleChanged;
+        ownerWindow.AddHandler(Thumb.DragStartedEvent, new DragStartedEventHandler(OwnerThumb_DragStarted), true);
+        ownerWindow.AddHandler(Thumb.DragCompletedEvent, new DragCompletedEventHandler(OwnerThumb_DragCompleted), true);
+        if (new WindowInteropHelper(ownerWindow).Handle != nint.Zero) HookOwnerWindow();
+        else ownerWindow.SourceInitialized += OwnerWindow_SourceInitialized;
         if (NativeClientHost.NativeHandle != nint.Zero)
             NativeClientHost_HandleCreated(NativeClientHost.NativeHandle);
         foreach (var account in _runtime.Accounts.Snapshot()) EnsureTab(account);
@@ -80,7 +88,13 @@ public partial class ClientsPanel : UserControl
             _ownerWindow.LocationChanged -= OwnerWindow_LocationChanged;
             _ownerWindow.StateChanged -= OwnerWindow_StateChanged;
             _ownerWindow.IsVisibleChanged -= OwnerWindow_IsVisibleChanged;
+            _ownerWindow.SourceInitialized -= OwnerWindow_SourceInitialized;
+            _ownerWindow.RemoveHandler(Thumb.DragStartedEvent, new DragStartedEventHandler(OwnerThumb_DragStarted));
+            _ownerWindow.RemoveHandler(Thumb.DragCompletedEvent, new DragCompletedEventHandler(OwnerThumb_DragCompleted));
         }
+        _ownerSource?.RemoveHook(OwnerWindowHook);
+        _ownerSource = null;
+        _liveResize = false;
         NativeClientHost.HandleCreated -= NativeClientHost_HandleCreated;
         NativeClientHost.HandleDestroying -= NativeClientHost_HandleDestroying;
         NativeClientHost.NativeSizeChanged -= NativeClientHost_NativeSizeChanged;
@@ -296,7 +310,7 @@ public partial class ClientsPanel : UserControl
         // Dock the first change of a burst immediately so the client tracks the
         // window edge; the timer then coalesces the rest of the drag to one
         // layout per frame.
-        _runtime?.ClientEmbeddings.Layout();
+        _runtime?.ClientEmbeddings.Layout(_liveResize);
         _relayoutTimer.Start();
     }
 
@@ -310,8 +324,53 @@ public partial class ClientsPanel : UserControl
         }
 
         _relayoutPending = false;
-        _runtime?.ClientEmbeddings.Layout();
+        _runtime?.ClientEmbeddings.Layout(_liveResize);
         if (!_relayoutPending) _relayoutTimer.Stop();
+    }
+
+    // A window-edge drag (WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE) or a splitter
+    // drag keeps the docked client at its size until the drag ends.
+    private void BeginLiveResize() => _liveResize = true;
+
+    private void EndLiveResize()
+    {
+        if (!_liveResize) return;
+        _liveResize = false;
+        _relayoutTimer.Stop();
+        _relayoutPending = false;
+        Relayout();
+    }
+
+    private void OwnerWindow_SourceInitialized(object? sender, EventArgs e)
+    {
+        if (_ownerWindow is not null) _ownerWindow.SourceInitialized -= OwnerWindow_SourceInitialized;
+        HookOwnerWindow();
+    }
+
+    private void HookOwnerWindow()
+    {
+        if (_ownerWindow is null || _ownerSource is not null) return;
+        _ownerSource = HwndSource.FromHwnd(new WindowInteropHelper(_ownerWindow).Handle);
+        _ownerSource?.AddHook(OwnerWindowHook);
+    }
+
+    private nint OwnerWindowHook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
+    {
+        const int WmEnterSizeMove = 0x0231;
+        const int WmExitSizeMove = 0x0232;
+        if (message == WmEnterSizeMove) BeginLiveResize();
+        else if (message == WmExitSizeMove) EndLiveResize();
+        return nint.Zero;
+    }
+
+    private void OwnerThumb_DragStarted(object sender, DragStartedEventArgs e)
+    {
+        if (e.OriginalSource is GridSplitter) BeginLiveResize();
+    }
+
+    private void OwnerThumb_DragCompleted(object sender, DragCompletedEventArgs e)
+    {
+        if (e.OriginalSource is GridSplitter) EndLiveResize();
     }
 
     private void ClientsPanel_Loaded(object sender, RoutedEventArgs e) => Relayout();
