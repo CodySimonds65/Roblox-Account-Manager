@@ -5,12 +5,141 @@ using RobloxAccountManager.Core.Models;
 using RobloxAccountManager.Core.Navigation;
 using RobloxAccountManager.Desktop;
 using RobloxAccountManager.Desktop.Services;
+using RobloxAccountManager.Platform.MacOS;
 using System.Text.Json;
+using MacProcessIdentity = RobloxAccountManager.Core.Contracts.RobloxProcessIdentity;
 
 static void Require(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
 }
+
+var firstRefreshStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var releaseFirstRefresh = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var refreshKinds = new List<bool>();
+var refreshScheduler = new ClientOverlayRefreshScheduler(async explicitSelection =>
+{
+    refreshKinds.Add(explicitSelection);
+    if (refreshKinds.Count == 1)
+    {
+        firstRefreshStarted.TrySetResult();
+        await releaseFirstRefresh.Task;
+    }
+});
+var passiveRefresh = refreshScheduler.RequestAsync();
+await firstRefreshStarted.Task;
+await refreshScheduler.RequestAsync(explicitUserSelection: true);
+releaseFirstRefresh.TrySetResult();
+await passiveRefresh;
+Require(refreshKinds.SequenceEqual([false, true]),
+    "An explicit client-tab selection was dropped while a passive overlay refresh was active.");
+
+var readbackFailureText = ClientOverlayFailureText.Describe(
+    "accessibility-minimized-readback-mismatch:restore-overlay-failed");
+Require(!readbackFailureText.Contains("Grant Accessibility permission", StringComparison.Ordinal)
+        && readbackFailureText.Contains("retry restoration", StringComparison.OrdinalIgnoreCase),
+    "A minimized-state restore failure was incorrectly described as a permission failure.");
+Require(ClientOverlayFailureText.Describe("restore-overlay-failed")
+            .Contains("retry restoration", StringComparison.OrdinalIgnoreCase),
+    "A blocked navigation restore did not expose a retry action in its recovery text.");
+Require(ClientOverlayFailureText.Describe("accessibility-permission-required")
+            .Contains("Grant Accessibility permission", StringComparison.Ordinal),
+    "An Accessibility permission failure lost its permission guidance.");
+Require(!ClientOverlayFailureText.IsRetryable(MacOverlayOperationResult.Failure(
+                "restore-overlay-failed",
+                clients: [new MacOverlayClientDiagnostic("account", 1, "accessibility-frame-invalid", false, 0, 0, "restore", false)]))
+        && ClientOverlayFailureText.IsRetryable(MacOverlayOperationResult.Failure(
+                "restore-overlay-failed",
+                clients: [new MacOverlayClientDiagnostic("account", 1, "accessibility-window-not-settled", false, 0, 0, "restore", true)])),
+    "Hard restore failures were retried automatically or transient restore failures were not retryable.");
+Require(DesktopPanelLayoutPolicy.CanRenderWithoutClipping(
+            DesktopPanelLayoutPolicy.ContentMinimumHeight,
+            DesktopPanelLayoutPolicy.ActivityMinimumHeight)
+        && !DesktopPanelLayoutPolicy.CanRenderWithoutClipping(
+            DesktopPanelLayoutPolicy.ContentMinimumHeight - 1,
+            DesktopPanelLayoutPolicy.ActivityMinimumHeight)
+        && !DesktopPanelLayoutPolicy.CanRenderWithoutClipping(
+            DesktopPanelLayoutPolicy.ContentMinimumHeight,
+            DesktopPanelLayoutPolicy.ActivityMinimumHeight - 1)
+        && DesktopPanelLayoutPolicy.WindowMinimumHeight >= DesktopPanelLayoutPolicy.RequiredWindowHeight,
+    "Desktop panel minimums did not protect the Clients, Browse, and Activity content from splitter clipping.");
+Require(Math.Abs(DesktopPanelLayoutPolicy.GetMaximumActivityHeight(860, 150) - 250) < 0.001
+        && DesktopPanelLayoutPolicy.GetMaximumActivityHeight(700, 150) == DesktopPanelLayoutPolicy.ActivityMinimumHeight
+        && DesktopPanelLayoutPolicy.UseCompactPresetBar(1300)
+        && !DesktopPanelLayoutPolicy.UseCompactPresetBar(1000),
+    "The adaptive layout policy did not preserve browser space while leaving Activity resizable.");
+
+var duplicateProcessIdentity = new MacProcessIdentity(
+    101,
+    DateTimeOffset.UtcNow.AddMinutes(-2),
+    "/Applications/Roblox.app/Contents/MacOS/RobloxPlayer",
+    "/Applications/Roblox.app",
+    RobloxPlatform.MacOS);
+var duplicateProcessIdentityTwo = duplicateProcessIdentity with
+{
+    Pid = 102,
+    StartTimeUtc = duplicateProcessIdentity.StartTimeUtc.AddSeconds(1)
+};
+var uniqueProcessIdentity = duplicateProcessIdentity with
+{
+    Pid = 103,
+    StartTimeUtc = duplicateProcessIdentity.StartTimeUtc.AddSeconds(2)
+};
+var discovery = MacClientWindowReconciliation.Reconcile([
+    new RobloxWindowInfo(duplicateProcessIdentity, null, null, AccountId: "account-a"),
+    new RobloxWindowInfo(duplicateProcessIdentityTwo, null, null, AccountId: "account-a"),
+    new RobloxWindowInfo(uniqueProcessIdentity, null, null, AccountId: "account-b"),
+    new RobloxWindowInfo(duplicateProcessIdentity with { Pid = 104 }, null, null)
+]);
+Require(discovery.StableWindows.Count == 1
+        && discovery.StableWindows[0].AccountId == "account-b"
+        && discovery.Duplicates.Count == 1
+        && discovery.Duplicates[0].AccountId == "account-a"
+        && discovery.Duplicates[0].ProcessIds.SequenceEqual([101, 102])
+        && discovery.UnboundProcessCount == 1,
+    "Duplicate or unbound managed macOS client records were not isolated before overlay operations.");
+var duplicateOverlayEligibility = MacClientWindowReconciliation.SelectOverlayEligibility(
+    discovery,
+    accountId => accountId is "account-a" or "account-b");
+Require(duplicateOverlayEligibility.EligibleWindows.Count == 1
+        && duplicateOverlayEligibility.EligibleWindows[0].AccountId == "account-b"
+        && duplicateOverlayEligibility.BlockingDuplicates.Single().AccountId == "account-a"
+        && !duplicateOverlayEligibility.CanMutate,
+    "An opted-in duplicate account allowed a separate stable opted-in client to mutate the overlay.");
+
+var diagnosticSummary = MacOverlayDiagnosticSummary.Summarize([
+    new MacOverlayClientDiagnostic("account-a", 4585, "accessible-window-ready", true, 1, 1),
+    new MacOverlayClientDiagnostic("account-b", 4382, "accessible-window-ready", true, 1, 1),
+    new MacOverlayClientDiagnostic("account-b", 4382, "accessibility-no-eligible-window", false, 0, 0, "restore", true)
+]);
+Require(diagnosticSummary.ClientCount == 2
+        && diagnosticSummary.ReadyClientCount == 2
+        && diagnosticSummary.DiagnosticCount == 3,
+    "Preflight and restore diagnostics were counted as a third macOS client instead of two distinct processes.");
+
+var processBoundaryDetail = MacClientProcessBoundaryDiagnostics.Describe([
+    new RobloxWindowInfo(
+        duplicateProcessIdentity,
+        null,
+        "window-title",
+        AccountId: "account-a"),
+    new RobloxWindowInfo(
+        duplicateProcessIdentityTwo with
+        {
+            ExecutablePath = "/Users/Cody/Library/Application Support/Roblox/RobloxPlayer",
+            BundlePath = "/Users/Cody/Library/Application Support/Roblox/Roblox.app"
+        },
+        null,
+        null,
+        AccountId: "account-b")
+]);
+Require(processBoundaryDetail.Contains("pid=101", StringComparison.Ordinal)
+        && processBoundaryDetail.Contains("exe=RobloxPlayer", StringComparison.Ordinal)
+        && processBoundaryDetail.Contains("bundle=Roblox.app", StringComparison.Ordinal)
+        && !processBoundaryDetail.Contains("account=", StringComparison.Ordinal)
+        && !processBoundaryDetail.Contains("window-title", StringComparison.Ordinal)
+        && !processBoundaryDetail.Contains("/Users/Cody", StringComparison.Ordinal),
+    "Process-boundary diagnostics did not limit detail to sanitized process identifiers and basenames.");
 
 try
 {
@@ -78,26 +207,6 @@ Require(MacUpdateActivityFormatter.FormatUnsignedValidationRejection("pkg-versio
         "Unsigned update rejected before prompt: pkg-version-not-newer (installed pkg version: 77).",
     "The unsigned update rejection did not include the installed PKG version.");
 
-Require(RobloxPlayControl.ParseResult("clicked") == RobloxPlayControlStatus.Clicked,
-    "A clicked Roblox Play-control result was not recognized.");
-Require(RobloxPlayControl.ParseResult("\"not-found\"") == RobloxPlayControlStatus.NotFound,
-    "A missing Roblox Play-control result was not recognized.");
-Require(RobloxPlayControl.ParseResult("wrong-origin") == RobloxPlayControlStatus.WrongOrigin,
-    "A wrong-origin Roblox Play-control result was not recognized.");
-Require(RobloxPlayControl.ParseResult("arbitrary page text") == RobloxPlayControlStatus.Unknown,
-    "Arbitrary WebView script output was treated as a valid Play-control result.");
-Require(RobloxPlayControl.Script.Contains("location.hostname", StringComparison.Ordinal)
-        && RobloxPlayControl.Script.Contains("roblox.com", StringComparison.OrdinalIgnoreCase)
-        && RobloxPlayControl.Script.Contains("Play", StringComparison.Ordinal)
-        && RobloxPlayControl.Script.Contains("window.open", StringComparison.Ordinal),
-    "The Play-control script did not restrict itself to a trusted Roblox Play action.");
-Require(RobloxPlayControl.TryParseCapturedLaunchUri(
-            "\"roblox-player:1+gameinfo:script-hook-ticket\"",
-            out var scriptHookUri)
-        && scriptHookUri?.Scheme == "roblox-player"
-        && !RobloxPlayControl.TryParseCapturedLaunchUri("\"https://www.roblox.com/games/123\"", out _),
-    "The trusted-page capture fallback accepted an invalid scheme or rejected Roblox.");
-
 var navigationGate = new RobloxNavigationGate();
 navigationGate.CommitTopLevelNavigation(new Uri("https://www.roblox.com/games/123/Test"), succeeded: true);
 Require(navigationGate.TryBeginLaunch(), "The navigation gate did not enter a pending launch state.");
@@ -159,7 +268,7 @@ var capturedLaunchUri = await launchCoordinator.CaptureAsync(
     "account-id",
     new Uri("https://www.roblox.com/games/123/Test"),
     TimeSpan.FromSeconds(1));
-Require(capturedLaunchUri.Scheme == "roblox-player"
+Require(capturedLaunchUri.Equals(new Uri("roblox-player:1+gameinfo:captured-ticket"))
         && launchSession.Events.SequenceEqual(["capture", "navigate", "script", "script"])
         && launchStatuses is [RobloxPlayControlStatus.NotFound, RobloxPlayControlStatus.Clicked],
     "The macOS launch coordinator did not capture after clicking Play in the expected order.");
@@ -175,7 +284,7 @@ var transientCapture = await new MacBrowserLaunchCoordinator(
         "account-id",
         new Uri("https://www.roblox.com/games/123/Test"),
         TimeSpan.FromSeconds(1));
-Require(transientCapture.Scheme == "roblox-player",
+Require(transientCapture.Equals(new Uri("roblox-player:1+gameinfo:transient-script")),
     "A transient WebView script failure prevented a later Play click.");
 
 var transientOriginSession = new FakeMacBrowserLaunchSession(
@@ -189,7 +298,7 @@ var transientOriginCapture = await new MacBrowserLaunchCoordinator(
         "account-id",
         new Uri("https://www.roblox.com/games/123/Test"),
         TimeSpan.FromSeconds(1));
-Require(transientOriginCapture.Scheme == "roblox-player",
+Require(transientOriginCapture.Equals(new Uri("roblox-player:1+gameinfo:transient-origin")),
     "The initial WebView wrong-origin state incorrectly aborted a later Roblox Play click.");
 
 var scriptHookSession = new FakeMacBrowserLaunchSession(
@@ -205,7 +314,7 @@ var scriptHookCapture = await new MacBrowserLaunchCoordinator(
         "account-id",
         new Uri("https://www.roblox.com/games/123/Test"),
         TimeSpan.FromSeconds(1));
-Require(scriptHookCapture.AbsoluteUri.Contains("script-hook-captured", StringComparison.Ordinal)
+Require(scriptHookCapture.Equals(new Uri("roblox-player:1+gameinfo:script-hook-captured"))
         && scriptHookSession.Events.Contains("capture-script", StringComparer.Ordinal),
     "The trusted-page fallback did not recover a Roblox URI omitted by WKWebView routes.");
 

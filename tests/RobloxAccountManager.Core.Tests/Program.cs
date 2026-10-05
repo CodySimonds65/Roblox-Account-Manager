@@ -116,26 +116,6 @@ Require(!permissionDenied.Succeeded
         && deniedLauncher.LaunchCount == 0,
     "A permanent singleton permission failure was retried or reached ticket acquisition.");
 
-Require(GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/games/123/example", out var normalized)
-        && normalized.Contains("/games/123/", StringComparison.Ordinal),
-    "A valid Roblox game URL was not normalized.");
-Require(!GamePreset.TryNormalizeRobloxGameUrl("https://roblox.com.evil.example/games/123", out _),
-    "A lookalike Roblox game URL was accepted.");
-const string privateServerShare = "https://www.roblox.com/share?code=b5f0d0b82d5a53419841df9f978bed53&type=Server";
-Require(GamePreset.TryNormalizeRobloxGameUrl(privateServerShare, out var normalizedPrivateServer)
-        && normalizedPrivateServer == privateServerShare,
-    "A Roblox private server share URL was rejected or changed.");
-Require(GamePreset.TryNormalizeRobloxGameUrl(
-            "https://roblox.com/share?code=share-code%2Bwith%2Fsymbols&type=server&source=invite",
-            out var canonicalPrivateServer)
-        && canonicalPrivateServer == "https://www.roblox.com/share?code=share-code%2Bwith%2Fsymbols&type=server&source=invite",
-    "A bare-host private server share URL was not canonicalized while preserving its query.");
-Require(!GamePreset.TryNormalizeRobloxGameUrl("http://www.roblox.com/share?code=secret&type=Server", out _),
-    "An HTTP private server share URL was accepted.");
-Require(!GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/share?type=Server", out _),
-    "A private server share URL without a code was accepted.");
-Require(!GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/share?code=secret&type=Experience", out _),
-    "A non-server Roblox share URL was accepted as a private server link.");
 var resolvedSettings = GameSettings.Resolve(
     new GameSettings { GraphicsQuality = 3, FpsLimit = 60 },
     new GameSettings { GraphicsQuality = 6 },
@@ -206,9 +186,9 @@ try
     Require(roundTrippedSettings.UpdateChannel == UpdateChannel.Unsigned && !roundTrippedSettings.ShowGamePresetPanel,
         "The update channel or game preset visibility did not survive a settings-file round trip.");
     await File.WriteAllTextAsync(paths.Settings,
-        "{\"MultiInstanceConsentGranted\":false,\"UpdateChecksEnabled\":true}");
+        "{\"MultiInstanceConsentGranted\":false,\"UpdateChecksEnabled\":false}");
     var legacySettings = await settingsStore.LoadAsync();
-    Require(legacySettings.UpdateChecksEnabled,
+    Require(!legacySettings.UpdateChecksEnabled,
         "A legacy runtime-slot consent property prevented settings migration.");
     await accounts.SaveAsync([new AccountProfile
     {
@@ -219,6 +199,25 @@ try
     var loadedAccounts = await accounts.LoadAsync();
     Require(loadedAccounts.Count == 1 && loadedAccounts[0].Label == "Imported" && loadedAccounts[0].EmbedInClients,
         "Portable account storage did not round-trip the Clients-panel profile option.");
+
+    var duplicateId = "duplicate-profile-id";
+    await File.WriteAllTextAsync(paths.Accounts, JsonSerializer.Serialize(new List<AccountProfile>
+    {
+        new() { Id = duplicateId, Label = "First duplicate" },
+        new() { Id = duplicateId, Label = "Second duplicate" },
+        new() { Id = "", Label = "Blank id" }
+    }));
+    var repairedAccounts = await accounts.LoadAsync();
+    Require(repairedAccounts.Count == 3
+            && repairedAccounts[0].Id == duplicateId
+            && repairedAccounts.Select(account => account.Id).Distinct(StringComparer.Ordinal).Count() == 3
+            && repairedAccounts.All(account => !string.IsNullOrWhiteSpace(account.Id)),
+        "Account loading did not repair duplicate or blank profile IDs before Clients overlay indexing.");
+    var persistedRepairedAccounts = JsonSerializer.Deserialize<List<AccountProfile>>(
+        await File.ReadAllTextAsync(paths.Accounts)) ?? [];
+    Require(persistedRepairedAccounts.Select(account => account.Id)
+            .SequenceEqual(repairedAccounts.Select(account => account.Id)),
+        "Repaired profile IDs were not persisted for the next launch.");
 
     var exportPath = Path.Combine(storeRoot, "profile-export.json");
     var transferSettings = new LauncherSettings

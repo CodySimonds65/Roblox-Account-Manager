@@ -19,6 +19,27 @@ Shared business rules, persisted-data models, plugin contracts, and serializatio
 platform-neutral libraries. UI controls, native transports, and operating-system integration remain
 inside their frontend or platform projects.
 
+### macOS Clients overlay
+
+The macOS Clients panel keeps Roblox as a separate top-level window and uses Accessibility only for
+verified frame, minimized-state, and explicit-user-selection raise operations. A refresh must resolve
+every opted-in managed process before changing any window. Discovery or identity failures restore
+previously tracked state and must never minimize a newly discovered or unresolved client. Accessibility
+setter success is not sufficient by itself: minimized and frame writes require settled readback, with
+transient minimized-window discovery gaps retried while the retained window identity remains valid.
+Passive timer refreshes are coalesced, while an explicit tab selection is retained and runs next.
+
+Navigation away from Clients remains blocked while the original Roblox window state is unverified. The
+Clients status row exposes a retry action, and permission-required is reported separately from transient
+readback or restoration failures.
+
+Accessibility probe and overlay state changes are written to the Activity log without titles or
+authentication data. Client counts are keyed by account and PID, so a preflight record followed by a
+restore record cannot appear as an extra client; the raw diagnostic-record count remains available for
+tracing the failure chain. Discovery diagnostics may include sanitized PID, executable basename, and
+bundle basename boundaries, but never full paths or window content. Repeated identical timer results
+are deduplicated.
+
 ## Pull-request release candidates
 
 Every non-draft pull request produces a test-only GitHub draft containing an unsigned Windows x64

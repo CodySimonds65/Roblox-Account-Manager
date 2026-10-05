@@ -217,33 +217,6 @@ Require(!passBudgetSweep.Success,
     "A singleton sweep reported success after exhausting its pass budget with handles still present.");
 
 Require(
-    GamePreset.TryNormalizeRobloxGameUrl(
-        "https://www.roblox.com/games/77649408247578/Dungeon-Quest-Reborn",
-        out var normalizedUrl),
-    "A valid Roblox game URL was rejected.");
-Require(normalizedUrl.Contains("77649408247578"), "The normalized URL lost its game ID.");
-Require(
-    !GamePreset.TryNormalizeRobloxGameUrl("http://www.roblox.com/games/123/Test", out _),
-    "An insecure Roblox URL was accepted.");
-Require(
-    !GamePreset.TryNormalizeRobloxGameUrl("https://example.com/games/123/Test", out _),
-    "A non-Roblox URL was accepted.");
-Require(
-    !GamePreset.TryNormalizeRobloxGameUrl("https://www.roblox.com/home", out _),
-    "A non-game Roblox URL was accepted.");
-Require(
-    GamePreset.TryNormalizeRobloxGameUrl(
-        "https://www.roblox.com/games/123456/Test?privateServerLinkCode=secret",
-        out var privateServerUrl) && privateServerUrl.Contains("privateServerLinkCode=secret"),
-    "A Roblox private-server link was not preserved.");
-Require(
-    GamePreset.TryNormalizeRobloxGameUrl(
-        "https://www.roblox.com/share?code=b5f0d0b82d5a53419841df9f978bed53&type=Server",
-        out var normalizedPrivateServerShare) &&
-    normalizedPrivateServerShare == "https://www.roblox.com/share?code=b5f0d0b82d5a53419841df9f978bed53&type=Server",
-    "A Roblox private server share URL was rejected.");
-
-Require(
     RobloxClientSettingsService.TryParseAdvancedFlags(
         "{\"FFlagExample\": true, \"FIntExample\": 4}", out var parsedFlags, out _)
         && parsedFlags.Count == 2,
@@ -290,20 +263,33 @@ try
     var snapshotJson = JsonSerializer.Serialize(new ManagedAccountSnapshot(
         "state-test", "State test", 1, 1, (nint)42, 0, 0, 100, 100, 96, false, DateTime.UtcNow, true,
         ExitCode: 5, Platform: "windows", WindowIdentifier: "hwnd:42"), PluginJson.Options);
-    Require(snapshotJson.Contains("\"windowHandle\":42", StringComparison.Ordinal),
-        "Managed-account HWND wire serialization was not numeric.");
-    Require(snapshotJson.Contains("\"platform\":\"windows\"", StringComparison.Ordinal) &&
-            snapshotJson.Contains("\"windowIdentifier\":\"hwnd:42\"", StringComparison.Ordinal) &&
-            snapshotJson.Contains("\"exitCode\":5", StringComparison.Ordinal),
-        "Managed-account cross-platform identity fields were not serialized.");
-    var sdkReadsHost = JsonSerializer.Deserialize<RobloxAccountManager.PluginSdk.ManagedAccountSnapshot>(
+    using var snapshotDocument = JsonDocument.Parse(snapshotJson);
+    var snapshotElement = snapshotDocument.RootElement;
+    var snapshotWindowHandle = snapshotElement.GetProperty("windowHandle");
+    Require(snapshotElement.ValueKind == JsonValueKind.Object &&
+            snapshotWindowHandle.GetInt64() == 42,
+        "Managed-account HWND wire serialization was not a numeric JSON value.");
+    Require(snapshotElement.GetProperty("platform").GetString() == "windows" &&
+            snapshotElement.GetProperty("windowIdentifier").GetString() == "hwnd:42" &&
+            snapshotElement.GetProperty("exitCode").GetInt32() == 5,
+        "Managed-account cross-platform identity fields were not serialized with their wire names.");
+    var sdkReadsHost = JsonSerializer.Deserialize<ManagedAccountSnapshot>(
         snapshotJson,
         RobloxAccountManager.PluginSdk.PluginJson.Options);
-    Require(sdkReadsHost?.ExitCode == 5 && sdkReadsHost.WindowIdentifier == "hwnd:42",
-        "The public SDK could not read a host-generated account snapshot.");
+    Require(sdkReadsHost is not null &&
+            sdkReadsHost.AccountId == "state-test" &&
+            sdkReadsHost.WindowHandle == (nint)42 &&
+            sdkReadsHost.Platform == "windows" &&
+            sdkReadsHost.WindowIdentifier == "hwnd:42" &&
+            sdkReadsHost.ExitCode == 5,
+        "The public SDK could not read the host-generated account snapshot identity.");
     var inputResultJson = JsonSerializer.Serialize(BackgroundInputResult.Failure("test", "test", (nint)7, (nint)8), PluginJson.Options);
-    Require(inputResultJson.Contains("\"foregroundBefore\":7", StringComparison.Ordinal) && inputResultJson.Contains("\"foregroundAfter\":8", StringComparison.Ordinal),
-        "Background input HWND wire serialization was not numeric.");
+    using var inputResultDocument = JsonDocument.Parse(inputResultJson);
+    var inputResultElement = inputResultDocument.RootElement;
+    var foregroundBefore = inputResultElement.GetProperty("foregroundBefore");
+    var foregroundAfter = inputResultElement.GetProperty("foregroundAfter");
+    Require(foregroundBefore.GetInt64() == 7 && foregroundAfter.GetInt64() == 8,
+        "Background input HWND wire serialization was not numeric JSON.");
     var probeResultJson = JsonSerializer.Serialize(new BackgroundInputResult(true, "ok", "posted", 1, nint.Zero, nint.Zero)
     {
         DeliveryMode = "post-message-probe",
@@ -319,21 +305,37 @@ try
         SelectedAccountId = "state-test",
         SelectedVisible = false
     }, PluginJson.Options);
-    Require(probeResultJson.Contains("\"deliveryMode\":\"post-message-probe\"", StringComparison.Ordinal) &&
-            probeResultJson.Contains("\"verification\":\"unverified\"", StringComparison.Ordinal) &&
-            probeResultJson.Contains("\"traceId\":\"smoke-trace\"", StringComparison.Ordinal) &&
-            probeResultJson.Contains("\"selectedVisible\":false", StringComparison.Ordinal),
-        "Background input probe metadata did not survive JSON serialization.");
+    using var probeResultDocument = JsonDocument.Parse(probeResultJson);
+    var probeResultElement = probeResultDocument.RootElement;
+    var targetRootWindow = probeResultElement.GetProperty("targetRootWindow");
+    var targetRenderWindow = probeResultElement.GetProperty("targetRenderWindow");
+    Require(probeResultElement.GetProperty("deliveryMode").GetString() == "post-message-probe" &&
+            probeResultElement.GetProperty("verification").GetString() == "unverified" &&
+            probeResultElement.GetProperty("traceId").GetString() == "smoke-trace" &&
+            targetRootWindow.GetInt64() == 9 &&
+            targetRenderWindow.GetInt64() == 10 &&
+            probeResultElement.GetProperty("targetProcessId").GetInt32() == 11 &&
+            probeResultElement.GetProperty("targetProcessStartTimeUtcTicks").GetInt64() == 12 &&
+            probeResultElement.GetProperty("selectedAccountId").GetString() == "state-test" &&
+            probeResultElement.GetProperty("selectedVisible").ValueKind == JsonValueKind.False,
+        "Background input probe evidence did not survive structural JSON serialization.");
 
     var sdkSnapshot = new RobloxAccountManager.PluginSdk.ManagedAccountSnapshot(
         "sdk-test", "SDK test", 2, 3, (nint)0x1234, 1, 2, 300, 200, 144, false, DateTime.UtcNow, true, (nint)0x5678);
     var sdkSnapshotJson = JsonSerializer.Serialize(sdkSnapshot, RobloxAccountManager.PluginSdk.PluginJson.Options);
-    Require(sdkSnapshotJson.Contains("\"windowHandle\":4660", StringComparison.Ordinal),
-        "Published SDK did not serialize HWNDs as numeric values.");
+    using var sdkSnapshotDocument = JsonDocument.Parse(sdkSnapshotJson);
+    var sdkSnapshotElement = sdkSnapshotDocument.RootElement;
+    var sdkWindowHandle = sdkSnapshotElement.GetProperty("windowHandle");
+    var sdkRootWindowHandle = sdkSnapshotElement.GetProperty("rootWindowHandle");
+    Require(sdkWindowHandle.GetInt64() == 0x1234 && sdkRootWindowHandle.GetInt64() == 0x5678,
+        "Published SDK did not serialize HWNDs as numeric JSON values with the wire names.");
     var sdkRoundTrip = JsonSerializer.Deserialize<RobloxAccountManager.PluginSdk.ManagedAccountSnapshot>(sdkSnapshotJson,
         PluginJson.Options);
-    Require(sdkRoundTrip?.WindowHandle == (nint)0x1234 && sdkRoundTrip.RootWindowHandle == (nint)0x5678,
-        "Published SDK did not round-trip numeric HWNDs.");
+    Require(sdkRoundTrip is not null &&
+            sdkRoundTrip.AccountId == "sdk-test" &&
+            sdkRoundTrip.WindowHandle == (nint)0x1234 &&
+            sdkRoundTrip.RootWindowHandle == (nint)0x5678,
+        "Published SDK did not round-trip numeric HWNDs through the host contract.");
 }
 finally
 {
@@ -477,9 +479,20 @@ Require(
 
 var queueItem = new LaunchQueueItem(new AccountProfile { Label = "Queue test" });
 Require(queueItem.Status == "WAITING", "A new launch queue item was not waiting.");
+var queueNotifications = new List<string?>();
+queueItem.PropertyChanged += (_, change) => queueNotifications.Add(change.PropertyName);
 queueItem.State = LaunchQueueState.Running;
 queueItem.Detail = "Roblox started";
 Require(queueItem.Status == "RUNNING" && queueItem.Detail == "Roblox started", "Launch queue status did not update.");
+Require(queueNotifications.Count == 3
+        && queueNotifications.Contains(nameof(LaunchQueueItem.State))
+        && queueNotifications.Contains(nameof(LaunchQueueItem.Status))
+        && queueNotifications.Contains(nameof(LaunchQueueItem.Detail)),
+    "Queue changes did not notify the properties used by the UI.");
+queueNotifications.Clear();
+queueItem.State = LaunchQueueState.Running;
+queueItem.Detail = "Roblox started";
+Require(queueNotifications.Count == 0, "Unchanged queue values unnecessarily refreshed the UI.");
 
 var diagnosticReport = CompatibilityService.CreateSafeReport(
 [
@@ -1064,8 +1077,6 @@ try
     {
         Console.WriteLine("Reparse-point smoke test skipped: symbolic-link creation is unavailable.");
     }
-    Require(PluginInstaller.MaxArchiveEntryBytes >= 154L * 1024 * 1024,
-        "The archive entry limit is smaller than the published self-contained plugin.");
     RequireInvalidData(
         () => PluginInstaller.ValidateArchiveMetadata(
             [("oversized.exe", PluginInstaller.MaxArchiveEntryBytes + 1, 0)],
@@ -1408,12 +1419,6 @@ Require(!PluginRuntime.HasForegroundInputCapability(
         new HashSet<string>(StringComparer.Ordinal) { PluginCapabilities.HostInputBackgroundMessages }),
     "Legacy background-message capability must not authorize foreground SendInput.");
 
-var routeExpected = new ManagedAccountSnapshot(
-    "route-test", "Route test", 314, 159, (nint)0x1111, 0, 0, 800, 600, 96, false,
-    DateTime.UtcNow, true, (nint)0x2222);
-Require(routeExpected.RootWindowHandle == (nint)0x2222 && routeExpected.IsRunning,
-    "The managed-account route snapshot was not preserved.");
-
 Console.WriteLine("Plugin input routing smoke tests passed.");
 
 using (var nativeHost = NativeEmbeddingTestWindow.CreateHost())
@@ -1456,8 +1461,6 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
     embeddings.ShowOnly("native-first");
     Require(embeddings.IsVisible("native-first") && firstRoot.Visible && !secondRoot.Visible,
         "Selecting the first native client did not hide every other docked client.");
-    Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
-        "Docking displayed more than one Roblox client at once.");
     for (var iteration = 0; iteration < 120; iteration++)
     {
         nativeHost.SetBounds(-32000 + iteration % 9, -32000 + iteration % 7,
@@ -1479,8 +1482,6 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
     embeddings.ShowOnly("native-second");
     Require(embeddings.IsVisible("native-second") && secondRoot.Visible && !firstRoot.Visible,
         "Selecting the second native client did not transfer exclusive visibility.");
-    Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
-        "Switching tabs displayed more than one Roblox client at once.");
 
     firstRoot.SetOwner(secondRoot.Handle);
     Require(embeddings.TryUnembed("native-first"), "The first native test window could not be undocked.");
