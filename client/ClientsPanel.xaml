@@ -20,7 +20,7 @@
             <ListBox.Resources>
                 <!-- Keep an overflowing tab strip usable without compressing
                      every client label into an unreadable sliver. The app
-                     scrollbar template supplies the same dark track and violet
+                     scrollbar template supplies the same dark track and accent
                      thumb as the rest of RAM. -->
                 <Style TargetType="ScrollBar" BasedOn="{StaticResource {x:Type ScrollBar}}">
                     <Setter Property="Height" Value="14" />
@@ -48,7 +48,7 @@
                                 <Border x:Name="Tab" Focusable="False"
                                         Background="{TemplateBinding Background}"
                                         BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
-                                        CornerRadius="8" Padding="{TemplateBinding Padding}">
+                                        CornerRadius="4" Padding="{TemplateBinding Padding}">
                                     <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}" />
                                 </Border>
                                 <ControlTemplate.Triggers>
@@ -83,7 +83,7 @@
         </ListBox>
 
         <Border Grid.Row="1" x:Name="HostArea" Background="#101318" BorderBrush="{StaticResource BorderBrush}"
-                BorderThickness="1" CornerRadius="12" Margin="0,8,0,0" ClipToBounds="True"
+                BorderThickness="1" CornerRadius="6" Margin="0,8,0,0" ClipToBounds="True"
                 SizeChanged="HostArea_SizeChanged">
             <local:EmbeddedClientHost x:Name="NativeClientHost" Focusable="True" />
         </Border>

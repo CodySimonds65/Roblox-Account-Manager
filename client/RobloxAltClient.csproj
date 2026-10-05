@@ -23,6 +23,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <AssemblyMetadata Include="DiagnosticBuildLabel" Value="$(DiagnosticBuildLabel)" Condition="'$(DiagnosticBuildLabel)' != ''" />
     <ProjectReference Include="..\src\RobloxAccountManager.Core\RobloxAccountManager.Core.csproj" />
     <ProjectReference Include="..\sdk\RobloxAccountManager.PluginSdk\RobloxAccountManager.PluginSdk.csproj" />
     <PackageReference Include="NSec.Cryptography" Version="24.4.0" />

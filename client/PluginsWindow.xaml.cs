@@ -28,21 +28,20 @@ public partial class PluginsWindow : Window
             {
                 Background = (System.Windows.Media.Brush)FindResource("SurfaceBrush"),
                 BorderBrush = (System.Windows.Media.Brush)FindResource("BorderBrush"),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(10),
+                BorderThickness = new Thickness(0, 0, 0, 1),
                 Padding = new Thickness(12),
-                Margin = new Thickness(0, 0, 0, 8)
+                Margin = new Thickness(0, 0, 0, 4)
             };
             var layout = new Grid();
-            layout.ColumnDefinitions.Add(new ColumnDefinition());
-            layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             var details = new StackPanel();
-            details.Children.Add(new TextBlock { Text = $"{plugin.Manifest.Name}  v{plugin.Manifest.Version}", FontWeight = FontWeights.SemiBold });
+            details.Children.Add(new TextBlock { Text = $"{plugin.Manifest.Name}  v{plugin.Manifest.Version}", TextWrapping = TextWrapping.Wrap, FontWeight = FontWeights.SemiBold });
             details.Children.Add(new TextBlock { Text = plugin.Manifest.Description, Foreground = (System.Windows.Media.Brush)FindResource("MutedTextBrush"), TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 3, 8, 0) });
-            details.Children.Add(new TextBlock { Text = $"Publisher: {plugin.Manifest.Publisher} · Capabilities: {plugin.GrantedCapabilities.Count}/{plugin.Manifest.Capabilities.Count}", Foreground = (System.Windows.Media.Brush)FindResource("MutedTextBrush"), FontSize = 11, Margin = new Thickness(0, 4, 0, 0) });
-            details.Children.Add(new TextBlock { Text = plugin.LastError ?? (plugin.IsRunning ? "Running" : "Stopped"), Foreground = plugin.LastError is null ? (System.Windows.Media.Brush)FindResource("MutedTextBrush") : (System.Windows.Media.Brush)FindResource("DangerBrush"), FontSize = 11, Margin = new Thickness(0, 6, 0, 0) });
+            details.Children.Add(new TextBlock { Text = $"Publisher: {plugin.Manifest.Publisher} · Capabilities: {plugin.GrantedCapabilities.Count}/{plugin.Manifest.Capabilities.Count}", TextWrapping = TextWrapping.Wrap, Foreground = (System.Windows.Media.Brush)FindResource("MutedTextBrush"), FontSize = 11, Margin = new Thickness(0, 4, 0, 0) });
+            details.Children.Add(new TextBlock { Text = plugin.LastError ?? (plugin.IsRunning ? "Running" : "Stopped"), TextWrapping = TextWrapping.Wrap, Foreground = plugin.LastError is null ? (System.Windows.Media.Brush)FindResource("MutedTextBrush") : (System.Windows.Media.Brush)FindResource("DangerBrush"), FontSize = 11, Margin = new Thickness(0, 6, 0, 0) });
             layout.Children.Add(details);
-            var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            var actions = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
             var autostart = new CheckBox { Content = "Autostart", IsChecked = plugin.Autostart, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0) };
             autostart.Checked += (_, _) => Runtime.SetAutostart(plugin.Manifest.Id, true);
             autostart.Unchecked += (_, _) => Runtime.SetAutostart(plugin.Manifest.Id, false);
@@ -74,7 +73,9 @@ public partial class PluginsWindow : Window
                     await RunSafeAsync(() => Runtime.RemoveAsync(plugin.Manifest.Id));
             };
             actions.Children.Add(remove);
-            Grid.SetColumn(actions, 1);
+            foreach (FrameworkElement action in actions.Children)
+                action.Margin = new Thickness(0, 0, 8, 6);
+            Grid.SetRow(actions, 1);
             layout.Children.Add(actions);
             card.Child = layout;
             InstalledList.Items.Add(card);
@@ -86,21 +87,20 @@ public partial class PluginsWindow : Window
         {
             var row = new Border
             {
-                Background = (System.Windows.Media.Brush)FindResource("ElevatedBrush"),
+                Background = (System.Windows.Media.Brush)FindResource("SurfaceBrush"),
                 BorderBrush = (System.Windows.Media.Brush)FindResource("BorderBrush"),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(10),
+                BorderThickness = new Thickness(0, 0, 0, 1),
                 Padding = new Thickness(12),
-                Margin = new Thickness(0, 0, 0, 8)
+                Margin = new Thickness(0, 0, 0, 4)
             };
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition());
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.Children.Add(new StackPanel
             {
-                Children = { new TextBlock { Text = entry.Name, FontWeight = FontWeights.SemiBold }, new TextBlock { Text = entry.Description, Foreground = (System.Windows.Media.Brush)FindResource("MutedTextBrush"), FontSize = 12, Margin = new Thickness(0, 3, 8, 0) } }
+                Children = { new TextBlock { Text = entry.Name, FontWeight = FontWeights.SemiBold }, new TextBlock { Text = entry.Description, TextWrapping = TextWrapping.Wrap, Foreground = (System.Windows.Media.Brush)FindResource("MutedTextBrush"), FontSize = 12, Margin = new Thickness(0, 3, 16, 0) } }
             });
-            var install = new Button { Content = "Install", Padding = new Thickness(14, 5, 14, 5) };
+            var install = new Button { Content = "Install", VerticalAlignment = VerticalAlignment.Center, Padding = new Thickness(14, 5, 14, 5) };
             install.Click += async (_, _) => { InstallUrlBox.Text = entry.InstallUrl; await InstallAsync(entry.InstallUrl); };
             Grid.SetColumn(install, 1);
             grid.Children.Add(install);

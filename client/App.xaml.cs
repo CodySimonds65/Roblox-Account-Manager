@@ -36,7 +36,9 @@ public partial class App : Application
             _singleInstanceMutex.Dispose();
             _singleInstanceMutex = null;
             MessageBox.Show(
-                "Roblox Account Manager is already open.",
+                string.IsNullOrWhiteSpace(LauncherBuildInfo.DiagnosticLabel)
+                    ? "Roblox Account Manager is already open."
+                    : $"{LauncherBuildInfo.DiagnosticLabel} has not started because another launcher is already open. Close that launcher, then open this test EXE again.",
                 "Already running",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);

@@ -116,7 +116,7 @@ public sealed partial class SingletonService
             var messages = sweep.Messages.ToList();
             if (sweep.ClosedCount == 0)
             {
-                messages.Add("No singleton handles are currently present; Roblox is already unlocked.");
+                messages.Add("No Roblox singleton event or mutex handles were found in the inspected clients.");
             }
 
             return new UnlockResult(sweep.Success, sweep.ClosedCount, [.. messages]);
