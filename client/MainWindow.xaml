@@ -1,19 +1,19 @@
-<Window x:Class="RobloxAltClient.MainWindow"
+<Window Style="{StaticResource {x:Type Window}}" x:Class="RobloxAltClient.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:RobloxAltClient"
         Title="Roblox Account Manager" Height="860" Width="1380" MinHeight="700" MinWidth="1080"
         Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource TextBrush}"
         WindowStartupLocation="CenterScreen">
-    <Grid Margin="18">
+    <Grid Margin="12">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="286" />
-            <ColumnDefinition Width="18" />
+            <ColumnDefinition Width="232" />
+            <ColumnDefinition Width="16" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
         <Border Grid.Column="0" Background="{StaticResource SurfaceBrush}"
-                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="16" Padding="17">
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0" CornerRadius="0" Padding="12">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -22,27 +22,13 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <Grid Margin="2,1,2,25">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="44" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <Border Width="38" Height="38" CornerRadius="11" Background="{StaticResource AccentBrush}">
-                        <TextBlock Text="R" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Border>
-                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0">
-                        <TextBlock Text="Account Manager" FontSize="18" FontWeight="SemiBold" />
-                        <TextBlock Text="Roblox launcher" FontSize="12" Foreground="{StaticResource MutedTextBrush}" />
-                    </StackPanel>
-                </Grid>
-
-                <Grid Grid.Row="1" Margin="2,0,2,10">
-                    <TextBlock Text="ACCOUNT PROFILES" FontSize="11" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedTextBrush}" />
-                    <Border HorizontalAlignment="Right" Background="#211D38" CornerRadius="8" Padding="7,2">
-                        <TextBlock Text="MULTI-SELECT" FontSize="9" FontWeight="Bold" Foreground="#B5A7FF" />
-                    </Border>
-                </Grid>
+                <StackPanel Margin="2,4,2,22">
+                    <TextBlock Text="Accounts" FontSize="20" FontWeight="SemiBold" />
+                    <TextBlock Text="Select accounts to launch" FontSize="12"
+                               Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+                <TextBlock Grid.Row="1" Text="Profiles" FontSize="12" Margin="2,0,2,8"
+                           Foreground="{StaticResource MutedTextBrush}" />
 
                 <ListBox x:Name="AccountsList" Grid.Row="2" SelectionMode="Multiple" AllowDrop="True"
                          SelectionChanged="AccountsList_SelectionChanged"
@@ -50,7 +36,7 @@
                          PreviewMouseMove="AccountsList_PreviewMouseMove" Drop="AccountsList_Drop">
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <Grid>
+                            <Grid Margin="8,3,4,3">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
@@ -117,7 +103,7 @@
                 </ListBox>
 
                 <StackPanel Grid.Row="3" Margin="0,14,0,0">
-                    <Button x:Name="AddAccountButton" Content="＋  Add account profile" Click="AddAccount_Click" />
+                    <Button x:Name="AddAccountButton" Content="Add account" Click="AddAccount_Click" />
                     <Grid Margin="0,8,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
@@ -136,9 +122,9 @@
                         <Button Grid.Column="1" Content="↑" ToolTip="Move profile up" Click="MoveAccountUp_Click" Style="{StaticResource CompactButton}" Width="34" Margin="0,0,5,0" />
                         <Button Grid.Column="2" Content="↓" ToolTip="Move profile down" Click="MoveAccountDown_Click" Style="{StaticResource CompactButton}" Width="34" />
                     </Grid>
-                    <Button x:Name="RemoveAccountButton" Content="Remove selected session" Click="RemoveAccount_Click"
+                    <Button x:Name="RemoveAccountButton" Content="Remove selected" Click="RemoveAccount_Click"
                             Style="{StaticResource DangerButton}" Margin="0,8,0,0" />
-                    <TextBlock Text="Sessions stay isolated and local to this PC." TextWrapping="Wrap"
+                    <TextBlock Text="Each account has its own browser session." TextWrapping="Wrap"
                                FontSize="11" Foreground="{StaticResource MutedTextBrush}" Margin="3,13,3,0" />
                 </StackPanel>
             </Grid>
@@ -148,109 +134,107 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
-                <RowDefinition x:Name="BrowserRow" Height="1.2*" MinHeight="160" />
+                <RowDefinition x:Name="BrowserRow" Height="*" MinHeight="180" />
                 <RowDefinition Height="6" />
-                <RowDefinition x:Name="ActivityRow" Height="1*" MinHeight="130" />
+                <RowDefinition x:Name="ActivityRow" Height="190" MinHeight="150" />
             </Grid.RowDefinitions>
 
-            <Grid Margin="2,3,2,18">
+            <Grid Margin="0,2,0,16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <StackPanel>
-                    <TextBlock Text="Launch workspace" FontSize="25" FontWeight="SemiBold" />
-                    <TextBlock Text="Choose profiles, pick a game, and launch every client in sequence."
-                               Foreground="{StaticResource MutedTextBrush}" FontSize="13" Margin="0,3,0,0" />
+                    <TextBlock Text="Roblox Account Manager" FontSize="22" FontWeight="SemiBold" />
+                    <TextBlock Text="Choose a game, then launch your selected accounts."
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,4,12,0"
+                               TextWrapping="Wrap" />
                 </StackPanel>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Button Content="Plugins" Click="Plugins_Click" Style="{StaticResource SecondaryButton}"
-                            Padding="12,6" Margin="0,0,8,0" />
-                    <Button Content="Settings" Click="Settings_Click" Style="{StaticResource SecondaryButton}"
-                            Padding="12,6" Margin="0,0,8,0" />
-                    <Button Content="Diagnostics" Click="Diagnostics_Click" Style="{StaticResource SecondaryButton}"
-                            Padding="12,6" Margin="0,0,8,0" />
-                    <Border Background="#10261F" BorderBrush="#1C4B3C" BorderThickness="1" CornerRadius="12"
-                            Height="34" MinWidth="108" Padding="11,0" VerticalAlignment="Center">
-                        <StackPanel Orientation="Horizontal">
-                            <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}" Margin="0,0,7,0" VerticalAlignment="Center" />
-                            <TextBlock Text="LOCAL ONLY" FontSize="10" FontWeight="Bold" Foreground="#7DE6BC"
-                                       VerticalAlignment="Center" />
-                        </StackPanel>
-                    </Border>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Plugins" Click="Plugins_Click" Style="{StaticResource CompactButton}" Margin="0,0,6,0" />
+                    <Button Content="Settings" Click="Settings_Click" Style="{StaticResource CompactButton}" Margin="0,0,6,0" />
+                    <Button Content="Diagnostics" Click="Diagnostics_Click" Style="{StaticResource CompactButton}" />
                 </StackPanel>
             </Grid>
 
             <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
-                    BorderThickness="1" CornerRadius="14" Padding="15" Margin="0,0,0,14">
+                    BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,12">
                 <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="500" />
+                        <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <StackPanel>
-                        <TextBlock Text="GAME PRESET" FontSize="10" FontWeight="Bold" Foreground="{StaticResource MutedTextBrush}" Margin="2,0,0,6" />
-                        <TextBox x:Name="PresetSearchBox" TextChanged="PresetSearch_TextChanged" ToolTip="Search game presets"
-                                 Margin="0,0,0,7" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <ComboBox x:Name="GamePicker" SelectionChanged="GamePicker_SelectionChanged" />
-                            <Button x:Name="AddGamePresetButton" Grid.Column="1" Content="＋" ToolTip="Add game preset"
-                                    Click="AddGamePreset_Click" Style="{StaticResource CompactButton}"
-                                    Width="34" Height="34" Padding="0" Margin="7,0,0,0" />
-                            <Button x:Name="RemoveGamePresetButton" Grid.Column="2" Content="−" ToolTip="Remove selected preset"
-                                    Click="RemoveGamePreset_Click" Style="{StaticResource CompactButton}"
-                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" IsEnabled="False" />
-                            <Button x:Name="EditGamePresetButton" Grid.Column="3" Content="✎" ToolTip="Edit selected preset"
-                                    Click="EditGamePreset_Click" Style="{StaticResource CompactButton}"
-                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" IsEnabled="False" />
-                            <Button x:Name="DuplicateGamePresetButton" Grid.Column="4" Content="⧉" ToolTip="Duplicate selected preset"
-                                    Click="DuplicateGamePreset_Click" Style="{StaticResource CompactButton}"
-                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
-                            <Button Grid.Column="5" Content="⇩" ToolTip="Import presets"
-                                    Click="ImportGamePresets_Click" Style="{StaticResource CompactButton}"
-                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
-                            <Button Grid.Column="6" Content="⇧" ToolTip="Export presets"
-                                    Click="ExportGamePresets_Click" Style="{StaticResource CompactButton}"
-                                    Width="34" Height="34" Padding="0" Margin="5,0,0,0" />
-                        </Grid>
-                    </StackPanel>
-                    <StackPanel Grid.Column="1" Margin="12,0,0,0">
-                        <TextBlock Text="CUSTOM ROBLOX URL" FontSize="10" FontWeight="Bold" Foreground="{StaticResource MutedTextBrush}" Margin="2,0,0,6" />
-                        <TextBox x:Name="CustomUrlBox" Visibility="Collapsed" Text="https://www.roblox.com/games/" />
-                        <Border x:Name="PresetHint" Background="#0D1016" BorderBrush="{StaticResource BorderBrush}"
-                                BorderThickness="1" CornerRadius="8" Padding="11,8">
+                    <TextBlock Text="Game preset" FontSize="12" Margin="0,0,0,6" Foreground="{StaticResource MutedTextBrush}" />
+                    <TextBlock Grid.Column="1" Text="Launch target" FontSize="12" Margin="12,0,0,6" Foreground="{StaticResource MutedTextBrush}" />
+                    <ComboBox x:Name="GamePicker" Grid.Row="1" SelectionChanged="GamePicker_SelectionChanged"
+                              AutomationProperties.Name="Game preset" MinWidth="160" />
+                    <Grid Grid.Row="1" Grid.Column="1" Margin="12,0">
+                        <TextBox x:Name="CustomUrlBox" Visibility="Collapsed" Text="https://www.roblox.com/games/"
+                                 AutomationProperties.Name="Custom Roblox game URL" />
+                        <Border x:Name="PresetHint" Background="{StaticResource InputBrush}" BorderBrush="{StaticResource BorderBrush}"
+                                BorderThickness="1" CornerRadius="4" Padding="10,6">
                             <TextBlock x:Name="PresetHintText" Text="Using the selected game preset"
-                                       Foreground="{StaticResource MutedTextBrush}" FontSize="13" TextTrimming="CharacterEllipsis" />
+                                       Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                         </Border>
-                    </StackPanel>
-                    <Button x:Name="OpenLoginButton" Grid.Column="2" Content="Login / Home" Click="OpenLogin_Click"
-                            Style="{StaticResource SecondaryButton}" Margin="12,16,8,0" VerticalAlignment="Top" />
-                    <Button x:Name="AutoLaunchButton" Grid.Column="3" Content="▶  Auto-launch selected" Click="PrepareLaunch_Click"
-                            Margin="0,16,0,0" VerticalAlignment="Top" />
+                    </Grid>
+                    <Button x:Name="AutoLaunchButton" Grid.Row="1" Grid.Column="2" Content="Launch selected" Click="PrepareLaunch_Click"
+                            Style="{StaticResource PrimaryButton}" MinWidth="132" />
+                    <Grid Grid.Row="2" Grid.ColumnSpan="3" Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="160" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid>
+                            <TextBox x:Name="PresetSearchBox" TextChanged="PresetSearch_TextChanged" ToolTip="Search game presets"
+                                     AutomationProperties.Name="Search game presets" Padding="8,5" />
+                            <TextBlock Text="Search presets" Foreground="{StaticResource MutedTextBrush}" Margin="9,0"
+                                       VerticalAlignment="Center" IsHitTestVisible="False" FontSize="12">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Text, ElementName=PresetSearchBox}" Value="">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+                        <WrapPanel Grid.Column="1" Margin="8,0" VerticalAlignment="Center">
+                            <Button x:Name="AddGamePresetButton" Content="Add" ToolTip="Add game preset" Click="AddGamePreset_Click" Style="{StaticResource CompactButton}" Margin="0,0,4,0" />
+                            <Button x:Name="EditGamePresetButton" Content="Edit" ToolTip="Edit selected preset" Click="EditGamePreset_Click" Style="{StaticResource CompactButton}" IsEnabled="False" Margin="0,0,4,0" />
+                            <Button x:Name="DuplicateGamePresetButton" Content="Duplicate" ToolTip="Duplicate selected preset" Click="DuplicateGamePreset_Click" Style="{StaticResource CompactButton}" Margin="0,0,4,0" />
+                            <Button x:Name="RemoveGamePresetButton" Content="Remove" ToolTip="Remove selected preset" Click="RemoveGamePreset_Click" Style="{StaticResource CompactButton}" IsEnabled="False" Margin="0,0,4,0" />
+                            <Button Content="Import" ToolTip="Import presets" Click="ImportGamePresets_Click" Style="{StaticResource CompactButton}" Margin="0,0,4,0" />
+                            <Button Content="Export" ToolTip="Export presets" Click="ExportGamePresets_Click" Style="{StaticResource CompactButton}" />
+                        </WrapPanel>
+                        <Button x:Name="OpenLoginButton" Grid.Column="2" Content="Open Roblox" ToolTip="Open the selected account's Roblox login or home page"
+                                Click="OpenLogin_Click" Style="{StaticResource CompactButton}" />
+                    </Grid>
                 </Grid>
             </Border>
 
             <Border Grid.Row="2" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
-                    BorderThickness="1" CornerRadius="14" ClipToBounds="True">
+                    BorderThickness="1" CornerRadius="6" ClipToBounds="True">
                 <Grid>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="46" />
+                        <RowDefinition Height="40" />
                         <RowDefinition Height="3" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <Grid Background="{StaticResource ElevatedBrush}" Margin="0">
                         <StackPanel Orientation="Horizontal" Margin="15,0" VerticalAlignment="Center">
-                            <Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}" Margin="0,0,9,0" />
                             <TextBlock x:Name="ActiveProfileText" Text="No profile selected" FontSize="13" FontWeight="SemiBold" />
-                            <TextBlock Text="  •  SESSION" FontSize="10" FontWeight="Bold"
+                            <TextBlock Text="  /  Roblox" FontSize="12"
                                        Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0">
@@ -262,15 +246,11 @@
                     </Grid>
                     <ProgressBar x:Name="LaunchProgress" Grid.Row="1" IsIndeterminate="True" Visibility="Collapsed"
                                  Foreground="{StaticResource AccentBrush}" Background="Transparent" BorderThickness="0" />
-                    <Grid x:Name="BrowserHost" Grid.Row="2" Background="#0B0D12">
+                    <Grid x:Name="BrowserHost" Grid.Row="2" Background="{StaticResource AppBackgroundBrush}">
                         <StackPanel x:Name="BrowserPlaceholder" HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <Border Width="54" Height="54" CornerRadius="16" Background="#1B1E29" HorizontalAlignment="Center">
-                                <TextBlock Text="↗" FontSize="24" Foreground="{StaticResource MutedTextBrush}"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
-                            </Border>
                             <TextBlock Text="Select an account profile" FontSize="16" FontWeight="SemiBold"
                                        HorizontalAlignment="Center" Margin="0,14,0,4" />
-                            <TextBlock Text="Its private Roblox session will open here."
+                            <TextBlock Text="Open Roblox to sign in or browse games."
                                        Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" />
                         </StackPanel>
                     </Grid>
@@ -284,22 +264,21 @@
                           AutomationProperties.Name="Resize activity log" />
 
             <Border Grid.Row="4" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
-                    BorderThickness="1" CornerRadius="14" Padding="13" Margin="0,14,0,0">
+                    BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,6,0,0">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
-                    <Grid Margin="2,0,2,9">
+                    <StackPanel Margin="0,0,0,8">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="Activity" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
-                            <TextBlock Text="  Live diagnostics" FontSize="11" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
                         </StackPanel>
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <WrapPanel Margin="0,6,0,0">
                             <TextBlock Text="Timeout" Foreground="{StaticResource MutedTextBrush}" FontSize="11"
                                        VerticalAlignment="Center" Margin="0,0,6,0" />
-                            <ComboBox x:Name="LaunchTimeoutPicker" Width="82" Height="36" Padding="10,6"
+                            <ComboBox x:Name="LaunchTimeoutPicker" Width="82" Height="30" Padding="8,4"
                                       SelectedIndex="1" Margin="0,0,7,0">
                                 <ComboBoxItem Content="30s" Tag="30" />
                                 <ComboBoxItem Content="45s" Tag="45" />
@@ -313,8 +292,8 @@
                             <Button x:Name="RetryFailedButton" Content="Retry failed" Style="{StaticResource CompactButton}"
                                     Click="RetryFailed_Click" IsEnabled="False" Margin="0,0,6,0" />
                             <Button Content="Copy log" Style="{StaticResource CompactButton}" Click="CopyActivity_Click" />
-                        </StackPanel>
-                    </Grid>
+                        </WrapPanel>
+                    </StackPanel>
                     <ListBox x:Name="LaunchQueueList" Grid.Row="1" Margin="0,0,0,8"
                              ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Disabled">
                         <ListBox.ItemsPanel>
@@ -324,12 +303,12 @@
                         </ListBox.ItemsPanel>
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border Background="#0D1016" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
-                                        CornerRadius="8" Padding="10,7" Width="160" Margin="0,0,7,0">
+                                <Border Background="{StaticResource InputBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                        CornerRadius="4" Padding="10,7" Width="160" Margin="0,0,7,0">
                                     <StackPanel>
                                         <TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                         <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
-                                            <TextBlock Text="{Binding Status}" FontSize="9" FontWeight="Bold" Foreground="#B5A7FF" />
+                                            <TextBlock Text="{Binding Status}" FontSize="9" FontWeight="Bold" Foreground="{StaticResource FocusBrush}" />
                                             <TextBlock Text="  •  " FontSize="9" Foreground="{StaticResource MutedTextBrush}" />
                                             <TextBlock Text="{Binding Detail}" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
                                                        TextTrimming="CharacterEllipsis" Width="84" />
@@ -341,8 +320,8 @@
                     </ListBox>
                     <TextBox x:Name="ActivityLog" Grid.Row="2" IsReadOnly="True" AcceptsReturn="True"
                              TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-                             FontFamily="Cascadia Mono" FontSize="12" Background="#0B0D12" Foreground="#CBD1DE"
-                             BorderBrush="#202531" Padding="10,8" />
+                             FontFamily="Consolas" FontSize="12" Background="{StaticResource AppBackgroundBrush}" Foreground="{StaticResource MutedTextBrush}"
+                             BorderThickness="0" Padding="10,8" />
                 </Grid>
             </Border>
         </Grid>

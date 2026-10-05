@@ -588,7 +588,18 @@ public sealed class RobloxSettingsTransaction : IAsyncDisposable
         _warning = warning;
     }
 
-    public bool IsActive => _owner is not null;
+    public bool IsActive => _owner is not null && !_restored;
+
+    internal async Task EnsureMatchesPlayerAsync(string executable)
+    {
+        if (!IsActive) return;
+        var settingsPath = Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(executable)!, "ClientSettings", "ClientAppSettings.json"));
+        if (_files.Any(file => string.Equals(Path.GetFullPath(file.Path), settingsPath, StringComparison.OrdinalIgnoreCase)))
+            return;
+        await DisposeAsync();
+        _warning?.Invoke("This account uses a different Roblox build; engine overrides were skipped for this launch.");
+    }
 
     public static RobloxSettingsTransaction NoOp() => new();
 

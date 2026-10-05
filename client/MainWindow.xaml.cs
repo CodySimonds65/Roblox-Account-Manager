@@ -41,6 +41,8 @@ public partial class MainWindow : Window
     private WebView2? _browser;
     private AccountProfile? _activeAccount;
     private TaskCompletionSource<bool>? _externalLaunchRequest;
+    private CancellationToken _externalLaunchCancellationToken;
+    private Func<string, Task>? _externalLaunchPreparation;
     private CancellationTokenSource? _launchCancellation;
     private string? _lastLaunchUrl;
     private bool _isLaunching;
@@ -56,6 +58,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        if (!string.IsNullOrWhiteSpace(LauncherBuildInfo.DiagnosticLabel))
+            Title += $" — {LauncherBuildInfo.DiagnosticLabel}";
         WindowAppearance.ApplyModernChrome(this);
         ((App)Application.Current).PluginRuntime.Diagnostic += PluginRuntime_Diagnostic;
         ((App)Application.Current).PluginRuntime.Accounts.AccountExited += Accounts_AccountExited;
@@ -127,6 +131,7 @@ public partial class MainWindow : Window
 
         try
         {
+            Log(LauncherBuildInfo.ActivityHeader);
             _settings = await _settingsStore.LoadAsync();
             // Older settings files do not contain game settings, and a hand-edited
             // file may contain explicit nulls. Keep those files usable with the
@@ -160,10 +165,12 @@ public partial class MainWindow : Window
             _settings.GameOverrides = normalizedOverrides;
             await ApplyPendingDataCleanupAsync();
             ApplySettingsToControls();
-            if (_settings.UpdateChecksEnabled)
+            if (_settings.UpdateChecksEnabled && string.IsNullOrWhiteSpace(LauncherBuildInfo.DiagnosticLabel))
             {
                 _ = CheckForUpdatesAsync();
             }
+            else if (!string.IsNullOrWhiteSpace(LauncherBuildInfo.DiagnosticLabel))
+                Log("Test build active. Launcher release updates are paused for this run; Roblox's own updater remains enabled.");
             else
             {
                 Log("Automatic update checks are disabled in Settings.");
@@ -762,6 +769,7 @@ public partial class MainWindow : Window
         try
         {
             Log($"Starting launch queue for {items.Count} account(s); timeout {timeout.TotalSeconds:0} seconds.");
+            Log(LauncherBuildInfo.ActivityHeader);
             var firstItem = true;
             foreach (var item in items)
             {
@@ -921,18 +929,28 @@ public partial class MainWindow : Window
             Log("Bloxstrap may apply its own allowlist or overrides; engine settings are best effort.");
         }
 
-        if (!await NavigateAndAutoLaunchAsync(gameUrl, cancellationToken))
+        if (!await NavigateAndAutoLaunchAsync(gameUrl, cancellationToken,
+            engineSettingsTransaction.EnsureMatchesPlayerAsync))
         {
             Log($"{item.Label} did not produce a Roblox launch request.");
             return (false, "No launch request");
         }
 
         item.Detail = "Waiting for process";
-        using var newRobloxProcess = await WaitForAdditionalRobloxProcessAsync(previousProcesses, processTimeout, cancellationToken);
+        using var newRobloxProcess = await WaitForAdditionalRobloxProcessAsync(
+            previousProcesses, processTimeout, cancellationToken, Log,
+            startupUnavailable: identity =>
+            {
+                Log($"Startup candidate for {item.Label} (PID {identity.Pid}) became unavailable; collecting Roblox's exit diagnostics.");
+                var snapshot = new ManagedAccountSnapshot(
+                    item.Account.Id, item.Label, identity.Pid, identity.StartTimeUtcTicks,
+                    nint.Zero, 0, 0, 0, 0, 96, false, DateTime.UtcNow, false);
+                _ = LogRobloxAutopsyAsync(snapshot);
+            });
         if (newRobloxProcess is null)
         {
-            Log($"No new Roblox process appeared for {item.Label} within {processTimeout.TotalSeconds:0} seconds.");
-            return (false, "Process timed out");
+            Log($"No new Roblox client stayed available through startup for {item.Label} within {processTimeout.TotalSeconds:0} seconds. Roblox may still be updating; try Retry failed after its update finishes.");
+            return (false, "Startup timed out (Roblox may be updating)");
         }
         if (!TryObserveRobloxProcess(newRobloxProcess, out var launchedIdentity))
         {
@@ -1002,6 +1020,12 @@ public partial class MainWindow : Window
             // moment later. Carry this requirement into the next queue so a
             // future account gets a full quiet-window sweep before launch.
             _singletonSettleRequired = true;
+        }
+
+        if (!TryObserveRobloxProcess(newRobloxProcess, out var settledIdentity) || settledIdentity != launchedIdentity)
+        {
+            Log($"The Roblox client for {item.Label} exited or changed identity during startup settling.");
+            return (false, "Client exited during startup settling");
         }
 
         Log($"{item.Label} is running.");
@@ -1347,7 +1371,8 @@ public partial class MainWindow : Window
         ? game.Url
         : CustomUrlBox.Text.Trim();
 
-    private async Task<bool> NavigateAndAutoLaunchAsync(string gameUrl, CancellationToken cancellationToken)
+    private async Task<bool> NavigateAndAutoLaunchAsync(string gameUrl, CancellationToken cancellationToken,
+        Func<string, Task>? prepareNativeClient = null)
     {
         var browser = _browser!;
         var navigationFinished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1378,6 +1403,9 @@ public partial class MainWindow : Window
         }
 
         var pendingLaunch = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _externalLaunchCancellationToken = requestCancellation.Token;
+        _externalLaunchPreparation = prepareNativeClient;
         _externalLaunchRequest = pendingLaunch;
         try
         {
@@ -1429,6 +1457,8 @@ public partial class MainWindow : Window
         }
         finally
         {
+            requestCancellation.Cancel();
+            _externalLaunchPreparation = null;
             Interlocked.CompareExchange(ref _externalLaunchRequest, null, pendingLaunch);
         }
     }
@@ -1436,14 +1466,18 @@ public partial class MainWindow : Window
     private static async Task<Process?> WaitForAdditionalRobloxProcessAsync(
         RobloxProcessSnapshot previousProcesses,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<string>? diagnostic = null,
+        Action<ObservedRobloxProcess>? startupUnavailable = null)
     {
-        var deadline = DateTime.UtcNow.Add(timeout);
-        ObservedRobloxProcess? stableCandidate = null;
-        var stableObservations = 0;
-        while (DateTime.UtcNow < deadline)
+        var stopwatch = Stopwatch.StartNew();
+        var startup = new RobloxStartupTracker<ObservedRobloxProcess>();
+        ObservedRobloxProcess? previousCandidate = null;
+        var diagnosed = new HashSet<ObservedRobloxProcess>();
+        while (stopwatch.Elapsed < timeout)
         {
             await Task.Delay(300, cancellationToken);
+            if (stopwatch.Elapsed >= timeout) break;
             var processes = Process.GetProcessesByName("RobloxPlayerBeta");
             var candidates = new List<(Process Process, ObservedRobloxProcess Identity)>();
             foreach (var process in processes)
@@ -1460,25 +1494,29 @@ public partial class MainWindow : Window
                 }
             }
 
+            if (previousCandidate is { } missing &&
+                !candidates.Any(candidate => candidate.Identity == missing) && diagnosed.Add(missing))
+                startupUnavailable?.Invoke(missing);
+
             if (candidates.Count == 1)
             {
                 var candidate = candidates[0];
-                if (candidate.Identity == stableCandidate)
-                    stableObservations++;
-                else
-                {
-                    stableCandidate = candidate.Identity;
-                    stableObservations = 1;
-                }
-
-                if (stableObservations >= 3)
+                if (previousCandidate is not null && candidate.Identity != previousCandidate)
+                    diagnostic?.Invoke("Roblox's startup process changed; waiting for the replacement client to finish startup.");
+                previousCandidate = candidate.Identity;
+                // Keep the original launch deadline and baseline across an
+                // updater handoff. Never reuse the consumed launch ticket or
+                // count a short-lived updating player as a running account.
+                if (startup.Observe(candidate.Identity, stopwatch.Elapsed))
                     return candidate.Process;
                 candidate.Process.Dispose();
             }
             else
             {
-                stableCandidate = null;
-                stableObservations = 0;
+                if (previousCandidate is not null && candidates.Count == 0)
+                    diagnostic?.Invoke("Roblox's startup process exited; waiting for a replacement within the launch timeout (an update can restart the client).");
+                previousCandidate = null;
+                startup.Observe(null, stopwatch.Elapsed);
                 foreach (var candidate in candidates) candidate.Process.Dispose();
             }
         }
@@ -1589,7 +1627,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Browser_LaunchingExternalUriScheme(object? sender, CoreWebView2LaunchingExternalUriSchemeEventArgs args)
+    private async void Browser_LaunchingExternalUriScheme(object? sender, CoreWebView2LaunchingExternalUriSchemeEventArgs args)
     {
         args.Cancel = true;
         var pendingLaunch = _externalLaunchRequest;
@@ -1611,8 +1649,14 @@ public partial class MainWindow : Window
 
         try
         {
-            _robloxLauncherService.Start(args.Uri, _settings.PreferredLauncher);
+            var launchRequestUri = args.Uri;
+            await _robloxLauncherService.StartAsync(launchRequestUri, _settings.PreferredLauncher, Log,
+                _externalLaunchCancellationToken, _externalLaunchPreparation);
             pendingLaunch.TrySetResult(true);
+        }
+        catch (OperationCanceledException)
+        {
+            pendingLaunch.TrySetResult(false);
         }
         catch (Exception exception)
         {
@@ -1766,13 +1810,13 @@ public partial class MainWindow : Window
 
             if (Dispatcher.CheckAccess())
             {
-                foreach (var line in lines) Log(line);
+                foreach (var line in lines) Log($"{snapshot.Label}: {line}");
             }
             else
             {
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    foreach (var line in lines) Log(line);
+                    foreach (var line in lines) Log($"{snapshot.Label}: {line}");
                 });
             }
         }
@@ -1786,7 +1830,7 @@ public partial class MainWindow : Window
     {
         if (!string.IsNullOrWhiteSpace(ActivityLog.Text))
         {
-            Clipboard.SetText(ActivityLog.Text);
+            Clipboard.SetText(LauncherBuildInfo.ActivityHeader + Environment.NewLine + ActivityLog.Text);
             Log("Activity log copied to the clipboard.");
         }
     }

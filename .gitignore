@@ -6,6 +6,7 @@
 dist/
 single-file/
 release/
+artifacts/
 
 # Microsoft Sysinternals binaries are downloaded from Microsoft at runtime.
 # Their license does not permit third-party redistribution.

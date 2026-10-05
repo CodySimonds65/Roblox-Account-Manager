@@ -1,4 +1,4 @@
-<Window x:Class="RobloxAltClient.GamePresetDialog"
+<Window Style="{StaticResource {x:Type Window}}" x:Class="RobloxAltClient.GamePresetDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Game preset" Height="360" Width="500"
@@ -32,7 +32,7 @@
         <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
             <Button Content="Cancel" Width="90" Margin="0,16,8,0" Click="Cancel_Click"
                     Style="{StaticResource SecondaryButton}" />
-            <Button x:Name="SaveButton" Content="Save preset" Width="104" Margin="0,16,0,0" Click="Add_Click" IsDefault="True" />
+            <Button Style="{StaticResource PrimaryButton}" x:Name="SaveButton" Content="Save preset" Width="104" Margin="0,16,0,0" Click="Add_Click" IsDefault="True" />
         </StackPanel>
     </Grid>
 </Window>

@@ -55,7 +55,7 @@ public static partial class RobloxLogAutopsy
         var startText = candidate.StartUtc.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture);
         var messages = new List<string>
         {
-            $"Roblox log: {fileName} (client {version}, started {startText})."
+            $"Roblox log: {fileName} (client {version}, started {startText}; matched by start time, not a verified PID match)."
         };
 
         foreach (var line in tail)
@@ -63,7 +63,7 @@ public static partial class RobloxLogAutopsy
             if (line.Contains("updateRequired TRUE", StringComparison.OrdinalIgnoreCase) ||
                 line.Contains("Update mode is chosen as FORCE", StringComparison.OrdinalIgnoreCase))
             {
-                messages.Add("Roblox flagged an update as REQUIRED and forced the client to close for its own updater; the launcher did not kill this client.");
+                messages.Add("The matched Roblox log reports a REQUIRED or forced update. Its updater may restart the client; if it does not return, let Roblox finish updating before retrying this account.");
                 break;
             }
         }
@@ -71,7 +71,7 @@ public static partial class RobloxLogAutopsy
         var channel = tail.Select(line => ChannelRegex().Match(line)).FirstOrDefault(match => match.Success);
         if (channel is not null)
         {
-            messages.Add($"Roblox channel: {channel.Groups["channel"].Value} (feature-test channels force-update frequently; opt out of the Roblox test program for stable clients).");
+            messages.Add($"Roblox channel: {channel.Groups["channel"].Value}.");
         }
 
         var disconnect = tail.FirstOrDefault(line => line.Contains("Sending disconnect with reason", StringComparison.Ordinal));
@@ -80,7 +80,7 @@ public static partial class RobloxLogAutopsy
             var reason = DisconnectReasonRegex().Match(disconnect).Groups["reason"].Value;
             if (reason.Length > 0)
             {
-                messages.Add($"The client left its game session with disconnect reason {reason} (client-initiated).");
+                messages.Add($"The matched log reports disconnect reason {reason} (client-initiated).");
             }
         }
 
@@ -91,6 +91,7 @@ public static partial class RobloxLogAutopsy
     {
         SessionLog? best = null;
         var bestDelta = TimeSpan.MaxValue;
+        var ambiguous = false;
         foreach (var file in Directory.EnumerateFiles(logsDirectory, "*_last.log", SearchOption.TopDirectoryOnly))
         {
             var nameMatch = LogNameRegex().Match(Path.GetFileName(file));
@@ -112,12 +113,17 @@ public static partial class RobloxLogAutopsy
             {
                 bestDelta = delta;
                 best = new SessionLog(file, startUtc);
+                ambiguous = false;
             }
+            else if (delta == bestDelta)
+                ambiguous = true;
         }
 
-        // A one-minute ceiling keeps two accounts launched back-to-back from
-        // borrowing each other's session logs.
-        return bestDelta <= TimeSpan.FromMinutes(1) ? best : null;
+        // The filename timestamp is rounded to seconds. A missing startup log
+        // must not borrow an earlier account's update reason: queued launches
+        // can be much less than a minute apart. Equal matches are ambiguous.
+        return processStartUtc is not null && !ambiguous && bestDelta < TimeSpan.FromSeconds(1)
+            ? best : null;
     }
 
     private static IReadOnlyList<string> ReadTailWithRetry(string path, int maxLines)

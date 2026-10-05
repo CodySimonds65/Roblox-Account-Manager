@@ -1,4 +1,4 @@
-<Window x:Class="RobloxAltClient.PluginConsentWindow"
+<Window Style="{StaticResource {x:Type Window}}" x:Class="RobloxAltClient.PluginConsentWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Plugin permissions" Height="430" Width="560" MinHeight="360"
@@ -14,11 +14,11 @@
         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
             <StackPanel x:Name="CapabilityList" />
         </ScrollViewer>
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+        <WrapPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
             <Button Content="Cancel" Click="Cancel_Click" Style="{StaticResource SecondaryButton}" Padding="18,7" Margin="0,0,8,0" />
             <Button Content="Accept &amp; enable all" Click="EnableAll_Click" Padding="18,7" Margin="0,0,8,0"
                     ToolTip="Grant every permission declared by this plugin and continue." />
-            <Button Content="Save permissions" Click="Save_Click" Padding="18,7" />
-        </StackPanel>
+            <Button Style="{StaticResource PrimaryButton}" Content="Save permissions" Click="Save_Click" Padding="18,7" />
+        </WrapPanel>
     </Grid>
 </Window>
