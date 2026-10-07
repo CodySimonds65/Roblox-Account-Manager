@@ -127,6 +127,56 @@ public sealed class RobloxLaunchRoutingTests
     }
 
     [TestMethod]
+    public async Task PrivateChannelUsesTheOnlyOtherInstalledBuildWhileOtherClientsRun()
+    {
+        var messages = new List<string>();
+        var path = await RobloxLauncherService.ResolveNativePlayerAsync("zallocprofile32stack64mb",
+            (_, _) => throw new System.Net.Http.HttpRequestException("Not authorized", null, System.Net.HttpStatusCode.Unauthorized),
+            _ => null, () => "old-player", () => true, messages.Add, default,
+            _ => Task.FromResult<string?>("private-player"));
+        Assert.AreEqual("private-player", path);
+        Assert.IsTrue(messages.Any(message => message.Contains("private", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    public async Task AmbiguousPrivateChannelBuildDoesNotRiskExistingClients()
+    {
+        var error = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            RobloxLauncherService.ResolveNativePlayerAsync("zallocprofile32stack64mb",
+                (_, _) => throw new System.Net.Http.HttpRequestException("Forbidden", null, System.Net.HttpStatusCode.Forbidden),
+                _ => null, () => "old-player", () => true, null, default,
+                _ => Task.FromResult<string?>(null)));
+        StringAssert.Contains(error.Message, "first in the queue");
+    }
+
+    [TestMethod]
+    public void OnlyOtherBuildNextToProductionIsSelected()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "Roblox-versions-" + Guid.NewGuid().ToString("N"));
+        string Install(string upload)
+        {
+            Directory.CreateDirectory(Path.Combine(root, upload));
+            var player = Path.Combine(root, upload, "RobloxPlayerBeta.exe");
+            File.WriteAllText(player, "");
+            return player;
+        }
+        try
+        {
+            var production = Install("version-02c37bc51a384b8f");
+            Assert.IsNull(RobloxLauncherService.FindOnlyOtherBuild(production));
+            Directory.CreateDirectory(Path.Combine(root, "not-a-version"));
+            var test = Install("version-360298f2a8bd4691");
+            Assert.AreEqual(Path.GetFullPath(test), RobloxLauncherService.FindOnlyOtherBuild(production));
+            Install("version-e7d81637d42c4b23");
+            Assert.IsNull(RobloxLauncherService.FindOnlyOtherBuild(production));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public async Task FirstClientCanPerformItsNormalUpdateWhenRequiredBuildIsMissing()
     {
         var messages = new List<string>();

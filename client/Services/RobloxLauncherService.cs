@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using Microsoft.Win32;
@@ -21,13 +22,42 @@ public sealed class RobloxLauncherService
         Func<string?> findFallback,
         Func<bool> hasRunningClients,
         Action<string>? diagnostic,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<string?>>? findPrivateChannelPlayer = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         string? upload = null;
         try
         {
             upload = await queryVersion(channel, cancellationToken);
+        }
+        catch (HttpRequestException exception) when (channel.Length > 0 &&
+            exception.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+        {
+            // Roblox only answers for private (test) channels with the
+            // enrolled account's session, so the build cannot be looked up.
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!hasRunningClients())
+            {
+                diagnostic?.Invoke($"Channel {channel} is private, so its build can't be looked up; the first client may run its normal updater.");
+                return findFallback();
+            }
+            string? privatePlayer = null;
+            if (findPrivateChannelPlayer is not null)
+            {
+                try
+                {
+                    privatePlayer = await findPrivateChannelPlayer(cancellationToken);
+                }
+                catch (Exception lookup) when (lookup is HttpRequestException or JsonException or IOException or InvalidDataException or UnauthorizedAccessException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            }
+            if (privatePlayer is null)
+                throw new InvalidOperationException($"Channel {channel} is private, so RAM can't look up its Roblox build or tell which installed build it uses. Launch paused to avoid starting an updater while other clients are running. Put this account first in the queue.");
+            diagnostic?.Invoke($"Channel {channel} is private; using the only installed build other than production.");
+            return privatePlayer;
         }
         catch (Exception exception) when (exception is HttpRequestException or JsonException or IOException or OperationCanceledException)
         {
@@ -62,7 +92,8 @@ public sealed class RobloxLauncherService
             var channel = GetLaunchChannel(launchUri, ReadRegisteredChannel());
             diagnostic?.Invoke($"Checking Roblox's required build for channel {DisplayChannel(channel)} (launcher preference: {preference}).");
             executable = await ResolveNativePlayerAsync(channel, QueryVersionUploadAsync,
-                FindInstalledVersion, FindStandardRoblox, HasRunningClients, diagnostic, cancellationToken);
+                FindInstalledVersion, FindStandardRoblox, HasRunningClients, diagnostic, cancellationToken,
+                FindPrivateChannelPlayerAsync);
             if (executable is null && HasRunningClients())
                 throw new InvalidOperationException("No installed Roblox player could be selected safely while other clients are running.");
         }
@@ -148,6 +179,31 @@ public sealed class RobloxLauncherService
     private static bool IsVersionUpload(string? upload) => upload is not null &&
         upload.StartsWith("version-", StringComparison.Ordinal) && upload.Length is > 8 and <= 64 &&
         upload.All(character => char.IsAsciiLetterOrDigit(character) || character == '-');
+
+    private static async Task<string?> FindPrivateChannelPlayerAsync(CancellationToken cancellationToken)
+    {
+        var production = FindInstalledVersion(await QueryVersionUploadAsync("", cancellationToken));
+        return production is null ? null : FindOnlyOtherBuild(production);
+    }
+
+    // A private channel's build is installed next to the production build it
+    // was released from. When the production install holds exactly one other
+    // build, that is the one a private-channel account last ran. Anything
+    // else is ambiguous.
+    internal static string? FindOnlyOtherBuild(string productionPlayer)
+    {
+        var productionDirectory = Path.GetDirectoryName(Path.GetFullPath(productionPlayer));
+        var root = productionDirectory is null ? null : Path.GetDirectoryName(productionDirectory);
+        if (root is null || !Directory.Exists(root)) return null;
+        var others = Directory.EnumerateDirectories(root)
+            .Where(directory => !string.Equals(Path.GetFullPath(directory), productionDirectory, StringComparison.OrdinalIgnoreCase) &&
+                                IsVersionUpload(Path.GetFileName(directory)))
+            .Select(directory => Path.Combine(directory, "RobloxPlayerBeta.exe"))
+            .Where(File.Exists)
+            .Take(2)
+            .ToArray();
+        return others.Length == 1 ? Path.GetFullPath(others[0]) : null;
+    }
 
     internal static string? FindInstalledVersion(string upload) => FindInstalledVersion(upload, GetStandardVersionsDirectories());
 
