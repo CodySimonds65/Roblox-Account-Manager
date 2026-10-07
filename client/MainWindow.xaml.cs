@@ -81,6 +81,41 @@ public partial class MainWindow : Window
 
     private void ClientsView_Click(object sender, RoutedEventArgs e) => ShowClientsView();
 
+    private void ArrangeWindows_Click(object sender, RoutedEventArgs e)
+    {
+        var runtime = ((App)Application.Current).PluginRuntime;
+        var action = (sender as FrameworkElement)?.Tag as string ?? "reset";
+        var running = runtime.Accounts.Snapshot().Where(account => account.IsRunning).ToArray();
+        var docked = running.Count(account => runtime.ClientEmbeddings.IsEmbedded(account.AccountId));
+        // Docked clients are positioned by the Clients view, so Grid tiles them
+        // inside it and Stack or Reset return it to one client at a time.
+        // Undocked windows are arranged on the desktop.
+        var clients = running.Where(account => !runtime.ClientEmbeddings.IsEmbedded(account.AccountId)).ToArray();
+        if (docked > 0)
+        {
+            runtime.ClientEmbeddings.Tiled = action == "grid";
+            if (action == "grid" || ClientsPanel.Visibility == Visibility.Visible) ShowClientsView();
+            Log(action == "grid"
+                ? $"Tiled {docked} docked client(s) in the Clients view."
+                : $"Showing one docked client at a time ({docked} docked).");
+        }
+        if (clients.Length == 0)
+        {
+            if (docked == 0) Log("No running Roblox clients to arrange.");
+            return;
+        }
+        var errors = action switch
+        {
+            "stack" => runtime.WindowArrangement.Stack(clients),
+            "grid" => runtime.WindowArrangement.Grid(clients),
+            _ => runtime.WindowArrangement.Reset(clients)
+        };
+        var verb = action switch { "stack" => "Stacked", "grid" => "Tiled", _ => "Reset" };
+        Log(errors.Count == 0
+            ? $"{verb} {clients.Length} undocked Roblox window(s)."
+            : $"{verb} with {errors.Count} problem(s): {string.Join("; ", errors)}");
+    }
+
     private void ShowClientsView()
     {
         BrowseViewButton.IsEnabled = true;

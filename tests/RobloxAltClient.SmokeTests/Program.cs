@@ -1448,14 +1448,22 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
     Require(!firstRoot.HasChildStyle && !secondRoot.HasChildStyle &&
             firstRoot.HasPopupStyle && secondRoot.HasPopupStyle,
         "Docked windows were converted to child windows instead of remaining top-level overlays.");
-    Require(firstRoot.Owner == nativeHost.Root && secondRoot.Owner == nativeHost.Root,
-        "Docked windows must be owned by the host's top-level window for deterministic z-order.");
+    Require(firstRoot.Owner == firstOriginalOwner && secondRoot.Owner == secondOriginalOwner,
+        "Docked windows must keep their original owner; a cross-process owner attaches RAM's input queue to Roblox's.");
     Require((firstRoot.ExStyle & 0x08000000) == 0 && (secondRoot.ExStyle & 0x08000000) == 0,
         "Docked windows retained WS_EX_NOACTIVATE and could reject physical clicks.");
 
     embeddings.ShowOnly("native-first");
     Require(embeddings.IsVisible("native-first") && firstRoot.Visible && !secondRoot.Visible,
         "Selecting the first native client did not hide every other docked client.");
+    Require(nativeHost.WindowAbove == firstRoot.Handle,
+        "The selected client was not stacked directly above the host window.");
+    nativeHost.BringToTopWithoutActivation();
+    Require(nativeHost.WindowAbove != firstRoot.Handle,
+        "The test fixture could not raise the host above its docked client.");
+    embeddings.KeepSelectedAboveHost();
+    Require(nativeHost.WindowAbove == firstRoot.Handle,
+        "Raising RAM did not re-stack the selected client above it.");
     Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
         "Docking displayed more than one Roblox client at once.");
     for (var iteration = 0; iteration < 120; iteration++)
@@ -1475,12 +1483,34 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
     embeddings.Layout();
     Require(firstRoot.Visible && !secondRoot.Visible,
         "Layout did not hide an identity-valid non-selected client after external visibility and owner drift.");
-    secondRoot.SetOwner(nativeHost.Root);
+    secondRoot.SetOwner(secondOriginalOwner);
     embeddings.ShowOnly("native-second");
     Require(embeddings.IsVisible("native-second") && secondRoot.Visible && !firstRoot.Visible,
         "Selecting the second native client did not transfer exclusive visibility.");
     Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
         "Switching tabs displayed more than one Roblox client at once.");
+
+    embeddings.Tiled = true;
+    embeddings.ShowOnly("native-second");
+    var tiledHost = nativeHost.Bounds;
+    var tileWidth = (tiledHost.Right - tiledHost.Left) / 2;
+    Require(firstRoot.Visible && secondRoot.Visible,
+        "Grid mode did not show every docked client.");
+    Require(firstRoot.Bounds == new WindowBounds(tiledHost.Left, tiledHost.Top, tiledHost.Left + tileWidth, tiledHost.Bottom) &&
+            secondRoot.Bounds == new WindowBounds(tiledHost.Left + tileWidth, tiledHost.Top, tiledHost.Left + 2 * tileWidth, tiledHost.Bottom),
+        "Grid mode did not tile the docked clients side by side in docking order.");
+    nativeHost.BringToTopWithoutActivation();
+    embeddings.KeepSelectedAboveHost();
+    Require(nativeHost.WindowAbove == firstRoot.Handle || nativeHost.WindowAbove == secondRoot.Handle,
+        "Raising RAM did not re-stack the tiled clients above it.");
+    embeddings.HideAll();
+    embeddings.Layout();
+    Require(!firstRoot.Visible && !secondRoot.Visible,
+        "Grid mode re-showed docked clients after the Clients view hid them.");
+    embeddings.Tiled = false;
+    embeddings.ShowOnly("native-second");
+    Require(secondRoot.Visible && !firstRoot.Visible && secondRoot.Bounds == tiledHost,
+        "Leaving grid mode did not return to one full-size client.");
 
     firstRoot.SetOwner(secondRoot.Handle);
     Require(embeddings.TryUnembed("native-first"), "The first native test window could not be undocked.");
@@ -1556,6 +1586,72 @@ finally
 }
 
 Console.WriteLine("Roblox log autopsy smoke tests passed.");
+
+var singleWorkArea = new LayoutRect(0, 0, 1920, 1040);
+var singleGrid = GridLayout.Compute([singleWorkArea], 4);
+Require(singleGrid.SequenceEqual([new LayoutRect(0, 0, 960, 520), new LayoutRect(960, 0, 960, 520),
+        new LayoutRect(0, 520, 960, 520), new LayoutRect(960, 520, 960, 520)]),
+    "GRID on one work area must keep the square tiling.");
+Require(GridLayout.Compute([singleWorkArea], 0).Count == 0, "GRID with no clients must produce no cells.");
+
+var rightMonitor = new LayoutRect(1920, 0, 1920, 1040);
+var leftMonitor = new LayoutRect(-1920, 0, 1920, 1040);
+var spanned = GridLayout.Compute([rightMonitor, leftMonitor], 4);
+Require(spanned.Count == 4 && spanned.Take(2).All(cell => cell.Left < 0) && spanned.Skip(2).All(cell => cell.Left >= 1920),
+    "GRID must split clients evenly across equal monitors in left-to-right order.");
+Require(spanned.All(cell => cell.Width == 960 && cell.Height == 1040),
+    "GRID must tile each monitor's share inside that monitor's work area.");
+Require(GridLayout.Distribute([new LayoutRect(0, 0, 1920, 1080), new LayoutRect(1920, 0, 3840, 2160)], 5).SequenceEqual([1, 4]),
+    "GRID must give a larger monitor proportionally more clients.");
+Require(GridLayout.Distribute([new LayoutRect(0, 0, 1920, 1080), new LayoutRect(1920, 0, 2560, 1440)], 1).SequenceEqual([0, 1]),
+    "GRID must place a lone client on the larger monitor.");
+Require(GridLayout.Compute([new LayoutRect(0, 0, 1920, 1040), new LayoutRect(1920, 0, 1280, 1024)], 9).Count == 9,
+    "GRID must place every client when monitors differ in size.");
+Require(GridLayout.Compute([new LayoutRect(0, 0, 200, 100)], 4).All(cell =>
+        cell.Width >= GridLayout.MinimumCellWidth && cell.Height >= GridLayout.MinimumCellHeight),
+    "GRID cells must respect the minimum client size.");
+
+var arrangementStartTicks = Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks;
+using (var normalClient = NativeEmbeddingTestWindow.CreateRoot(100, 100, 400, 300))
+using (var minimizedClient = NativeEmbeddingTestWindow.CreateRoot(140, 140, 420, 320))
+using (var maximizedClient = NativeEmbeddingTestWindow.CreateRoot(180, 180, 440, 340))
+{
+    minimizedClient.Minimize();
+    maximizedClient.Maximize();
+    Require(minimizedClient.Minimized && maximizedClient.Maximized, "The arrangement test windows did not enter their starting states.");
+    var normalBefore = normalClient.Bounds;
+    var maximizedBefore = maximizedClient.Bounds;
+    var foregroundBefore = NativeEmbeddingTestWindow.Foreground;
+    ManagedAccountSnapshot ArrangementSnapshot(string id, nint handle) => new(id, id, Environment.ProcessId, arrangementStartTicks,
+        handle, 0, 0, 0, 0, 96, false, DateTime.UtcNow, true);
+    ManagedAccountSnapshot[] arrangementClients =
+    [
+        ArrangementSnapshot("normal", normalClient.Handle),
+        ArrangementSnapshot("minimized", minimizedClient.Handle),
+        ArrangementSnapshot("maximized", maximizedClient.Handle),
+    ];
+    var arrangement = new WindowArrangementService();
+
+    var gridErrors = arrangement.Grid(arrangementClients);
+    Require(gridErrors.Count == 0, $"GRID failed: {string.Join("; ", gridErrors)}");
+    Require(!minimizedClient.Minimized && !maximizedClient.Maximized,
+        "GRID must arrange minimized and maximized clients as normal windows.");
+
+    var resetErrors = arrangement.Reset(arrangementClients);
+    Require(resetErrors.Count == 0, $"RESET failed: {string.Join("; ", resetErrors)}");
+    Require(normalClient.Bounds == normalBefore, "RESET did not restore a normal client's bounds.");
+    Require(minimizedClient.Minimized, "RESET did not restore a minimized client.");
+    Require(maximizedClient.Maximized && maximizedClient.Bounds == maximizedBefore, "RESET did not restore a maximized client.");
+    Require(NativeEmbeddingTestWindow.Foreground == foregroundBefore, "Window arrangement changed the foreground window.");
+
+    var stackErrors = arrangement.Stack(arrangementClients);
+    Require(stackErrors.Count == 0 && !minimizedClient.Minimized && !maximizedClient.Maximized,
+        "STACK must arrange minimized and maximized clients as normal windows.");
+    Require(arrangement.Reset(arrangementClients).Count == 0 && minimizedClient.Minimized && maximizedClient.Maximized,
+        "RESET after STACK did not restore minimized and maximized clients.");
+}
+
+Console.WriteLine("Window arrangement smoke tests passed.");
 
 static SecurityIdentifier? GetMandatoryLabelSid(GenericAce ace)
 {

@@ -14,6 +14,8 @@ public sealed class ClientEmbeddingService
     private readonly object _gate = new();
     private readonly Dictionary<string, EmbeddedWindow> _embedded = new(StringComparer.Ordinal);
     private string? _visibleAccountId;
+    private readonly List<string> _tileOrder = [];
+    private bool _tiled;
     private nint _hostWindow;
     private static readonly TimeSpan IdentityValidationCacheDuration = TimeSpan.FromMilliseconds(250);
 
@@ -58,6 +60,11 @@ public sealed class ClientEmbeddingService
     private const int SwpNoZOrder = 0x0004;
     private const int SwpNoActivate = 0x0010;
     private const int SwpFrameChanged = 0x0020;
+    private const int SwpAsyncWindowPos = 0x4000;
+    private const int SwpNoOwnerZOrder = 0x0200;
+    private const uint GwHwndPrev = 3;
+    private const long WsExTopmost = 0x00000008L;
+    private static readonly nint HwndTop = nint.Zero;
     private const int GwlStyle = -16;
     private const long FrameStyles = WsPopup | WsCaption | WsThickFrame | WsMinimizeBox |
                                       WsMaximizeBox | WsSysMenu | WsDlgFrame | WsBorder;
@@ -68,6 +75,27 @@ public sealed class ClientEmbeddingService
     {
         lock (_gate)
             return _embedded.TryGetValue(accountId, out var embedded) && IsCurrent(embedded, _hostWindow);
+    }
+
+    /// <summary>
+    /// Grid mode: every docked client is shown at once, tiled inside the
+    /// viewport in docking order. The selected client still receives
+    /// automation, and only one client can own foreground at a time.
+    /// Callers apply it through ShowOnly or Layout while the Clients view is
+    /// visible, so setting it never shows a client over another view.
+    /// </summary>
+    public bool Tiled
+    {
+        get { lock (_gate) return _tiled; }
+        set
+        {
+            lock (_gate)
+            {
+                if (_tiled == value) return;
+                _tiled = value;
+                foreach (var embedded in _embedded.Values) embedded.HasAppliedDockBounds = false;
+            }
+        }
     }
 
     public string? VisibleAccountId
@@ -157,15 +185,15 @@ public sealed class ClientEmbeddingService
 
         EmbeddedWindow? existing;
         nint hostWindow;
-        nint ownerWindow;
+        nint hostRoot;
         lock (_gate)
         {
             hostWindow = _hostWindow;
-            ownerWindow = hostWindow == nint.Zero ? nint.Zero : GetAncestor(hostWindow, GaRoot);
+            hostRoot = hostWindow == nint.Zero ? nint.Zero : GetAncestor(hostWindow, GaRoot);
             _embedded.TryGetValue(accountId, out existing);
             if (existing is not null && existing.Root == rootWindow && IsCurrent(existing, hostWindow)) return true;
         }
-        if (hostWindow == nint.Zero || !IsWindow(hostWindow) || ownerWindow == nint.Zero || !IsWindow(ownerWindow)) return false;
+        if (hostWindow == nint.Zero || !IsWindow(hostWindow) || hostRoot == nint.Zero || !IsWindow(hostRoot)) return false;
         if (existing is not null) TryUnembed(accountId);
 
         var originalStyle = GetWindowLongPtr(rootWindow, GwlStyle).ToInt64();
@@ -193,14 +221,10 @@ public sealed class ClientEmbeddingService
             return false;
         }
 
-        // Keep Roblox as a true top-level window. An owned popup can still be
-        // docked over the native viewport while preserving a real Roblox root.
-        if (!TrySetOwner(rootWindow, ownerWindow))
-        {
-            TrySetStyle(rootWindow, originalStyle);
-            TrySetExStyle(rootWindow, originalExStyle);
-            return false;
-        }
+        // Keep Roblox a true top-level window and leave its owner alone. Making
+        // RAM's window its owner across processes implicitly attaches the two
+        // GUI threads' input queues, so RAM's clicks and drags queued behind
+        // Roblox's render loop. Z-order is kept by KeepAboveHost instead.
         SetWindowPos(rootWindow, nint.Zero, 0, 0, 0, 0,
             SwpNoActivate | SwpNoZOrder | SwpNoMove | SwpNoSize | SwpFrameChanged);
 
@@ -217,9 +241,9 @@ public sealed class ClientEmbeddingService
             hasOriginalPlacement,
             expectedProcessStartTimeUtcTicks,
             expectedProcessName,
-            ownerWindow,
+            hostRoot,
             originalVisible);
-        if (GetWindow(rootWindow, GwOwner) != ownerWindow ||
+        if (GetWindow(rootWindow, GwOwner) != originalOwner ||
             GetAncestor(rootWindow, GaRoot) != rootWindow)
         {
             RestoreWindow(embedded);
@@ -233,6 +257,8 @@ public sealed class ClientEmbeddingService
                 return false;
             }
             _embedded[accountId] = embedded;
+            _tileOrder.Remove(accountId);
+            _tileOrder.Add(accountId);
         }
 
         Layout();
@@ -245,6 +271,7 @@ public sealed class ClientEmbeddingService
         lock (_gate)
         {
             if (!_embedded.Remove(accountId, out embedded!)) return false;
+            _tileOrder.Remove(accountId);
             if (string.Equals(_visibleAccountId, accountId, StringComparison.Ordinal)) _visibleAccountId = null;
         }
         RestoreWindow(embedded);
@@ -258,23 +285,42 @@ public sealed class ClientEmbeddingService
         foreach (var id in ids) TryUnembed(id);
     }
 
-    public void Layout()
+    // deferResize keeps the visible client at its current size while the user
+    // is dragging a window edge or splitter: it only follows the viewport's
+    // origin and is clipped to it. Roblox rebuilds its swap chain on every
+    // resize, so resizing it per drag step is what made the drag feel slow.
+    // The final size is applied once the drag ends.
+    public void Layout(bool deferResize = false)
     {
         nint hostWindow;
         EmbeddedWindow[] embedded;
         string? visibleAccountId;
+        bool tiled;
+        string[] tileOrder;
         lock (_gate)
         {
             hostWindow = _hostWindow;
             embedded = _embedded.Values.ToArray();
             visibleAccountId = _visibleAccountId;
+            tiled = _tiled;
+            tileOrder = _tileOrder.Where(_embedded.ContainsKey).ToArray();
         }
         if (hostWindow == nint.Zero || !IsWindow(hostWindow) || !GetClientRect(hostWindow, out var rect)) return;
-        var origin = new POINT();
-        if (!ClientToScreen(hostWindow, ref origin)) return;
-        var width = rect.Right - rect.Left;
-        var height = rect.Bottom - rect.Top;
-        if (width < 64 || height < 64) return;
+        var hostOrigin = new POINT();
+        if (!ClientToScreen(hostWindow, ref hostOrigin)) return;
+        var hostWidth = rect.Right - rect.Left;
+        var hostHeight = rect.Bottom - rect.Top;
+        if (hostWidth < 64 || hostHeight < 64) return;
+
+        // HideAll clears the selection, so a tiled layout shows nothing until
+        // the Clients view selects a client again.
+        var tiles = new Dictionary<string, LayoutRect>(StringComparer.Ordinal);
+        if (tiled && visibleAccountId is not null)
+        {
+            var tiledIds = tileOrder.Where(id => embedded.Any(window => window.AccountId == id && IsCurrent(window, hostWindow))).ToArray();
+            var cells = GridLayout.Tile(new LayoutRect(hostOrigin.X, hostOrigin.Y, hostWidth, hostHeight), tiledIds.Length);
+            for (var index = 0; index < tiledIds.Length; index++) tiles[tiledIds[index]] = cells[index];
+        }
 
         foreach (var window in embedded)
         {
@@ -283,16 +329,52 @@ public sealed class ClientEmbeddingService
                 HideManagedWindowIfIdentityValid(window);
                 continue;
             }
-            var selected = string.Equals(window.AccountId, visibleAccountId, StringComparison.Ordinal);
+            var selected = tiled
+                ? tiles.ContainsKey(window.AccountId)
+                : string.Equals(window.AccountId, visibleAccountId, StringComparison.Ordinal);
             if (!selected)
             {
                 if (IsWindowVisible(window.Root)) HideWindow(window.Root);
+                ClearClip(window);
                 window.HasAppliedDockBounds = false;
                 continue;
             }
+            if (IsWindowVisible(window.Root)) KeepAboveHost(window);
+            var origin = hostOrigin;
+            var width = hostWidth;
+            var height = hostHeight;
+            if (tiled)
+            {
+                var cell = tiles[window.AccountId];
+                origin = new POINT { X = cell.Left, Y = cell.Top };
+                width = cell.Width;
+                height = cell.Height;
+            }
             var target = new RECT(origin.X, origin.Y, origin.X + width, origin.Y + height);
-            if (window.HasAppliedDockBounds && window.LastAppliedDockBounds.Equals(target) && IsWindowVisible(window.Root))
+            if (window.HasAppliedDockBounds && window.LastAppliedDockBounds.Equals(target) && !window.HasClipRegion &&
+                IsWindowVisible(window.Root))
                 continue;
+            if (deferResize && window.HasAppliedDockBounds && IsWindowVisible(window.Root) &&
+                TryFollowWithoutResize(window, origin, width, height))
+                continue;
+            ClearClip(window);
+            // A cross-process SetWindowPos waits for Roblox to handle the move,
+            // including its swap-chain resize, so every step of a live resize
+            // stalled RAM's UI thread. Once the client is visible, post the
+            // geometry change instead. The async request omits SWP_SHOWWINDOW
+            // so a late delivery can never re-show a client hidden since.
+            if (IsWindowVisible(window.Root))
+            {
+                if (!SetWindowPos(window.Root, nint.Zero, target.Left, target.Top, width, height,
+                        SwpNoActivate | SwpNoZOrder | SwpAsyncWindowPos))
+                {
+                    Diagnostics?.Invoke($"Dock layout failed for {window.AccountId} (Win32 {Marshal.GetLastWin32Error()}).");
+                    continue;
+                }
+                window.LastAppliedDockBounds = target;
+                window.HasAppliedDockBounds = true;
+                continue;
+            }
             if (!SetWindowPos(window.Root, nint.Zero, target.Left, target.Top, width, height,
                     SwpNoActivate | SwpNoZOrder | SwpShowWindow))
             {
@@ -301,6 +383,7 @@ public sealed class ClientEmbeddingService
             }
             window.LastAppliedDockBounds = target;
             window.HasAppliedDockBounds = true;
+            KeepAboveHost(window);
             if (!GetWindowRect(window.Root, out var actual) ||
                 actual.Left != origin.X || actual.Top != origin.Y ||
                 actual.Right != origin.X + width || actual.Bottom != origin.Y + height)
@@ -309,6 +392,88 @@ public sealed class ClientEmbeddingService
                                     $"actual {actual.Left},{actual.Top},{actual.Right - actual.Left},{actual.Bottom - actual.Top}.");
             }
         }
+    }
+
+    // Re-stacks the visible client directly above RAM after RAM's own z-order
+    // changes (for example when a click activates RAM). Without an owner,
+    // Windows no longer does this for us.
+    public void KeepSelectedAboveHost()
+    {
+        EmbeddedWindow[] candidates;
+        nint hostWindow;
+        lock (_gate)
+        {
+            hostWindow = _hostWindow;
+            if (_visibleAccountId is null) candidates = [];
+            else if (_tiled) candidates = _embedded.Values.ToArray();
+            else candidates = _embedded.TryGetValue(_visibleAccountId, out var window) ? [window] : [];
+        }
+        foreach (var candidate in candidates)
+        {
+            if (IsCurrent(candidate, hostWindow) && IsWindowVisible(candidate.Root)) KeepAboveHost(candidate);
+        }
+    }
+
+    private static void KeepAboveHost(EmbeddedWindow window)
+    {
+        var above = GetWindow(window.HostRoot, GwHwndPrev);
+        if (above == window.Root) return;
+        // Inserting below a topmost window would make the client topmost too.
+        var insertAfter = above == nint.Zero ||
+                          ((GetWindowLongPtr(above, GwlExStyle).ToInt64() & WsExTopmost) != 0 &&
+                           (GetWindowLongPtr(window.HostRoot, GwlExStyle).ToInt64() & WsExTopmost) == 0)
+            ? HwndTop
+            : above;
+        // Async so a busy Roblox thread never stalls RAM; no SWP_SHOWWINDOW,
+        // so it cannot re-show a client hidden in the meantime.
+        _ = SetWindowPos(window.Root, insertAfter, 0, 0, 0, 0,
+            SwpNoMove | SwpNoSize | SwpNoActivate | SwpNoOwnerZOrder | SwpAsyncWindowPos);
+    }
+
+    private bool TryFollowWithoutResize(EmbeddedWindow window, POINT origin, int width, int height)
+    {
+        var applied = window.LastAppliedDockBounds;
+        var keptWidth = applied.Right - applied.Left;
+        var keptHeight = applied.Bottom - applied.Top;
+        var clipWidth = Math.Min(width, keptWidth);
+        var clipHeight = Math.Min(height, keptHeight);
+        if (clipWidth == keptWidth && clipHeight == keptHeight)
+        {
+            ClearClip(window);
+        }
+        else if (!window.HasClipRegion || window.ClipWidth != clipWidth || window.ClipHeight != clipHeight)
+        {
+            // Without the clip a shrinking viewport would leave the owned
+            // client drawn over RAM's sidebar and activity panel mid-drag.
+            var region = CreateRectRgn(0, 0, clipWidth, clipHeight);
+            if (region == nint.Zero) return false;
+            // redraw: false keeps SetWindowRgn from sending Roblox synchronous
+            // WM_WINDOWPOSCHANGING/CHANGED messages on every drag step.
+            if (SetWindowRgn(window.Root, region, false) == 0)
+            {
+                DeleteObject(region);
+                return false;
+            }
+            window.HasClipRegion = true;
+            window.ClipWidth = clipWidth;
+            window.ClipHeight = clipHeight;
+        }
+
+        if (applied.Left != origin.X || applied.Top != origin.Y)
+        {
+            if (!SetWindowPos(window.Root, nint.Zero, origin.X, origin.Y, 0, 0,
+                    SwpNoSize | SwpNoActivate | SwpNoZOrder | SwpAsyncWindowPos))
+                return false;
+            window.LastAppliedDockBounds = new RECT(origin.X, origin.Y, origin.X + keptWidth, origin.Y + keptHeight);
+        }
+        return true;
+    }
+
+    private static void ClearClip(EmbeddedWindow window)
+    {
+        if (!window.HasClipRegion) return;
+        _ = SetWindowRgn(window.Root, nint.Zero, false);
+        window.HasClipRegion = false;
     }
 
     public void ShowOnly(string accountId)
@@ -328,7 +493,7 @@ public sealed class ClientEmbeddingService
                     HideStaleWindow(embedded);
                     continue;
                 }
-                if (string.Equals(id, _visibleAccountId, StringComparison.Ordinal))
+                if (_tiled || string.Equals(id, _visibleAccountId, StringComparison.Ordinal))
                 {
                     embedded.HasAppliedDockBounds = false;
                 }
@@ -379,8 +544,8 @@ public sealed class ClientEmbeddingService
         if (hostWindow == nint.Zero || embedded.Root == nint.Zero || !IsWindow(embedded.Root)) return false;
         GetWindowThreadProcessId(embedded.Root, out var processId);
         return processId == embedded.ProcessId &&
-               GetAncestor(hostWindow, GaRoot) == embedded.OwnerWindow &&
-               GetWindow(embedded.Root, GwOwner) == embedded.OwnerWindow &&
+               GetAncestor(hostWindow, GaRoot) == embedded.HostRoot &&
+               GetWindow(embedded.Root, GwOwner) == embedded.OriginalOwner &&
                GetAncestor(embedded.Root, GaRoot) == embedded.Root &&
                (GetWindowLongPtr(embedded.Root, GwlStyle).ToInt64() & WsChild) == 0 &&
                (GetWindowLongPtr(embedded.Root, GwlStyle).ToInt64() & WsPopup) != 0 &&
@@ -447,24 +612,16 @@ public sealed class ClientEmbeddingService
         return previous != nint.Zero || Marshal.GetLastPInvokeError() == 0;
     }
 
-    private static bool TrySetOwner(nint window, nint owner)
-    {
-        Marshal.SetLastPInvokeError(0);
-        var previous = SetWindowLongPtr(window, GwlpHwndParent, owner);
-        return previous != nint.Zero || Marshal.GetLastPInvokeError() == 0;
-    }
-
     private static void RestoreWindow(EmbeddedWindow embedded)
     {
         if (!HasImmutableIdentity(embedded)) return;
 
         HideWindow(embedded.Root);
-        _ = SetWindowLongPtr(embedded.Root, GwlpHwndParent, nint.Zero);
+        ClearClip(embedded);
         TrySetStyle(embedded.Root, embedded.OriginalStyle);
         TrySetExStyle(embedded.Root, embedded.OriginalExStyle);
-        // TryEmbed accepts only top-level roots, so restoring the parent is a
-        // no-op. Clear the temporary owner first, then restore the original
-        // owner deterministically.
+        // TryEmbed accepts only top-level roots and never changes the owner,
+        // so restoring both is a no-op unless something else drifted them.
         _ = SetWindowLongPtr(embedded.Root, GwlpHwndParent, embedded.OriginalOwner);
         if (embedded.HasOriginalPlacement)
             _ = SetWindowPlacement(embedded.Root, ref embedded.OriginalPlacement);
@@ -484,8 +641,8 @@ public sealed class ClientEmbeddingService
     private static void RestorePointerState(nint root)
     {
         var foreground = GetForegroundWindow();
-        var owner = GetWindow(root, GwOwner);
-        if (foreground != root && foreground != owner) return;
+        GetWindowThreadProcessId(foreground, out var foregroundProcessId);
+        if (foreground != root && foregroundProcessId != (uint)Environment.ProcessId) return;
         if (!GetClipCursor(out var clip) || !GetWindowRect(root, out var bounds)) return;
         if (clip.Left >= bounds.Left && clip.Top >= bounds.Top &&
             clip.Right <= bounds.Right && clip.Bottom <= bounds.Bottom)
@@ -518,7 +675,7 @@ public sealed class ClientEmbeddingService
             bool hasOriginalPlacement,
             long processStartTimeUtcTicks,
             string? expectedProcessName,
-            nint ownerWindow,
+            nint hostRoot,
             bool originalVisible)
         {
             AccountId = accountId;
@@ -533,7 +690,7 @@ public sealed class ClientEmbeddingService
             HasOriginalPlacement = hasOriginalPlacement;
             ProcessStartTimeUtcTicks = processStartTimeUtcTicks;
             ExpectedProcessName = expectedProcessName;
-            OwnerWindow = ownerWindow;
+            HostRoot = hostRoot;
             OriginalVisible = originalVisible;
         }
 
@@ -548,17 +705,23 @@ public sealed class ClientEmbeddingService
         public bool HasOriginalPlacement { get; }
         public long ProcessStartTimeUtcTicks { get; }
         public string? ExpectedProcessName { get; }
-        public nint OwnerWindow { get; }
+        public nint HostRoot { get; }
         public string AccountId { get; }
         public bool OriginalVisible { get; }
         public DateTime IdentityValidatedUntilUtc { get; set; }
         public bool IdentityValid { get; set; }
         public bool HasAppliedDockBounds { get; set; }
         public RECT LastAppliedDockBounds { get; set; }
+        public bool HasClipRegion { get; set; }
+        public int ClipWidth { get; set; }
+        public int ClipHeight { get; set; }
     }
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)] private static extern nint GetWindowLongPtr(nint window, int index);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)] private static extern nint SetWindowLongPtr(nint window, int index, nint value);
+    [DllImport("user32.dll")] private static extern int SetWindowRgn(nint window, nint region, bool redraw);
+    [DllImport("gdi32.dll")] private static extern nint CreateRectRgn(int left, int top, int right, int bottom);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint handle);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint window, int command);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
