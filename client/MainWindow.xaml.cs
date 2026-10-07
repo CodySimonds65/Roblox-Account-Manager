@@ -85,14 +85,23 @@ public partial class MainWindow : Window
     {
         var runtime = ((App)Application.Current).PluginRuntime;
         var action = (sender as FrameworkElement)?.Tag as string ?? "reset";
-        // Docked clients are positioned by the Clients view; arranging them
-        // here would fight the dock.
-        var clients = runtime.Accounts.Snapshot()
-            .Where(account => account.IsRunning && !runtime.ClientEmbeddings.IsEmbedded(account.AccountId))
-            .ToArray();
+        var running = runtime.Accounts.Snapshot().Where(account => account.IsRunning).ToArray();
+        var docked = running.Count(account => runtime.ClientEmbeddings.IsEmbedded(account.AccountId));
+        // Docked clients are positioned by the Clients view, so Grid tiles them
+        // inside it and Stack or Reset return it to one client at a time.
+        // Undocked windows are arranged on the desktop.
+        var clients = running.Where(account => !runtime.ClientEmbeddings.IsEmbedded(account.AccountId)).ToArray();
+        if (docked > 0)
+        {
+            runtime.ClientEmbeddings.Tiled = action == "grid";
+            if (action == "grid" || ClientsPanel.Visibility == Visibility.Visible) ShowClientsView();
+            Log(action == "grid"
+                ? $"Tiled {docked} docked client(s) in the Clients view."
+                : $"Showing one docked client at a time ({docked} docked).");
+        }
         if (clients.Length == 0)
         {
-            Log("No undocked Roblox windows to arrange.");
+            if (docked == 0) Log("No running Roblox clients to arrange.");
             return;
         }
         var errors = action switch
@@ -103,7 +112,7 @@ public partial class MainWindow : Window
         };
         var verb = action switch { "stack" => "Stacked", "grid" => "Tiled", _ => "Reset" };
         Log(errors.Count == 0
-            ? $"{verb} {clients.Length} Roblox window(s)."
+            ? $"{verb} {clients.Length} undocked Roblox window(s)."
             : $"{verb} with {errors.Count} problem(s): {string.Join("; ", errors)}");
     }
 

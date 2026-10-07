@@ -14,6 +14,8 @@ public sealed class ClientEmbeddingService
     private readonly object _gate = new();
     private readonly Dictionary<string, EmbeddedWindow> _embedded = new(StringComparer.Ordinal);
     private string? _visibleAccountId;
+    private readonly List<string> _tileOrder = [];
+    private bool _tiled;
     private nint _hostWindow;
     private static readonly TimeSpan IdentityValidationCacheDuration = TimeSpan.FromMilliseconds(250);
 
@@ -73,6 +75,27 @@ public sealed class ClientEmbeddingService
     {
         lock (_gate)
             return _embedded.TryGetValue(accountId, out var embedded) && IsCurrent(embedded, _hostWindow);
+    }
+
+    /// <summary>
+    /// Grid mode: every docked client is shown at once, tiled inside the
+    /// viewport in docking order. The selected client still receives
+    /// automation, and only one client can own foreground at a time.
+    /// Callers apply it through ShowOnly or Layout while the Clients view is
+    /// visible, so setting it never shows a client over another view.
+    /// </summary>
+    public bool Tiled
+    {
+        get { lock (_gate) return _tiled; }
+        set
+        {
+            lock (_gate)
+            {
+                if (_tiled == value) return;
+                _tiled = value;
+                foreach (var embedded in _embedded.Values) embedded.HasAppliedDockBounds = false;
+            }
+        }
     }
 
     public string? VisibleAccountId
@@ -234,6 +257,8 @@ public sealed class ClientEmbeddingService
                 return false;
             }
             _embedded[accountId] = embedded;
+            _tileOrder.Remove(accountId);
+            _tileOrder.Add(accountId);
         }
 
         Layout();
@@ -246,6 +271,7 @@ public sealed class ClientEmbeddingService
         lock (_gate)
         {
             if (!_embedded.Remove(accountId, out embedded!)) return false;
+            _tileOrder.Remove(accountId);
             if (string.Equals(_visibleAccountId, accountId, StringComparison.Ordinal)) _visibleAccountId = null;
         }
         RestoreWindow(embedded);
@@ -269,18 +295,32 @@ public sealed class ClientEmbeddingService
         nint hostWindow;
         EmbeddedWindow[] embedded;
         string? visibleAccountId;
+        bool tiled;
+        string[] tileOrder;
         lock (_gate)
         {
             hostWindow = _hostWindow;
             embedded = _embedded.Values.ToArray();
             visibleAccountId = _visibleAccountId;
+            tiled = _tiled;
+            tileOrder = _tileOrder.Where(_embedded.ContainsKey).ToArray();
         }
         if (hostWindow == nint.Zero || !IsWindow(hostWindow) || !GetClientRect(hostWindow, out var rect)) return;
-        var origin = new POINT();
-        if (!ClientToScreen(hostWindow, ref origin)) return;
-        var width = rect.Right - rect.Left;
-        var height = rect.Bottom - rect.Top;
-        if (width < 64 || height < 64) return;
+        var hostOrigin = new POINT();
+        if (!ClientToScreen(hostWindow, ref hostOrigin)) return;
+        var hostWidth = rect.Right - rect.Left;
+        var hostHeight = rect.Bottom - rect.Top;
+        if (hostWidth < 64 || hostHeight < 64) return;
+
+        // HideAll clears the selection, so a tiled layout shows nothing until
+        // the Clients view selects a client again.
+        var tiles = new Dictionary<string, LayoutRect>(StringComparer.Ordinal);
+        if (tiled && visibleAccountId is not null)
+        {
+            var tiledIds = tileOrder.Where(id => embedded.Any(window => window.AccountId == id && IsCurrent(window, hostWindow))).ToArray();
+            var cells = GridLayout.Tile(new LayoutRect(hostOrigin.X, hostOrigin.Y, hostWidth, hostHeight), tiledIds.Length);
+            for (var index = 0; index < tiledIds.Length; index++) tiles[tiledIds[index]] = cells[index];
+        }
 
         foreach (var window in embedded)
         {
@@ -289,7 +329,9 @@ public sealed class ClientEmbeddingService
                 HideManagedWindowIfIdentityValid(window);
                 continue;
             }
-            var selected = string.Equals(window.AccountId, visibleAccountId, StringComparison.Ordinal);
+            var selected = tiled
+                ? tiles.ContainsKey(window.AccountId)
+                : string.Equals(window.AccountId, visibleAccountId, StringComparison.Ordinal);
             if (!selected)
             {
                 if (IsWindowVisible(window.Root)) HideWindow(window.Root);
@@ -298,6 +340,16 @@ public sealed class ClientEmbeddingService
                 continue;
             }
             if (IsWindowVisible(window.Root)) KeepAboveHost(window);
+            var origin = hostOrigin;
+            var width = hostWidth;
+            var height = hostHeight;
+            if (tiled)
+            {
+                var cell = tiles[window.AccountId];
+                origin = new POINT { X = cell.Left, Y = cell.Top };
+                width = cell.Width;
+                height = cell.Height;
+            }
             var target = new RECT(origin.X, origin.Y, origin.X + width, origin.Y + height);
             if (window.HasAppliedDockBounds && window.LastAppliedDockBounds.Equals(target) && !window.HasClipRegion &&
                 IsWindowVisible(window.Root))
@@ -347,15 +399,19 @@ public sealed class ClientEmbeddingService
     // Windows no longer does this for us.
     public void KeepSelectedAboveHost()
     {
-        EmbeddedWindow? selected;
+        EmbeddedWindow[] candidates;
         nint hostWindow;
         lock (_gate)
         {
             hostWindow = _hostWindow;
-            selected = _visibleAccountId is not null && _embedded.TryGetValue(_visibleAccountId, out var window) ? window : null;
+            if (_visibleAccountId is null) candidates = [];
+            else if (_tiled) candidates = _embedded.Values.ToArray();
+            else candidates = _embedded.TryGetValue(_visibleAccountId, out var window) ? [window] : [];
         }
-        if (selected is null || !IsCurrent(selected, hostWindow) || !IsWindowVisible(selected.Root)) return;
-        KeepAboveHost(selected);
+        foreach (var candidate in candidates)
+        {
+            if (IsCurrent(candidate, hostWindow) && IsWindowVisible(candidate.Root)) KeepAboveHost(candidate);
+        }
     }
 
     private static void KeepAboveHost(EmbeddedWindow window)
@@ -437,7 +493,7 @@ public sealed class ClientEmbeddingService
                     HideStaleWindow(embedded);
                     continue;
                 }
-                if (string.Equals(id, _visibleAccountId, StringComparison.Ordinal))
+                if (_tiled || string.Equals(id, _visibleAccountId, StringComparison.Ordinal))
                 {
                     embedded.HasAppliedDockBounds = false;
                 }

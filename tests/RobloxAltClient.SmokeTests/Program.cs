@@ -1490,6 +1490,28 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
     Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
         "Switching tabs displayed more than one Roblox client at once.");
 
+    embeddings.Tiled = true;
+    embeddings.ShowOnly("native-second");
+    var tiledHost = nativeHost.Bounds;
+    var tileWidth = (tiledHost.Right - tiledHost.Left) / 2;
+    Require(firstRoot.Visible && secondRoot.Visible,
+        "Grid mode did not show every docked client.");
+    Require(firstRoot.Bounds == new WindowBounds(tiledHost.Left, tiledHost.Top, tiledHost.Left + tileWidth, tiledHost.Bottom) &&
+            secondRoot.Bounds == new WindowBounds(tiledHost.Left + tileWidth, tiledHost.Top, tiledHost.Left + 2 * tileWidth, tiledHost.Bottom),
+        "Grid mode did not tile the docked clients side by side in docking order.");
+    nativeHost.BringToTopWithoutActivation();
+    embeddings.KeepSelectedAboveHost();
+    Require(nativeHost.WindowAbove == firstRoot.Handle || nativeHost.WindowAbove == secondRoot.Handle,
+        "Raising RAM did not re-stack the tiled clients above it.");
+    embeddings.HideAll();
+    embeddings.Layout();
+    Require(!firstRoot.Visible && !secondRoot.Visible,
+        "Grid mode re-showed docked clients after the Clients view hid them.");
+    embeddings.Tiled = false;
+    embeddings.ShowOnly("native-second");
+    Require(secondRoot.Visible && !firstRoot.Visible && secondRoot.Bounds == tiledHost,
+        "Leaving grid mode did not return to one full-size client.");
+
     firstRoot.SetOwner(secondRoot.Handle);
     Require(embeddings.TryUnembed("native-first"), "The first native test window could not be undocked.");
     Require(firstRoot.Parent == firstOriginalParent && firstRoot.Owner == firstOriginalOwner &&
