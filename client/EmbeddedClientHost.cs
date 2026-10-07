@@ -7,7 +7,7 @@ namespace RobloxAltClient;
 
 /// <summary>
 /// Owns the native viewport boundary used by the Clients view. Roblox remains
-/// a validated top-level owned window docked over this viewport, so Windows
+/// a validated, unowned top-level window docked over this viewport, so Windows
 /// delivers physical input to Roblox without WPF forwarding messages.
 /// </summary>
 public sealed class EmbeddedClientHost : HwndHost

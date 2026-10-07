@@ -358,9 +358,30 @@ public partial class ClientsPanel : UserControl
     {
         const int WmEnterSizeMove = 0x0231;
         const int WmExitSizeMove = 0x0232;
+        const int WmWindowPosChanged = 0x0047;
+        const uint SwpNoZOrder = 0x0004;
         if (message == WmEnterSizeMove) BeginLiveResize();
         else if (message == WmExitSizeMove) EndLiveResize();
+        else if (message == WmWindowPosChanged && lParam != nint.Zero && _viewVisible &&
+                 (System.Runtime.InteropServices.Marshal.PtrToStructure<WINDOWPOS>(lParam).flags & SwpNoZOrder) == 0)
+        {
+            // RAM moved in z-order (usually a click activated it). The docked
+            // client is not owned by RAM, so put it back directly above RAM.
+            _runtime?.ClientEmbeddings.KeepSelectedAboveHost();
+        }
         return nint.Zero;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct WINDOWPOS
+    {
+        public nint hwnd;
+        public nint hwndInsertAfter;
+        public int x;
+        public int y;
+        public int cx;
+        public int cy;
+        public uint flags;
     }
 
     private void OwnerThumb_DragStarted(object sender, DragStartedEventArgs e)

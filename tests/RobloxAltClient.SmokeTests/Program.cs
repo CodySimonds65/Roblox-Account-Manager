@@ -1448,14 +1448,22 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
     Require(!firstRoot.HasChildStyle && !secondRoot.HasChildStyle &&
             firstRoot.HasPopupStyle && secondRoot.HasPopupStyle,
         "Docked windows were converted to child windows instead of remaining top-level overlays.");
-    Require(firstRoot.Owner == nativeHost.Root && secondRoot.Owner == nativeHost.Root,
-        "Docked windows must be owned by the host's top-level window for deterministic z-order.");
+    Require(firstRoot.Owner == firstOriginalOwner && secondRoot.Owner == secondOriginalOwner,
+        "Docked windows must keep their original owner; a cross-process owner attaches RAM's input queue to Roblox's.");
     Require((firstRoot.ExStyle & 0x08000000) == 0 && (secondRoot.ExStyle & 0x08000000) == 0,
         "Docked windows retained WS_EX_NOACTIVATE and could reject physical clicks.");
 
     embeddings.ShowOnly("native-first");
     Require(embeddings.IsVisible("native-first") && firstRoot.Visible && !secondRoot.Visible,
         "Selecting the first native client did not hide every other docked client.");
+    Require(nativeHost.WindowAbove == firstRoot.Handle,
+        "The selected client was not stacked directly above the host window.");
+    nativeHost.BringToTopWithoutActivation();
+    Require(nativeHost.WindowAbove != firstRoot.Handle,
+        "The test fixture could not raise the host above its docked client.");
+    embeddings.KeepSelectedAboveHost();
+    Require(nativeHost.WindowAbove == firstRoot.Handle,
+        "Raising RAM did not re-stack the selected client above it.");
     Require((firstRoot.Visible ? 1 : 0) + (secondRoot.Visible ? 1 : 0) == 1,
         "Docking displayed more than one Roblox client at once.");
     for (var iteration = 0; iteration < 120; iteration++)
@@ -1475,7 +1483,7 @@ using (var secondRoot = NativeEmbeddingTestWindow.CreateRoot(-31800, -31800, 102
     embeddings.Layout();
     Require(firstRoot.Visible && !secondRoot.Visible,
         "Layout did not hide an identity-valid non-selected client after external visibility and owner drift.");
-    secondRoot.SetOwner(nativeHost.Root);
+    secondRoot.SetOwner(secondOriginalOwner);
     embeddings.ShowOnly("native-second");
     Require(embeddings.IsVisible("native-second") && secondRoot.Visible && !firstRoot.Visible,
         "Selecting the second native client did not transfer exclusive visibility.");

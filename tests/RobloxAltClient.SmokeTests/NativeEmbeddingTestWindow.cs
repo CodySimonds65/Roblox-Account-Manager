@@ -26,6 +26,7 @@ internal sealed class NativeEmbeddingTestWindow : IDisposable
     public nint Parent => GetParent(Handle);
     public nint Owner => GetWindow(Handle, GwOwner);
     public nint Root => GetAncestor(Handle, GaRoot);
+    public nint WindowAbove => GetWindow(Handle, 3);
     public bool Visible => IsWindowVisible(Handle);
     public WindowBounds Bounds
     {
@@ -47,6 +48,8 @@ internal sealed class NativeEmbeddingTestWindow : IDisposable
     public void Minimize() => ShowWindow(Handle, 7);
     public void Maximize() => ShowWindow(Handle, 3);
     public void SetOwner(nint owner) => SetWindowLongPtr(Handle, -8, owner);
+    public void BringToTopWithoutActivation() =>
+        SetWindowPos(Handle, nint.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | SwpNoActivate);
     public void SetBounds(int x, int y, int width, int height) =>
         SetWindowPos(Handle, nint.Zero, x, y, width, height, SwpNoZOrder | SwpNoActivate);
 

@@ -59,6 +59,10 @@ public sealed class ClientEmbeddingService
     private const int SwpNoActivate = 0x0010;
     private const int SwpFrameChanged = 0x0020;
     private const int SwpAsyncWindowPos = 0x4000;
+    private const int SwpNoOwnerZOrder = 0x0200;
+    private const uint GwHwndPrev = 3;
+    private const long WsExTopmost = 0x00000008L;
+    private static readonly nint HwndTop = nint.Zero;
     private const int GwlStyle = -16;
     private const long FrameStyles = WsPopup | WsCaption | WsThickFrame | WsMinimizeBox |
                                       WsMaximizeBox | WsSysMenu | WsDlgFrame | WsBorder;
@@ -158,15 +162,15 @@ public sealed class ClientEmbeddingService
 
         EmbeddedWindow? existing;
         nint hostWindow;
-        nint ownerWindow;
+        nint hostRoot;
         lock (_gate)
         {
             hostWindow = _hostWindow;
-            ownerWindow = hostWindow == nint.Zero ? nint.Zero : GetAncestor(hostWindow, GaRoot);
+            hostRoot = hostWindow == nint.Zero ? nint.Zero : GetAncestor(hostWindow, GaRoot);
             _embedded.TryGetValue(accountId, out existing);
             if (existing is not null && existing.Root == rootWindow && IsCurrent(existing, hostWindow)) return true;
         }
-        if (hostWindow == nint.Zero || !IsWindow(hostWindow) || ownerWindow == nint.Zero || !IsWindow(ownerWindow)) return false;
+        if (hostWindow == nint.Zero || !IsWindow(hostWindow) || hostRoot == nint.Zero || !IsWindow(hostRoot)) return false;
         if (existing is not null) TryUnembed(accountId);
 
         var originalStyle = GetWindowLongPtr(rootWindow, GwlStyle).ToInt64();
@@ -194,14 +198,10 @@ public sealed class ClientEmbeddingService
             return false;
         }
 
-        // Keep Roblox as a true top-level window. An owned popup can still be
-        // docked over the native viewport while preserving a real Roblox root.
-        if (!TrySetOwner(rootWindow, ownerWindow))
-        {
-            TrySetStyle(rootWindow, originalStyle);
-            TrySetExStyle(rootWindow, originalExStyle);
-            return false;
-        }
+        // Keep Roblox a true top-level window and leave its owner alone. Making
+        // RAM's window its owner across processes implicitly attaches the two
+        // GUI threads' input queues, so RAM's clicks and drags queued behind
+        // Roblox's render loop. Z-order is kept by KeepAboveHost instead.
         SetWindowPos(rootWindow, nint.Zero, 0, 0, 0, 0,
             SwpNoActivate | SwpNoZOrder | SwpNoMove | SwpNoSize | SwpFrameChanged);
 
@@ -218,9 +218,9 @@ public sealed class ClientEmbeddingService
             hasOriginalPlacement,
             expectedProcessStartTimeUtcTicks,
             expectedProcessName,
-            ownerWindow,
+            hostRoot,
             originalVisible);
-        if (GetWindow(rootWindow, GwOwner) != ownerWindow ||
+        if (GetWindow(rootWindow, GwOwner) != originalOwner ||
             GetAncestor(rootWindow, GaRoot) != rootWindow)
         {
             RestoreWindow(embedded);
@@ -297,6 +297,7 @@ public sealed class ClientEmbeddingService
                 window.HasAppliedDockBounds = false;
                 continue;
             }
+            if (IsWindowVisible(window.Root)) KeepAboveHost(window);
             var target = new RECT(origin.X, origin.Y, origin.X + width, origin.Y + height);
             if (window.HasAppliedDockBounds && window.LastAppliedDockBounds.Equals(target) && !window.HasClipRegion &&
                 IsWindowVisible(window.Root))
@@ -330,6 +331,7 @@ public sealed class ClientEmbeddingService
             }
             window.LastAppliedDockBounds = target;
             window.HasAppliedDockBounds = true;
+            KeepAboveHost(window);
             if (!GetWindowRect(window.Root, out var actual) ||
                 actual.Left != origin.X || actual.Top != origin.Y ||
                 actual.Right != origin.X + width || actual.Bottom != origin.Y + height)
@@ -338,6 +340,38 @@ public sealed class ClientEmbeddingService
                                     $"actual {actual.Left},{actual.Top},{actual.Right - actual.Left},{actual.Bottom - actual.Top}.");
             }
         }
+    }
+
+    // Re-stacks the visible client directly above RAM after RAM's own z-order
+    // changes (for example when a click activates RAM). Without an owner,
+    // Windows no longer does this for us.
+    public void KeepSelectedAboveHost()
+    {
+        EmbeddedWindow? selected;
+        nint hostWindow;
+        lock (_gate)
+        {
+            hostWindow = _hostWindow;
+            selected = _visibleAccountId is not null && _embedded.TryGetValue(_visibleAccountId, out var window) ? window : null;
+        }
+        if (selected is null || !IsCurrent(selected, hostWindow) || !IsWindowVisible(selected.Root)) return;
+        KeepAboveHost(selected);
+    }
+
+    private static void KeepAboveHost(EmbeddedWindow window)
+    {
+        var above = GetWindow(window.HostRoot, GwHwndPrev);
+        if (above == window.Root) return;
+        // Inserting below a topmost window would make the client topmost too.
+        var insertAfter = above == nint.Zero ||
+                          ((GetWindowLongPtr(above, GwlExStyle).ToInt64() & WsExTopmost) != 0 &&
+                           (GetWindowLongPtr(window.HostRoot, GwlExStyle).ToInt64() & WsExTopmost) == 0)
+            ? HwndTop
+            : above;
+        // Async so a busy Roblox thread never stalls RAM; no SWP_SHOWWINDOW,
+        // so it cannot re-show a client hidden in the meantime.
+        _ = SetWindowPos(window.Root, insertAfter, 0, 0, 0, 0,
+            SwpNoMove | SwpNoSize | SwpNoActivate | SwpNoOwnerZOrder | SwpAsyncWindowPos);
     }
 
     private bool TryFollowWithoutResize(EmbeddedWindow window, POINT origin, int width, int height)
@@ -357,7 +391,9 @@ public sealed class ClientEmbeddingService
             // client drawn over RAM's sidebar and activity panel mid-drag.
             var region = CreateRectRgn(0, 0, clipWidth, clipHeight);
             if (region == nint.Zero) return false;
-            if (SetWindowRgn(window.Root, region, true) == 0)
+            // redraw: false keeps SetWindowRgn from sending Roblox synchronous
+            // WM_WINDOWPOSCHANGING/CHANGED messages on every drag step.
+            if (SetWindowRgn(window.Root, region, false) == 0)
             {
                 DeleteObject(region);
                 return false;
@@ -380,7 +416,7 @@ public sealed class ClientEmbeddingService
     private static void ClearClip(EmbeddedWindow window)
     {
         if (!window.HasClipRegion) return;
-        _ = SetWindowRgn(window.Root, nint.Zero, true);
+        _ = SetWindowRgn(window.Root, nint.Zero, false);
         window.HasClipRegion = false;
     }
 
@@ -452,8 +488,8 @@ public sealed class ClientEmbeddingService
         if (hostWindow == nint.Zero || embedded.Root == nint.Zero || !IsWindow(embedded.Root)) return false;
         GetWindowThreadProcessId(embedded.Root, out var processId);
         return processId == embedded.ProcessId &&
-               GetAncestor(hostWindow, GaRoot) == embedded.OwnerWindow &&
-               GetWindow(embedded.Root, GwOwner) == embedded.OwnerWindow &&
+               GetAncestor(hostWindow, GaRoot) == embedded.HostRoot &&
+               GetWindow(embedded.Root, GwOwner) == embedded.OriginalOwner &&
                GetAncestor(embedded.Root, GaRoot) == embedded.Root &&
                (GetWindowLongPtr(embedded.Root, GwlStyle).ToInt64() & WsChild) == 0 &&
                (GetWindowLongPtr(embedded.Root, GwlStyle).ToInt64() & WsPopup) != 0 &&
@@ -520,25 +556,16 @@ public sealed class ClientEmbeddingService
         return previous != nint.Zero || Marshal.GetLastPInvokeError() == 0;
     }
 
-    private static bool TrySetOwner(nint window, nint owner)
-    {
-        Marshal.SetLastPInvokeError(0);
-        var previous = SetWindowLongPtr(window, GwlpHwndParent, owner);
-        return previous != nint.Zero || Marshal.GetLastPInvokeError() == 0;
-    }
-
     private static void RestoreWindow(EmbeddedWindow embedded)
     {
         if (!HasImmutableIdentity(embedded)) return;
 
         HideWindow(embedded.Root);
         ClearClip(embedded);
-        _ = SetWindowLongPtr(embedded.Root, GwlpHwndParent, nint.Zero);
         TrySetStyle(embedded.Root, embedded.OriginalStyle);
         TrySetExStyle(embedded.Root, embedded.OriginalExStyle);
-        // TryEmbed accepts only top-level roots, so restoring the parent is a
-        // no-op. Clear the temporary owner first, then restore the original
-        // owner deterministically.
+        // TryEmbed accepts only top-level roots and never changes the owner,
+        // so restoring both is a no-op unless something else drifted them.
         _ = SetWindowLongPtr(embedded.Root, GwlpHwndParent, embedded.OriginalOwner);
         if (embedded.HasOriginalPlacement)
             _ = SetWindowPlacement(embedded.Root, ref embedded.OriginalPlacement);
@@ -558,8 +585,8 @@ public sealed class ClientEmbeddingService
     private static void RestorePointerState(nint root)
     {
         var foreground = GetForegroundWindow();
-        var owner = GetWindow(root, GwOwner);
-        if (foreground != root && foreground != owner) return;
+        GetWindowThreadProcessId(foreground, out var foregroundProcessId);
+        if (foreground != root && foregroundProcessId != (uint)Environment.ProcessId) return;
         if (!GetClipCursor(out var clip) || !GetWindowRect(root, out var bounds)) return;
         if (clip.Left >= bounds.Left && clip.Top >= bounds.Top &&
             clip.Right <= bounds.Right && clip.Bottom <= bounds.Bottom)
@@ -592,7 +619,7 @@ public sealed class ClientEmbeddingService
             bool hasOriginalPlacement,
             long processStartTimeUtcTicks,
             string? expectedProcessName,
-            nint ownerWindow,
+            nint hostRoot,
             bool originalVisible)
         {
             AccountId = accountId;
@@ -607,7 +634,7 @@ public sealed class ClientEmbeddingService
             HasOriginalPlacement = hasOriginalPlacement;
             ProcessStartTimeUtcTicks = processStartTimeUtcTicks;
             ExpectedProcessName = expectedProcessName;
-            OwnerWindow = ownerWindow;
+            HostRoot = hostRoot;
             OriginalVisible = originalVisible;
         }
 
@@ -622,7 +649,7 @@ public sealed class ClientEmbeddingService
         public bool HasOriginalPlacement { get; }
         public long ProcessStartTimeUtcTicks { get; }
         public string? ExpectedProcessName { get; }
-        public nint OwnerWindow { get; }
+        public nint HostRoot { get; }
         public string AccountId { get; }
         public bool OriginalVisible { get; }
         public DateTime IdentityValidatedUntilUtc { get; set; }
