@@ -102,6 +102,7 @@ public sealed class RobloxStartupTests
     [TestMethod]
     [DataRow(22)]
     [DataRow(4)]
+    [DataRow(2)]
     public void MissingStartupLogDoesNotBorrowThePreviousAccountsUpdate(int gapSeconds)
     {
         var root = Path.Combine(Path.GetTempPath(), "Roblox-neighbor-" + Guid.NewGuid().ToString("N"));
@@ -116,6 +117,31 @@ public sealed class RobloxStartupTests
                 nint.Zero, 0, 0, 100, 100, 96, false, currentStart, false);
             var lines = RobloxLogAutopsy.Autopsy(snapshot, root);
             Assert.IsTrue(lines.Single().Contains("No Roblox session log", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    [DataRow(1)]
+    [DataRow(3)]
+    [DataRow(6)]
+    public void LogCreatedDuringStartupIsMatched(int delaySeconds)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "Roblox-delayed-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var processStart = new DateTime(2026, 10, 5, 6, 35, 10, 400, DateTimeKind.Utc);
+            var logStart = processStart.AddSeconds(delaySeconds);
+            File.WriteAllText(Path.Combine(root, $"0.741.0.7411058_{logStart:yyyyMMddTHHmmss}Z_Player_9C1F0_last.log"),
+                "[FLog::UpdateController] updateRequired TRUE");
+            var snapshot = new ManagedAccountSnapshot("four", "Fourth", 200, processStart.Ticks,
+                nint.Zero, 0, 0, 100, 100, 96, false, processStart, false);
+            var lines = RobloxLogAutopsy.Autopsy(snapshot, root);
+            Assert.IsTrue(lines.Any(line => line.Contains("REQUIRED or forced update", StringComparison.Ordinal)));
         }
         finally
         {

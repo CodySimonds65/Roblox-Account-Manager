@@ -87,6 +87,10 @@ public static partial class RobloxLogAutopsy
         return messages;
     }
 
+    // Queued launches wait for each client to stay up through startup, so the
+    // next account's log is always further away than this.
+    internal static readonly TimeSpan MaximumLogCreationDelay = TimeSpan.FromSeconds(6);
+
     private static SessionLog? FindSessionLog(string logsDirectory, DateTime? processStartUtc, DateTime nowUtc)
     {
         SessionLog? best = null;
@@ -106,6 +110,14 @@ public static partial class RobloxLogAutopsy
                 continue;
             }
 
+            // Roblox creates its log while initialising, often a few seconds
+            // after the process starts, and the filename truncates to whole
+            // seconds. A log named before the process started belongs to an
+            // earlier client.
+            if (processStartUtc is not null &&
+                (startUtc <= processStartUtc.Value - TimeSpan.FromSeconds(1) ||
+                 startUtc - processStartUtc.Value > MaximumLogCreationDelay))
+                continue;
             var delta = processStartUtc is not null
                 ? (startUtc - processStartUtc.Value).Duration()
                 : (nowUtc - startUtc).Duration();
@@ -119,11 +131,11 @@ public static partial class RobloxLogAutopsy
                 ambiguous = true;
         }
 
-        // The filename timestamp is rounded to seconds. A missing startup log
-        // must not borrow an earlier account's update reason: queued launches
-        // can be much less than a minute apart. Equal matches are ambiguous.
-        return processStartUtc is not null && !ambiguous && bestDelta < TimeSpan.FromSeconds(1)
-            ? best : null;
+        // A missing startup log must not borrow an earlier account's update
+        // reason: queued launches can be much less than a minute apart, so only
+        // logs created after this process started qualify. Equal matches are
+        // ambiguous.
+        return processStartUtc is not null && !ambiguous ? best : null;
     }
 
     private static IReadOnlyList<string> ReadTailWithRetry(string path, int maxLines)
